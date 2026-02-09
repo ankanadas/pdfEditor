@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Editor</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #f5f5f5;
+    }
+    
+    #app {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    
+    h1 {
+      color: #333;
+      margin: 0 0 20px 0;
+      font-size: 28px;
+    }
+    
+    #toolbar {
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    
+    .toolbar-section {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      padding-right: 15px;
+      border-right: 1px solid #ddd;
+    }
+    
+    .toolbar-section:last-child {
+      border-right: none;
+    }
+    
+    button {
+      padding: 8px 16px;
+      background: #007bff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+    
+    button:hover:not(:disabled) {
+      background: #0056b3;
+    }
+    
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    
+    button.secondary {
+      background: #6c757d;
+    }
+    
+    button.secondary:hover:not(:disabled) {
+      background: #545b62;
+    }
+    
+    input[type="file"] {
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    
+    input[type="text"], input[type="number"] {
+      padding: 6px 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+      width: 150px;
+    }
+    
+    label {
+      font-size: 14px;
+      color: #555;
+      font-weight: 500;
+    }
+    
+    #canvasContainer {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 600px;
+    }
+    
+    #canvas {
+      border: 1px solid #ddd;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      cursor: crosshair;
+      max-width: 100%;
+    }
+    
+    #status {
+      margin-top: 15px;
+      padding: 10px 15px;
+      border-radius: 4px;
+      font-size: 14px;
+      display: none;
+    }
+    
+    #status.success {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+      display: block;
+    }
+    
+    #status.error {
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+      display: block;
+    }
+    
+    #status.info {
+      background: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+      display: block;
+    }
+    
+    .mode-indicator {
+      padding: 6px 12px;
+      background: #e9ecef;
+      border-radius: 4px;
+      font-size: 13px;
+      color: #495057;
+      font-weight: 500;
+    }
+    
+    .mode-indicator.active {
+      background: #007bff;
+      color: white;
+    }
+    
+    #instructions {
+      background: #fff3cd;
+      border: 1px solid #ffeaa7;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      color: #856404;
+    }
+    
+    #instructions h3 {
+      margin: 0 0 10px 0;
+      font-size: 16px;
+    }
+    
+    #instructions ul {
+      margin: 5px 0;
+      padding-left: 20px;
+    }
+    
+    #instructions li {
+      margin: 5px 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h1>📄 PDF Editor</h1>
+    
+    <div id="instructions">
+      <h3>How to use:</h3>
+      <ul>
+        <li><strong>Load PDF:</strong> Click "Choose File" and select a PDF</li>
+        <li><strong>Add Text:</strong> Click "Text Mode", enter text, then click on the PDF</li>
+        <li><strong>Add Signature:</strong> Click "Signature Mode", enter your name, then click on the PDF</li>
+        <li><strong>Save:</strong> Click "Save PDF" to download your edited PDF</li>
+      </ul>
+    </div>
+    
+    <div id="toolbar">
+      <div class="toolbar-section">
+        <input type="file" id="fileInput" accept=".pdf" />
+      </div>
+      
+      <div class="toolbar-section">
+        <button id="textModeBtn" class="secondary">Text Mode</button>
+        <input type="text" id="textInput" placeholder="Enter text..." disabled />
+      </div>
+      
+      <div class="toolbar-section">
+        <button id="signatureModeBtn" class="secondary">Signature Mode</button>
+        <input type="text" id="signatureInput" placeholder="Your name..." disabled />
+      </div>
+      
+      <div class="toolbar-section">
+        <button id="saveBtn" disabled>Save PDF</button>
+        <span class="mode-indicator" id="modeIndicator">No PDF loaded</span>
+      </div>
+    </div>
+    
+    <div id="status"></div>
+    
+    <div id="canvasContainer">
+      <canvas id="canvas"></canvas>
+    </div>
+  </div>
+  
+  <script src="bundle.js"></script>
+</body>
+</html>
