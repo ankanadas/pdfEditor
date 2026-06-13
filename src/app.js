@@ -31,7 +31,10 @@ class PDFEditorApp {
     this.extractedTextItems = []; // Store extracted text items with positions (from PyMuPDF backend)
     this.editableTextBoxes = []; // Array of editable text box overlays
     this.activeEditBox = null; // Currently active edit box
-    this.edits = []; // Track all edits for backend processing
+    this.edits = []; // All pending edits (line replaces, inserts, erases)
+    this.insertOverlays = []; // Draggable/resizable overlays for added text & signatures
+    this.history = [[]]; // Undo/redo snapshots of this.edits
+    this.historyIndex = 0;
     this.isRendering = false; // Prevent multiple simultaneous renders
     this.isCreatingTextBoxes = false; // Prevent duplicate text box creation
     this.eventListenersInitialized = false; // Prevent duplicate event listeners
@@ -72,9 +75,27 @@ class PDFEditorApp {
       this.setMode('signature');
     });
 
+    document.getElementById('eraseModeBtn')?.addEventListener('click', () => {
+      this.setMode('erase');
+    });
+
     // Clear signature button
     document.getElementById('clearSignatureBtn').addEventListener('click', () => {
       this.clearSignature();
+    });
+
+    // Undo / redo
+    document.getElementById('undoBtn')?.addEventListener('click', () => this.undo());
+    document.getElementById('redoBtn')?.addEventListener('click', () => this.redo());
+    window.addEventListener('keydown', (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const t = e.target;
+      const editable = t && (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA');
+      if (editable) return;  // let the browser's native undo work while typing in a field/box
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); this.undo(); }
+      else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); this.redo(); }
     });
 
     // Save button
@@ -95,6 +116,11 @@ class PDFEditorApp {
     this.canvas.addEventListener('click', (e) => {
       this.handleCanvasClick(e);
     });
+
+    // Erase tool: drag a rectangle over content (e.g. a signature) to white it out.
+    this.canvas.addEventListener('mousedown', (e) => this.onEraseStart(e));
+    window.addEventListener('mousemove', (e) => this.onEraseMove(e));
+    window.addEventListener('mouseup', (e) => this.onEraseEnd(e));
     
     // Setup canvas wrapper for text box overlays
     const canvasContainer = document.getElementById('canvasContainer');
@@ -185,6 +211,7 @@ class PDFEditorApp {
       const page = await this.pdfJsDoc.getPage(pageNum + 1);
       const viewport = page.getViewport({ scale: this.scale });
       const textContent = await page.getTextContent();
+      const styles = textContent.styles || {};
 
       textContent.items
         .filter(item => item.str && item.str.trim().length > 0)
@@ -197,6 +224,13 @@ class PDFEditorApp {
           const ascent = fontHeightPx * 0.8;
           const descent = fontHeightPx * 0.2;
 
+          // Best-effort weight/style/family detection from the font name + family.
+          const fam = (((styles[item.fontName] || {}).fontFamily || '') + ' ' + (item.fontName || '')).toLowerCase();
+          const bold = /bold|black|heavy|semibold|cmbx/.test(fam);
+          const italic = /italic|oblique|cmti|cmsl/.test(fam);
+          const isSans = /sans|helvetica|arial|verdana|calibri|segoe|roboto|tahoma|cmss/.test(fam);
+          const serif = !isSans && /serif|times|roman|georgia|garamond|cmr|cmbx|cmti|cmsl|charter|minion/.test(fam);
+
           this.extractedTextItems.push({
             text: item.str,
             pageIndex: pageNum,
@@ -208,7 +242,10 @@ class PDFEditorApp {
             width: widthPx,
             height: fontHeightPx,
             fontSizePx: fontHeightPx,
-            fontName: item.fontName || 'Helvetica'
+            fontName: item.fontName || 'Helvetica',
+            bold: bold,
+            italic: italic,
+            serif: serif
           });
         });
     }
@@ -238,9 +275,11 @@ class PDFEditorApp {
       const fileNameEl = document.getElementById('fileName');
       if (fileNameEl) fileNameEl.textContent = file.name;
 
-      // Store original file
+      // Store original file; start with a clean edit/undo history for the new document
       this.originalFile = file;
-      
+      this.edits = [];
+      this.resetHistory();
+
       // Read file as ArrayBuffer and clone it to prevent detachment
       const arrayBuffer = await file.arrayBuffer();
       this.originalFileData = arrayBuffer.slice(0); // Clone the ArrayBuffer
@@ -311,8 +350,9 @@ class PDFEditorApp {
     this.isRendering = true;
     console.log('Starting render, set isRendering = true');
     
-    // Clear text boxes before rendering
+    // Clear overlays before rendering
     this.clearEditableTextBoxes();
+    this.clearInsertOverlays();
 
     try {
       console.log('Rendering page', this.currentPage + 1);
@@ -340,8 +380,9 @@ class PDFEditorApp {
       await page.render(renderContext).promise;
       console.log('PDF page rendered');
 
-      // Draw any pending added-text / signature inserts for this page on top.
-      this.drawPendingInserts();
+      // Draw any pending erase rectangles and added-text / signature inserts on top.
+      this.drawPendingErases();
+      this.createInsertOverlays();
 
       // In edit mode, show editable text boxes overlaid on the PDF
       if (this.mode === 'edit') {
@@ -422,7 +463,9 @@ class PDFEditorApp {
       div.style.height = (lineBoxPx + 2) + 'px';
       div.style.fontSize = fontSizePx + 'px';
       div.style.lineHeight = lineBoxPx + 'px';
-      div.style.fontFamily = this.getFontFamily(line.fontName);
+      div.style.fontFamily = line.serif ? '"Times New Roman", Times, serif' : 'Arial, Helvetica, sans-serif';
+      div.style.fontWeight = line.bold ? 'bold' : 'normal';
+      div.style.fontStyle = line.italic ? 'italic' : 'normal';
       div.style.color = '#000';
       div.style.padding = '0';
       div.style.margin = '0';
@@ -481,6 +524,9 @@ class PDFEditorApp {
       bottom: line.bottom / s,
       baseline: line.baseline / s,
       fontSize: line.fontSizePx / s,
+      bold: !!line.bold,
+      italic: !!line.italic,
+      serif: !!line.serif,
       newText: newText
     };
   }
@@ -531,7 +577,36 @@ class PDFEditorApp {
     });
 
     if (currentLine) lines.push(currentLine);
+    lines.forEach(line => this.finalizeLineStyle(line));
     return lines;
+  }
+
+  /**
+   * Decide a line's font size and weight from its items. The size is the one used by the
+   * MOST characters (so a stray small glyph like a "•" bullet can't shrink the whole line),
+   * and bold/italic apply when the majority of characters are bold/italic.
+   */
+  finalizeLineStyle(line) {
+    const buckets = new Map();   // rounded height -> { chars, height }
+    let boldChars = 0, italicChars = 0, serifChars = 0, totalChars = 0;
+    for (const it of line.items) {
+      const n = Math.max(1, (it.text || '').trim().length);
+      totalChars += n;
+      if (it.bold) boldChars += n;
+      if (it.italic) italicChars += n;
+      if (it.serif) serifChars += n;
+      const key = Math.round(it.height * 2) / 2;
+      const b = buckets.get(key) || { chars: 0, height: it.height };
+      b.chars += n;
+      b.height = Math.max(b.height, it.height);
+      buckets.set(key, b);
+    }
+    let best = null;
+    for (const b of buckets.values()) if (!best || b.chars > best.chars) best = b;
+    if (best) line.fontSizePx = best.height;
+    line.bold = totalChars > 0 && boldChars * 2 > totalChars;
+    line.italic = totalChars > 0 && italicChars * 2 > totalChars;
+    line.serif = totalChars > 0 && serifChars * 2 >= totalChars;
   }
 
   /**
@@ -595,6 +670,7 @@ class PDFEditorApp {
       this.edits.push(edit);
     }
 
+    this.commitHistory();
     console.log('Tracked edit:', edit);
     this.showStatus(`Updated: "${edit.newText.slice(0, 40)}"`, 'success');
   }
@@ -608,10 +684,11 @@ class PDFEditorApp {
     const textBtn = document.getElementById('textModeBtn');
     const editBtn = document.getElementById('editModeBtn');
     const sigBtn = document.getElementById('signatureModeBtn');
+    const eraseBtn = document.getElementById('eraseModeBtn');
 
     // Highlight the active tool and expose the mode on <body> so the UI (CSS) can
     // show the relevant inputs / cursor for that tool.
-    [textBtn, editBtn, sigBtn].forEach(btn => btn.classList.remove('active'));
+    [textBtn, editBtn, sigBtn, eraseBtn].forEach(btn => btn && btn.classList.remove('active'));
     document.body.dataset.mode = mode || '';
 
     if (mode === 'text') {
@@ -635,8 +712,13 @@ class PDFEditorApp {
       this.clearEditableTextBoxes();
       this.canvas.style.opacity = '1';
       if (previousMode === 'edit') this.renderCurrentPage();
+    } else if (mode === 'erase') {
+      if (eraseBtn) eraseBtn.classList.add('active');
+      this.clearEditableTextBoxes();
+      this.canvas.style.opacity = '1';
+      if (previousMode === 'edit') this.renderCurrentPage();
     }
-    
+
     this.updateModeIndicator();
   }
 
@@ -653,6 +735,9 @@ class PDFEditorApp {
       indicator.classList.add('active');
     } else if (this.mode === 'signature') {
       indicator.textContent = 'Signature Mode Active';
+      indicator.classList.add('active');
+    } else if (this.mode === 'erase') {
+      indicator.textContent = 'Erase Mode - drag over what you want to remove';
       indicator.classList.add('active');
     } else {
       indicator.textContent = 'Select a mode';
@@ -704,33 +789,236 @@ class PDFEditorApp {
       fontSize: fontSize,
       newText: text
     });
+    this.commitHistory();
     this.renderCurrentPage();
   }
 
+  clearInsertOverlays() {
+    const wrap = document.getElementById('canvasWrapper');
+    if (wrap) wrap.querySelectorAll('.insert-overlay').forEach(el => el.remove());
+    this.insertOverlays = [];
+  }
+
   /**
-   * Draw pending inserts (added text / signatures) for the current page onto the canvas
-   * as a live preview. They become permanent in the PDF when the user clicks Save.
+   * Render each pending insert (added text / signature) as a draggable, resizable overlay
+   * so the user can move it into place and size it. Dragging updates the edit's position;
+   * the resize handle changes its font size; the × button deletes it. All changes are
+   * undoable and are written into the PDF (at the same spot) on Save.
    */
-  drawPendingInserts() {
+  createInsertOverlays() {
+    const wrap = document.getElementById('canvasWrapper');
+    if (!wrap) return;
+    const ds = (this.canvas.clientWidth || this.canvas.width) / this.canvas.width;
+    const unit = this.scale * ds;  // PDF points -> displayed CSS px
     const inserts = this.edits.filter(e =>
       e.redact === false && e.pageIndex === this.currentPage && e.newText);
-    if (inserts.length === 0) return;
 
+    inserts.forEach(edit => {
+      const fontPx = edit.fontSize * unit;
+      const ascent = fontPx * 0.8;
+
+      const div = document.createElement('div');
+      div.className = 'insert-overlay';
+      div.textContent = edit.newText;
+      div.style.left = (edit.x * unit) + 'px';
+      div.style.top = (edit.baseline * unit - ascent) + 'px';
+      div.style.fontSize = fontPx + 'px';
+      div.style.lineHeight = fontPx + 'px';
+      div.style.fontStyle = edit.style === 'signature' ? 'italic' : 'normal';
+      div.style.fontFamily = edit.style === 'signature'
+        ? '"Snell Roundhand","Apple Chancery","Brush Script MT",cursive'
+        : 'Arial, Helvetica, sans-serif';
+
+      const del = document.createElement('div');
+      del.className = 'insert-del';
+      del.textContent = '×';
+      const handle = document.createElement('div');
+      handle.className = 'insert-handle';
+      div.appendChild(del);
+      div.appendChild(handle);
+
+      this.wireInsertOverlay(div, del, handle, edit, unit);
+      wrap.appendChild(div);
+      this.insertOverlays.push(div);
+    });
+  }
+
+  /** Attach move / resize / delete behaviour to one insert overlay. */
+  wireInsertOverlay(div, del, handle, edit, unit) {
+    const commitFromDiv = () => {
+      const fontPx = parseFloat(div.style.fontSize);
+      const ascent = fontPx * 0.8;
+      edit.fontSize = fontPx / unit;
+      edit.x = parseFloat(div.style.left) / unit;
+      edit.baseline = (parseFloat(div.style.top) + ascent) / unit;
+      this.commitHistory();
+    };
+
+    // Move (drag the body)
+    div.addEventListener('mousedown', (e) => {
+      if (e.target === del || e.target === handle) return;
+      e.preventDefault(); e.stopPropagation();
+      const sx = e.clientX, sy = e.clientY;
+      const ox = parseFloat(div.style.left), oy = parseFloat(div.style.top);
+      const move = (ev) => {
+        div.style.left = (ox + ev.clientX - sx) + 'px';
+        div.style.top = (oy + ev.clientY - sy) + 'px';
+      };
+      const up = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        commitFromDiv();
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    });
+
+    // Resize (drag the corner handle = change font size)
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const sy = e.clientY;
+      const startFont = parseFloat(div.style.fontSize);
+      const move = (ev) => {
+        const f = Math.max(8, startFont + (ev.clientY - sy));
+        div.style.fontSize = f + 'px';
+        div.style.lineHeight = f + 'px';
+      };
+      const up = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        commitFromDiv();
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    });
+
+    // Delete
+    del.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    del.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      this.edits = this.edits.filter(x => x !== edit);
+      this.commitHistory();
+      this.renderCurrentPage();
+    });
+  }
+
+  // ----- Undo / redo (snapshots of this.edits) -----
+  snapshotEdits() { return this.edits.map(e => ({ ...e })); }
+
+  commitHistory() {
+    this.history = this.history.slice(0, this.historyIndex + 1);
+    this.history.push(this.snapshotEdits());
+    this.historyIndex = this.history.length - 1;
+    this.updateHistoryButtons();
+  }
+
+  resetHistory() {
+    this.history = [this.snapshotEdits()];
+    this.historyIndex = 0;
+    this.updateHistoryButtons();
+  }
+
+  undo() {
+    if (this.historyIndex <= 0) return;
+    this.historyIndex--;
+    this.edits = this.history[this.historyIndex].map(e => ({ ...e }));
+    this.updateHistoryButtons();
+    this.renderCurrentPage();
+    this.showStatus('Undo', 'info');
+  }
+
+  redo() {
+    if (this.historyIndex >= this.history.length - 1) return;
+    this.historyIndex++;
+    this.edits = this.history[this.historyIndex].map(e => ({ ...e }));
+    this.updateHistoryButtons();
+    this.renderCurrentPage();
+    this.showStatus('Redo', 'info');
+  }
+
+  updateHistoryButtons() {
+    const u = document.getElementById('undoBtn');
+    const r = document.getElementById('redoBtn');
+    if (u) u.disabled = this.historyIndex <= 0;
+    if (r) r.disabled = this.historyIndex >= this.history.length - 1;
+  }
+
+  /**
+   * Draw pending erase rectangles (white-out areas, e.g. an old signature) as a preview.
+   */
+  drawPendingErases() {
+    const erases = this.edits.filter(e => e.kind === 'erase' && e.pageIndex === this.currentPage);
+    if (erases.length === 0) return;
     const ctx = this.ctx;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#000';
-    ctx.textBaseline = 'alphabetic';
-    inserts.forEach(e => {
-      const fontPx = e.fontSize * this.scale;
-      if (e.style === 'signature') {
-        ctx.font = `italic ${fontPx}px "Snell Roundhand","Apple Chancery","Brush Script MT",cursive`;
-      } else {
-        ctx.font = `${fontPx}px Arial, Helvetica, sans-serif`;
-      }
-      ctx.fillText(e.newText, e.x * this.scale, e.baseline * this.scale);
+    ctx.fillStyle = '#ffffff';
+    erases.forEach(e => {
+      ctx.fillRect(e.x * this.scale, e.top * this.scale,
+        (e.right - e.x) * this.scale, (e.bottom - e.top) * this.scale);
     });
     ctx.restore();
+  }
+
+  // ----- Erase tool (drag a rectangle to white-out content) -----
+  onEraseStart(event) {
+    if (this.mode !== 'erase' || !this.controller.isLoaded) return;
+    event.preventDefault();
+    const rect = this.canvas.getBoundingClientRect();
+    this.eraseDrag = { startX: event.clientX, startY: event.clientY, rect };
+    const wrap = document.getElementById('canvasWrapper');
+    const sel = document.createElement('div');
+    sel.style.position = 'absolute';
+    sel.style.border = '1.5px dashed #e5484d';
+    sel.style.background = 'rgba(229,72,77,0.12)';
+    sel.style.zIndex = '300';
+    sel.style.pointerEvents = 'none';
+    wrap.appendChild(sel);
+    this.eraseSel = sel;
+  }
+
+  onEraseMove(event) {
+    if (!this.eraseDrag) return;
+    const r = this.eraseDrag.rect;
+    const x0 = this.eraseDrag.startX - r.left, y0 = this.eraseDrag.startY - r.top;
+    const x1 = event.clientX - r.left, y1 = event.clientY - r.top;
+    this.eraseSel.style.left = Math.min(x0, x1) + 'px';
+    this.eraseSel.style.top = Math.min(y0, y1) + 'px';
+    this.eraseSel.style.width = Math.abs(x1 - x0) + 'px';
+    this.eraseSel.style.height = Math.abs(y1 - y0) + 'px';
+  }
+
+  onEraseEnd(event) {
+    if (!this.eraseDrag) return;
+    const r = this.eraseDrag.rect;
+    const x0 = this.eraseDrag.startX - r.left, y0 = this.eraseDrag.startY - r.top;
+    const x1 = event.clientX - r.left, y1 = event.clientY - r.top;
+    if (this.eraseSel) { this.eraseSel.remove(); this.eraseSel = null; }
+    this.eraseDrag = null;
+
+    const leftCss = Math.min(x0, x1), topCss = Math.min(y0, y1);
+    const wCss = Math.abs(x1 - x0), hCss = Math.abs(y1 - y0);
+    if (wCss < 4 || hCss < 4) return;  // ignore stray clicks
+
+    // Displayed px -> intrinsic canvas px -> PDF points (top-left origin).
+    const toIntrinsic = this.canvas.width / r.width;
+    const xPt = (leftCss * toIntrinsic) / this.scale;
+    const topPt = (topCss * toIntrinsic) / this.scale;
+    const wPt = (wCss * toIntrinsic) / this.scale;
+    const hPt = (hCss * toIntrinsic) / this.scale;
+
+    this.edits.push({
+      pageIndex: this.currentPage,
+      kind: 'erase',
+      x: xPt,
+      right: xPt + wPt,
+      top: topPt,
+      bottom: topPt + hPt,
+      newText: ''
+    });
+    this.commitHistory();
+    this.showStatus('Area erased — click Save to apply (Clear to undo)', 'success');
+    this.renderCurrentPage();
   }
 
   async savePDF() {
@@ -746,8 +1034,18 @@ class PDFEditorApp {
         throw new Error('Original PDF data not available');
       }
 
-      // Build the edited PDF entirely in the browser with pdf-lib (no server).
-      const editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
+      // Preferred path: edit the real PDF with pdf-lib (keeps selectable text).
+      // Some PDFs are encrypted — pdf-lib can't decrypt them — so on failure we fall
+      // back to flattening each rendered page (with edits) to an image-based PDF.
+      let editedPdfBytes;
+      let flattened = false;
+      try {
+        editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
+      } catch (vectorErr) {
+        console.warn('Vector save failed, flattening to image PDF instead:', vectorErr);
+        editedPdfBytes = await this.flattenToPdfBytes(this.edits);
+        flattened = true;
+      }
 
       // Download it.
       const blob = new Blob([editedPdfBytes], { type: 'application/pdf' });
@@ -760,19 +1058,75 @@ class PDFEditorApp {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      // Keep editing on top of the saved version: reload + re-extract geometry.
-      this.originalFileData = editedPdfBytes;
-      const loadingTask = pdfjsLib.getDocument({ data: editedPdfBytes.slice(0) });
-      this.pdfJsDoc = await loadingTask.promise;
-      await this.extractTextFromPDFjs();
-      this.edits = [];
-      await this.renderCurrentPage();
-
-      this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
+      if (flattened) {
+        // Flattened output is image-based; keep editing the original document.
+        this.showStatus('Saved a flattened copy — this PDF is protected, so text-level editing wasn\'t possible. To keep selectable text, remove the PDF\'s protection first.', 'info');
+      } else {
+        // Keep editing on top of the saved version: reload + re-extract geometry.
+        this.originalFileData = editedPdfBytes;
+        const loadingTask = pdfjsLib.getDocument({ data: editedPdfBytes.slice(0) });
+        this.pdfJsDoc = await loadingTask.promise;
+        await this.extractTextFromPDFjs();
+        this.edits = [];
+        this.resetHistory();   // the saved file is the new baseline
+        await this.renderCurrentPage();
+        this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
+      }
     } catch (error) {
       console.error('Save error:', error);
       this.showStatus(`Failed to save: ${error.message}`, 'error');
     }
+  }
+
+  /**
+   * Fallback save for PDFs pdf-lib can't edit (e.g. encrypted ones): render each page
+   * with PDF.js, paint the pending edits on top, and rebuild a new PDF from those page
+   * images. Always works, but the result is image-based (text is no longer selectable).
+   */
+  async flattenToPdfBytes(edits) {
+    const out = await PDFDocument.create();
+    const S = 2; // render scale for crisp output
+
+    for (let p = 0; p < this.pdfJsDoc.numPages; p++) {
+      const page = await this.pdfJsDoc.getPage(p + 1);
+      const viewport = page.getViewport({ scale: S });
+      const cnv = document.createElement('canvas');
+      cnv.width = viewport.width;
+      cnv.height = viewport.height;
+      const cx = cnv.getContext('2d');
+      cx.fillStyle = '#ffffff';
+      cx.fillRect(0, 0, cnv.width, cnv.height);
+      await page.render({ canvasContext: cx, viewport }).promise;
+
+      // Paint this page's edits (coords are PDF points, top-left origin -> * S px).
+      edits.filter(e => e.pageIndex === p).forEach(e => {
+        if (e.kind === 'erase' || (e.redact !== false && e.top != null && e.bottom != null)) {
+          cx.fillStyle = '#ffffff';
+          cx.fillRect((e.x - 2) * S, (e.top - 1) * S,
+            ((e.right - e.x) + 4) * S, ((e.bottom - e.top) + 2) * S);
+        }
+        const text = (e.newText || '').replace(/[\r\n]+/g, ' ');
+        if (text) {
+          cx.fillStyle = '#000000';
+          cx.textBaseline = 'alphabetic';
+          const fs = (e.fontSize || 12) * S;
+          const fam = e.style === 'signature'
+            ? '"Snell Roundhand","Apple Chancery","Brush Script MT",cursive'
+            : (e.serif ? '"Times New Roman",Times,serif' : 'Arial,Helvetica,sans-serif');
+          const weight = e.bold ? 'bold ' : '';
+          const slant = (e.italic || e.style === 'signature') ? 'italic ' : '';
+          cx.font = `${slant}${weight}${fs}px ${fam}`;
+          cx.fillText(text, e.x * S, e.baseline * S);
+        }
+      });
+
+      const img = await out.embedPng(cnv.toDataURL('image/png'));
+      const pv = page.getViewport({ scale: 1 });
+      const pg = out.addPage([pv.width, pv.height]);
+      pg.drawImage(img, { x: 0, y: 0, width: pv.width, height: pv.height });
+    }
+
+    return out.save();
   }
 
   /**
@@ -784,19 +1138,40 @@ class PDFEditorApp {
    *  - insert edits (added text / signatures): just draw the text (signatures in italic).
    */
   async applyEditsWithPdfLib(originalBytes, edits) {
-    const pdfDoc = await PDFDocument.load(originalBytes);
-    const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const italic = await pdfDoc.embedFont(StandardFonts.HelveticaOblique);
+    // Many PDFs carry empty-password "permissions" encryption; load them anyway.
+    const pdfDoc = await PDFDocument.load(originalBytes, { ignoreEncryption: true });
+    const sans = {
+      regular: await pdfDoc.embedFont(StandardFonts.Helvetica),
+      bold: await pdfDoc.embedFont(StandardFonts.HelveticaBold),
+      italic: await pdfDoc.embedFont(StandardFonts.HelveticaOblique),
+      boldItalic: await pdfDoc.embedFont(StandardFonts.HelveticaBoldOblique),
+    };
+    const serif = {
+      regular: await pdfDoc.embedFont(StandardFonts.TimesRoman),
+      bold: await pdfDoc.embedFont(StandardFonts.TimesRomanBold),
+      italic: await pdfDoc.embedFont(StandardFonts.TimesRomanItalic),
+      boldItalic: await pdfDoc.embedFont(StandardFonts.TimesRomanBoldItalic),
+    };
     const pages = pdfDoc.getPages();
     const white = rgb(1, 1, 1);
     const black = rgb(0, 0, 0);
+
+    // Match the original line's family (serif→Times, sans→Helvetica) and weight/style.
+    const pickFont = (e) => {
+      if (e.style === 'signature') return sans.italic;
+      const fam = e.serif ? serif : sans;
+      if (e.bold && e.italic) return fam.boldItalic;
+      if (e.bold) return fam.bold;
+      if (e.italic) return fam.italic;
+      return fam.regular;
+    };
 
     for (const edit of edits) {
       const page = pages[edit.pageIndex];
       if (!page) continue;
       const ph = page.getHeight();
       const size = edit.fontSize || 12;
-      const font = edit.style === 'signature' ? italic : regular;
+      const font = pickFont(edit);
       const text = this.sanitizeForStandardFont((edit.newText || '').replace(/[\r\n]+/g, ' '));
 
       // Replace: cover the original line first.
@@ -840,18 +1215,20 @@ class PDFEditorApp {
   }
 
   /**
-   * Remove pending (unsaved) added text and signatures, then re-render. Items already
-   * saved into the PDF are baked in and are not affected.
+   * Remove pending (unsaved) added text, signatures and erase boxes, then re-render.
+   * Text edits made in Edit mode, and items already saved into the PDF, are kept.
    */
   clearSignature() {
     const before = this.edits.length;
-    this.edits = this.edits.filter(e => e.redact !== false);  // keep line edits, drop inserts
+    // Drop inserts (redact === false) and erase boxes; keep line text edits.
+    this.edits = this.edits.filter(e => e.redact !== false && e.kind !== 'erase');
     const removed = before - this.edits.length;
     if (removed > 0) {
+      this.commitHistory();
       this.renderCurrentPage();
-      this.showStatus(`Removed ${removed} added item(s)`, 'info');
+      this.showStatus(`Removed ${removed} unsaved item(s)`, 'info');
     } else {
-      this.showStatus('Nothing to clear (added text/signatures are removed before saving)', 'info');
+      this.showStatus('Nothing to clear', 'info');
     }
   }
 
