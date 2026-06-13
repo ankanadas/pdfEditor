@@ -122,6 +122,10 @@ class PDFEditorApp {
     window.addEventListener('mousemove', (e) => this.onEraseMove(e));
     window.addEventListener('mouseup', (e) => this.onEraseEnd(e));
 
+    // Add-text bold/italic toggles
+    document.getElementById('addBold')?.addEventListener('click', (e) => e.currentTarget.classList.toggle('on'));
+    document.getElementById('addItalic')?.addEventListener('click', (e) => e.currentTarget.classList.toggle('on'));
+
     // Draw-your-own-signature pad
     document.getElementById('drawSignBtn')?.addEventListener('click', () => this.openSignPad());
     document.getElementById('signPadClear')?.addEventListener('click', () => this.signPadClear());
@@ -735,19 +739,19 @@ class PDFEditorApp {
       indicator.textContent = 'No PDF loaded';
       indicator.classList.remove('active');
     } else if (this.mode === 'text') {
-      indicator.textContent = 'Text Mode Active';
+      indicator.textContent = 'Add Text';
       indicator.classList.add('active');
     } else if (this.mode === 'edit') {
-      indicator.textContent = 'Edit Mode Active - Type directly in text boxes';
+      indicator.textContent = 'Editing Text';
       indicator.classList.add('active');
     } else if (this.mode === 'signature') {
-      indicator.textContent = 'Signature Mode Active';
+      indicator.textContent = 'Signature';
       indicator.classList.add('active');
     } else if (this.mode === 'erase') {
-      indicator.textContent = 'Erase Mode - drag over what you want to remove';
+      indicator.textContent = 'Erase';
       indicator.classList.add('active');
     } else {
-      indicator.textContent = 'Select a mode';
+      indicator.textContent = 'Pick a tool';
       indicator.classList.remove('active');
     }
   }
@@ -770,7 +774,12 @@ class PDFEditorApp {
       const text = document.getElementById('textInput').value.trim();
       if (!text) { this.showStatus('Type the text to add first', 'error'); return; }
       const fontSize = parseInt(document.getElementById('fontSize').value, 10) || 14;
-      this.placeInsert(xPt, clickYPt, text, fontSize, 'text');
+      const opts = {
+        fontFamily: document.getElementById('addFont')?.value || 'sans',
+        bold: document.getElementById('addBold')?.classList.contains('on'),
+        italic: document.getElementById('addItalic')?.classList.contains('on'),
+      };
+      this.placeInsert(xPt, clickYPt, text, fontSize, 'text', opts);
       this.showStatus(`Added "${text}" — click Save PDF to keep it`, 'success');
       document.getElementById('textInput').value = '';
     } else if (this.mode === 'signature') {
@@ -786,7 +795,7 @@ class PDFEditorApp {
    * is treated as the top-left of the text, so the baseline sits ~one ascent below it.
    * It is drawn as a preview now and inserted for real by the backend on Save.
    */
-  placeInsert(xPt, topPt, text, fontSize, style) {
+  placeInsert(xPt, topPt, text, fontSize, style, opts = {}) {
     this.edits.push({
       pageIndex: this.currentPage,
       redact: false,            // nothing to remove — this is an insert, not a replace
@@ -794,7 +803,10 @@ class PDFEditorApp {
       x: xPt,
       baseline: topPt + fontSize * 0.8,
       fontSize: fontSize,
-      newText: text
+      newText: text,
+      fontFamily: opts.fontFamily || 'sans',  // 'sans' | 'serif' | 'mono'
+      bold: !!opts.bold,
+      italic: !!opts.italic
     });
     this.commitHistory();
     this.renderCurrentPage();
@@ -1010,10 +1022,17 @@ class PDFEditorApp {
       div.style.top = (edit.baseline * unit - ascent) + 'px';
       div.style.fontSize = fontPx + 'px';
       div.style.lineHeight = fontPx + 'px';
-      div.style.fontStyle = edit.style === 'signature' ? 'italic' : 'normal';
-      div.style.fontFamily = edit.style === 'signature'
-        ? '"Snell Roundhand","Apple Chancery","Brush Script MT",cursive'
-        : 'Arial, Helvetica, sans-serif';
+      if (edit.style === 'signature') {
+        div.style.fontStyle = 'italic';
+        div.style.fontWeight = 'normal';
+        div.style.fontFamily = '"Snell Roundhand","Apple Chancery","Brush Script MT",cursive';
+      } else {
+        div.style.fontWeight = edit.bold ? 'bold' : 'normal';
+        div.style.fontStyle = edit.italic ? 'italic' : 'normal';
+        div.style.fontFamily = edit.fontFamily === 'serif' ? '"Times New Roman",Times,serif'
+          : edit.fontFamily === 'mono' ? '"Courier New",Courier,monospace'
+          : 'Arial,Helvetica,sans-serif';
+      }
 
       const del = document.createElement('div');
       del.className = 'insert-del';
@@ -1301,9 +1320,11 @@ class PDFEditorApp {
           cx.fillStyle = '#000000';
           cx.textBaseline = 'alphabetic';
           const fs = (e.fontSize || 12) * S;
-          const fam = e.style === 'signature'
-            ? '"Snell Roundhand","Apple Chancery","Brush Script MT",cursive'
-            : (e.serif ? '"Times New Roman",Times,serif' : 'Arial,Helvetica,sans-serif');
+          let fam;
+          if (e.style === 'signature') fam = '"Snell Roundhand","Apple Chancery","Brush Script MT",cursive';
+          else if (e.fontFamily === 'serif' || (e.fontFamily == null && e.serif)) fam = '"Times New Roman",Times,serif';
+          else if (e.fontFamily === 'mono') fam = '"Courier New",Courier,monospace';
+          else fam = 'Arial,Helvetica,sans-serif';
           const weight = e.bold ? 'bold ' : '';
           const slant = (e.italic || e.style === 'signature') ? 'italic ' : '';
           cx.font = `${slant}${weight}${fs}px ${fam}`;
@@ -1343,14 +1364,22 @@ class PDFEditorApp {
       italic: await pdfDoc.embedFont(StandardFonts.TimesRomanItalic),
       boldItalic: await pdfDoc.embedFont(StandardFonts.TimesRomanBoldItalic),
     };
+    const mono = {
+      regular: await pdfDoc.embedFont(StandardFonts.Courier),
+      bold: await pdfDoc.embedFont(StandardFonts.CourierBold),
+      italic: await pdfDoc.embedFont(StandardFonts.CourierOblique),
+      boldItalic: await pdfDoc.embedFont(StandardFonts.CourierBoldOblique),
+    };
     const pages = pdfDoc.getPages();
     const white = rgb(1, 1, 1);
     const black = rgb(0, 0, 0);
 
-    // Match the original line's family (serif→Times, sans→Helvetica) and weight/style.
+    // Pick family (added text uses fontFamily; line edits use detected serif) + weight/style.
     const pickFont = (e) => {
       if (e.style === 'signature') return sans.italic;
-      const fam = e.serif ? serif : sans;
+      let fam = sans;
+      if (e.fontFamily === 'serif' || (e.fontFamily == null && e.serif)) fam = serif;
+      else if (e.fontFamily === 'mono') fam = mono;
       if (e.bold && e.italic) return fam.boldItalic;
       if (e.bold) return fam.bold;
       if (e.italic) return fam.italic;
