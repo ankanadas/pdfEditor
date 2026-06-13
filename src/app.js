@@ -172,17 +172,19 @@ class PDFEditorApp {
     }
   }
 
+  /** Enable all the tools/controls that require a loaded PDF. */
+  enableUiAfterLoad() {
+    ['saveBtn', 'textInput', 'signatureInput', 'prevPageBtn', 'nextPageBtn',
+     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'clearSignatureBtn']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+  }
+
   setupControllerEvents() {
     this.controller.on('loaded', (data) => {
       console.log('PDF loaded event received:', data);
       this.showStatus(`PDF loaded successfully! ${data.pageCount} page(s)`, 'success');
       this.updatePageInfo();
-      document.getElementById('saveBtn').disabled = false;
-      document.getElementById('textInput').disabled = false;
-      document.getElementById('signatureInput').disabled = false;
-      document.getElementById('prevPageBtn').disabled = false;
-      document.getElementById('nextPageBtn').disabled = false;
-      document.getElementById('editModeBtn').disabled = false;
+      this.enableUiAfterLoad();
       this.updateModeIndicator();
       
       // Don't auto-select edit mode - let user choose
@@ -268,6 +270,14 @@ class PDFEditorApp {
     const file = event.target.files[0];
     if (!file) return;
 
+    // Opening a new PDF replaces the current one — warn if there are unsaved edits.
+    if (this.edits.length > 0) {
+      const proceed = await this.confirmDialog(
+        'Opening a new PDF will discard your unsaved edits. To revert changes instead, use Undo.'
+      );
+      if (!proceed) { event.target.value = ''; return; }
+    }
+
     // Enforce the size limit before doing any work.
     if (file.size > MAX_FILE_BYTES) {
       const mb = (file.size / (1024 * 1024)).toFixed(1);
@@ -311,13 +321,8 @@ class PDFEditorApp {
         // Don't show error - backend editing will work fine
         console.log('Using backend-only mode for this PDF');
         
-        // Manually enable buttons since controller won't emit 'loaded' event
-        document.getElementById('saveBtn').disabled = false;
-        document.getElementById('textInput').disabled = false;
-        document.getElementById('signatureInput').disabled = false;
-        document.getElementById('prevPageBtn').disabled = false;
-        document.getElementById('nextPageBtn').disabled = false;
-        document.getElementById('editModeBtn').disabled = false;
+        // Manually enable controls since controller won't emit 'loaded' event
+        this.enableUiAfterLoad();
         this.showStatus(`PDF loaded successfully! ${this.pdfJsDoc.numPages} page(s)`, 'success');
       }
       
@@ -391,8 +396,9 @@ class PDFEditorApp {
       await page.render(renderContext).promise;
       console.log('PDF page rendered');
 
-      // Draw any pending erase rectangles and added-text / signature inserts on top.
+      // Draw pending edits on top so they're visible in every mode.
       this.drawPendingErases();
+      if (this.mode !== 'edit') this.drawPendingLineEdits();  // edit mode shows them in boxes
       this.createInsertOverlays();
 
       // In edit mode, show editable text boxes overlaid on the PDF
@@ -455,8 +461,11 @@ class PDFEditorApp {
       const div = document.createElement('div');
       div.contentEditable = 'true';
       div.className = 'editable-text-box';
-      div.dataset.originalText = line.text;
-      div.textContent = line.text;
+      // If this line was already edited, show the edited text (so edits persist on re-render).
+      const pending = this.findLineEdit(line);
+      const shownText = pending ? pending.newText : line.text;
+      div.dataset.originalText = shownText;
+      div.textContent = shownText;
 
       const fontSizePx = line.fontSizePx * displayScale;
       const lineBoxPx = Math.max((line.bottom - line.top) * displayScale, fontSizePx);
@@ -757,8 +766,12 @@ class PDFEditorApp {
   }
 
   handleCanvasClick(event) {
-    if (!this.controller.isLoaded || !this.mode) {
-      this.showStatus('Open a PDF and pick a mode first', 'error');
+    if (!this.controller.isLoaded) {
+      this.showStatus('Open a PDF first.', 'error');
+      return;
+    }
+    if (!this.mode) {
+      this.showStatus('Pick a tool on the left first — Edit, Add, or Sign — then click the page.', 'error');
       return;
     }
     if (this.mode === 'edit') return;  // edit mode is handled by the per-line boxes
@@ -900,6 +913,29 @@ class PDFEditorApp {
 
   closeSignPad() {
     document.getElementById('signPad')?.classList.remove('open');
+  }
+
+  /** Branded yes/no dialog. Resolves true (proceed) or false (cancel). */
+  confirmDialog(message) {
+    return new Promise((resolve) => {
+      const back = document.getElementById('confirmDialog');
+      const msg = document.getElementById('confirmMessage');
+      const ok = document.getElementById('confirmOk');
+      const cancel = document.getElementById('confirmCancel');
+      if (!back || !ok || !cancel) { resolve(window.confirm(message)); return; }
+      msg.textContent = message;
+      back.classList.add('open');
+      const finish = (val) => {
+        back.classList.remove('open');
+        ok.removeEventListener('click', onOk);
+        cancel.removeEventListener('click', onCancel);
+        resolve(val);
+      };
+      const onOk = () => finish(true);
+      const onCancel = () => finish(false);
+      ok.addEventListener('click', onOk);
+      cancel.addEventListener('click', onCancel);
+    });
   }
 
   signPadClear() {
@@ -1163,6 +1199,45 @@ class PDFEditorApp {
         (e.right - e.x) * this.scale, (e.bottom - e.top) * this.scale);
     });
     ctx.restore();
+  }
+
+  /**
+   * Draw pending line text-edits onto the canvas (white-cover the original line, then the
+   * new text) so an edit stays visible in EVERY mode — not only inside the edit boxes.
+   */
+  drawPendingLineEdits() {
+    const S = this.scale;
+    const list = this.edits.filter(e =>
+      e.redact !== false && e.kind !== 'erase' && e.pageIndex === this.currentPage &&
+      e.top != null && e.newText != null);
+    if (list.length === 0) return;
+    const cx = this.ctx;
+    cx.save();
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    list.forEach(e => {
+      cx.fillStyle = '#ffffff';
+      cx.fillRect((e.x - 2) * S, (e.top - 1) * S, ((e.right - e.x) + 4) * S, ((e.bottom - e.top) + 2) * S);
+      const text = (e.newText || '').replace(/[\r\n]+/g, ' ');
+      if (!text) return;
+      cx.fillStyle = '#000000';
+      cx.textBaseline = 'alphabetic';
+      const fs = (e.fontSize || 12) * S;
+      const fam = e.serif ? '"Times New Roman",Times,serif' : 'Arial,Helvetica,sans-serif';
+      const weight = e.bold ? 'bold ' : '';
+      const slant = e.italic ? 'italic ' : '';
+      cx.font = `${slant}${weight}${fs}px ${fam}`;
+      cx.fillText(text, e.x * S, e.baseline * S);
+    });
+    cx.restore();
+  }
+
+  /** Find a pending line-edit that matches a given extracted line (by position). */
+  findLineEdit(line) {
+    const s = this.scale;
+    const xPt = line.left / s, basePt = line.baseline / s;
+    return this.edits.find(e =>
+      e.redact !== false && e.kind !== 'erase' && e.pageIndex === this.currentPage &&
+      Math.abs(e.x - xPt) < 1.5 && Math.abs(e.baseline - basePt) < 1.5);
   }
 
   // ----- Erase tool (drag a rectangle to white-out content) -----
@@ -1446,33 +1521,45 @@ class PDFEditorApp {
   }
 
   /**
-   * Remove pending (unsaved) added text, signatures and erase boxes, then re-render.
-   * Text edits made in Edit mode, and items already saved into the PDF, are kept.
+   * "Discard": drop ALL unsaved changes (added text, signatures, erases, line edits),
+   * reverting to the loaded PDF. Undoable. Items already saved into the file are kept.
    */
   clearSignature() {
-    const before = this.edits.length;
-    // Drop inserts (redact === false) and erase boxes; keep line text edits.
-    this.edits = this.edits.filter(e => e.redact !== false && e.kind !== 'erase');
-    const removed = before - this.edits.length;
-    if (removed > 0) {
-      this.commitHistory();
-      this.renderCurrentPage();
-      this.showStatus(`Removed ${removed} unsaved item(s)`, 'info');
-    } else {
-      this.showStatus('Nothing to clear', 'info');
-    }
+    const n = this.edits.length;
+    if (n === 0) { this.showStatus('Nothing to discard', 'info'); return; }
+    // Discard ALL unsaved changes (added text, signatures, erases, edits). Undoable.
+    this.edits = [];
+    this.commitHistory();
+    this.renderCurrentPage();
+    this.showStatus(`Discarded ${n} unsaved change(s) — press Undo to bring them back`, 'info');
   }
 
   showStatus(message, type) {
     const status = document.getElementById('status');
-    status.textContent = message;
-    status.className = type;
-    
-    if (type === 'success' || type === 'info') {
-      setTimeout(() => {
-        status.style.display = 'none';
-      }, 5000);
-    }
+    if (!status) return;
+    const kind = type || 'info';
+
+    // Build safely (message may contain user text): coloured icon + text.
+    status.className = kind;
+    status.textContent = '';
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    icon.textContent = kind === 'error' ? '!' : kind === 'success' ? '✓' : 'i';
+    const span = document.createElement('span');
+    span.textContent = message;
+    status.append(icon, span);
+
+    // Animate in; shake for errors so they grab attention.
+    status.style.display = 'flex';
+    void status.offsetWidth;
+    status.classList.add('show');
+    if (kind === 'error') { void status.offsetWidth; status.classList.add('shake'); }
+
+    clearTimeout(this._statusTimer);
+    this._statusTimer = setTimeout(() => {
+      status.classList.remove('show', 'shake');
+      setTimeout(() => { if (!status.classList.contains('show')) status.style.display = 'none'; }, 200);
+    }, kind === 'error' ? 6000 : 4000);
   }
 }
 

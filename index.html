@@ -169,13 +169,33 @@
       border: 1px solid #ddd7ff; padding: 6px 11px; border-radius: 999px; font-weight: 600; white-space: nowrap;
     }
 
-    /* Status toast */
+    /* Floating status toast (prominent, centred near the bottom) */
     #status {
-      margin: 10px 16px 0; padding: 10px 14px; border-radius: 9px; font-size: 13.5px; display: none;
+      display: none; position: fixed; left: 50%; bottom: 30px; z-index: 1200;
+      align-items: center; gap: 11px; padding: 14px 20px; border-radius: 12px;
+      font-size: 14.5px; font-weight: 600; max-width: 92vw;
+      box-shadow: 0 14px 40px rgba(20,22,40,.30);
+      opacity: 0; transform: translateX(-50%) translateY(10px);
+      transition: opacity .18s ease, transform .18s ease;
     }
-    #status.success { background: #e9f9ef; color: #15803d; border: 1px solid #cdeed8; display: block; }
-    #status.error   { background: #fdeced; color: #b42318; border: 1px solid #f6cecf; display: block; }
-    #status.info    { background: #eaf2ff; color: #1d4ed8; border: 1px solid #cfe0ff; display: block; }
+    #status.show { display: flex; opacity: 1; transform: translateX(-50%) translateY(0); }
+    #status .toast-icon {
+      width: 24px; height: 24px; flex: 0 0 auto; border-radius: 50%;
+      display: grid; place-items: center; font-size: 15px; font-weight: 800; color: #fff;
+    }
+    #status.success { background: #ecfdf3; color: #08653a; border: 1px solid #abebc6; }
+    #status.success .toast-icon { background: #16a34a; }
+    #status.error   { background: #fff1f1; color: #b42318; border: 1px solid #f6c5c5; }
+    #status.error .toast-icon { background: #e5484d; }
+    #status.info    { background: #eef4ff; color: #1d4ed8; border: 1px solid #cbddff; }
+    #status.info .toast-icon { background: #3b82f6; }
+    #status.shake { animation: toastShake .4s ease; }
+    @keyframes toastShake {
+      0%,100% { transform: translateX(-50%) translateY(0); }
+      25% { transform: translateX(-53%) translateY(0); }
+      50% { transform: translateX(-47%) translateY(0); }
+      75% { transform: translateX(-51%) translateY(0); }
+    }
 
     /* Stage */
     .stage { flex: 1; position: relative; overflow: auto; background: var(--stage); padding: 28px; }
@@ -267,6 +287,20 @@
     }
     .signpad-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
     .signpad-actions .spacer { flex: 1; }
+
+    /* Confirm dialog */
+    .confirm-backdrop {
+      display: none; position: fixed; inset: 0; z-index: 1100;
+      background: rgba(20, 22, 40, .45); align-items: center; justify-content: center;
+    }
+    .confirm-backdrop.open { display: flex; }
+    .confirm-box {
+      background: #fff; border-radius: 14px; padding: 20px; width: 420px; max-width: 92vw;
+      box-shadow: 0 20px 60px rgba(0,0,0,.3);
+    }
+    .confirm-title { font-weight: 700; font-size: 16px; margin-bottom: 6px; }
+    .confirm-msg { color: #4b5563; font-size: 13.5px; line-height: 1.5; }
+    .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   </style>
 </head>
 <body>
@@ -289,22 +323,22 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h10"/><path d="M3 12h7"/><path d="M3 17h6"/><path d="M18.4 8.6a2 2 0 0 1 2.9 2.8l-5.7 5.7-3.4.6.6-3.4Z"/></svg>
         Edit
       </button>
-      <button class="tool" id="textModeBtn" title="Add new text">
+      <button class="tool" id="textModeBtn" disabled title="Add new text">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11"/><path d="M4 11h7"/><path d="M4 16h5"/><path d="M18 13v7"/><path d="M14.5 16.5h7"/></svg>
         Add
       </button>
-      <button class="tool featured" id="signatureModeBtn" title="Type or draw a signature">
+      <button class="tool featured" id="signatureModeBtn" disabled title="Type or draw a signature">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15c2.5 0 3.2-8 5.2-8 1.7 0 1.2 6 3.1 6 1.5 0 1.8-3 3.2-3 1 0 1.3 1.5 2.3 1.5"/><path d="M4 19.5c4-1.5 12-1.5 16 0"/></svg>
         Sign
       </button>
-      <button class="tool" id="eraseModeBtn" title="Drag a box over a signature or any content to remove it">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14 14 4l6 6-7 7H7Z"/><path d="M3 21h10"/></svg>
+      <button class="tool" id="eraseModeBtn" disabled title="Erase: drag a box over existing content (e.g. an old signature) to white it out">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4L13 5a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L13 21Z"/><path d="M22 21H8"/><path d="m5 13 6 6"/></svg>
         Erase
       </button>
       <div class="sep"></div>
-      <button class="tool danger" id="clearSignatureBtn" title="Remove added text / signatures not yet saved">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3 21 8 10 19H5v-5L16 3Z"/><path d="M14 5 19 10"/></svg>
-        Clear
+      <button class="tool danger" id="clearSignatureBtn" disabled title="Discard all of your unsaved changes (you can Undo this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+        Discard
       </button>
     </aside>
 
@@ -415,6 +449,18 @@
       <li><strong>Clear</strong> removes added text/signatures you haven't saved yet.</li>
       <li><strong>Save</strong> downloads the edited PDF.</li>
     </ul>
+  </div>
+
+  <!-- Confirm dialog (e.g. opening a new PDF discards unsaved edits) -->
+  <div id="confirmDialog" class="confirm-backdrop">
+    <div class="confirm-box">
+      <div class="confirm-title">Discard your edits?</div>
+      <div class="confirm-msg" id="confirmMessage"></div>
+      <div class="confirm-actions">
+        <button class="btn" id="confirmCancel" type="button">Cancel</button>
+        <button class="btn primary" id="confirmOk" type="button">Open new PDF</button>
+      </div>
+    </div>
   </div>
 
   <!-- Draw-your-signature pad -->
