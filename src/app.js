@@ -121,7 +121,14 @@ class PDFEditorApp {
     this.canvas.addEventListener('mousedown', (e) => this.onEraseStart(e));
     window.addEventListener('mousemove', (e) => this.onEraseMove(e));
     window.addEventListener('mouseup', (e) => this.onEraseEnd(e));
-    
+
+    // Draw-your-own-signature pad
+    document.getElementById('drawSignBtn')?.addEventListener('click', () => this.openSignPad());
+    document.getElementById('signPadClear')?.addEventListener('click', () => this.signPadClear());
+    document.getElementById('signPadCancel')?.addEventListener('click', () => this.closeSignPad());
+    document.getElementById('signPadAdd')?.addEventListener('click', () => this.signPadAdd());
+    this.initSignaturePad();
+
     // Setup canvas wrapper for text box overlays
     const canvasContainer = document.getElementById('canvasContainer');
     canvasContainer.style.position = 'relative';
@@ -799,6 +806,160 @@ class PDFEditorApp {
     this.insertOverlays = [];
   }
 
+  /** Move / proportional-resize / delete for a drawn-signature image overlay. */
+  wireImageOverlay(box, del, handle, edit, unit) {
+    const commit = () => {
+      edit.x = parseFloat(box.style.left) / unit;
+      edit.top = parseFloat(box.style.top) / unit;
+      edit.width = parseFloat(box.style.width) / unit;
+      edit.height = parseFloat(box.style.height) / unit;
+      this.commitHistory();
+    };
+    box.addEventListener('mousedown', (e) => {
+      if (e.target === del || e.target === handle) return;
+      e.preventDefault(); e.stopPropagation();
+      const sx = e.clientX, sy = e.clientY;
+      const ox = parseFloat(box.style.left), oy = parseFloat(box.style.top);
+      const move = (ev) => {
+        box.style.left = (ox + ev.clientX - sx) + 'px';
+        box.style.top = (oy + ev.clientY - sy) + 'px';
+      };
+      const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); commit(); };
+      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+    });
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const sx = e.clientX;
+      const w0 = parseFloat(box.style.width), h0 = parseFloat(box.style.height);
+      const ar = h0 / w0;
+      const move = (ev) => {
+        const w = Math.max(24, w0 + (ev.clientX - sx));
+        box.style.width = w + 'px';
+        box.style.height = (w * ar) + 'px';
+      };
+      const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); commit(); };
+      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+    });
+    del.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    del.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      this.edits = this.edits.filter(x => x !== edit);
+      this.commitHistory();
+      this.renderCurrentPage();
+    });
+  }
+
+  // ----- Draw-your-own-signature pad -----
+  initSignaturePad() {
+    const c = document.getElementById('signPadCanvas');
+    if (!c) return;
+    const ctx = c.getContext('2d');
+    this._padHasInk = false;
+    let drawing = false;
+    const pos = (e) => {
+      const r = c.getBoundingClientRect();
+      const cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+      const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+      return { x: cx * (c.width / r.width), y: cy * (c.height / r.height) };
+    };
+    const start = (e) => { e.preventDefault(); drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); };
+    const move = (e) => {
+      if (!drawing) return;
+      e.preventDefault();
+      const p = pos(e);
+      ctx.strokeStyle = '#11131c'; ctx.lineWidth = 2.8; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.lineTo(p.x, p.y); ctx.stroke();
+      this._padHasInk = true;
+    };
+    const end = () => { drawing = false; };
+    c.addEventListener('mousedown', start);
+    c.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', end);
+    c.addEventListener('touchstart', start, { passive: false });
+    c.addEventListener('touchmove', move, { passive: false });
+    c.addEventListener('touchend', end);
+  }
+
+  openSignPad() {
+    if (!this.controller.isLoaded) { this.showStatus('Open a PDF first', 'error'); return; }
+    this.signPadClear();
+    document.getElementById('signPad')?.classList.add('open');
+  }
+
+  closeSignPad() {
+    document.getElementById('signPad')?.classList.remove('open');
+  }
+
+  signPadClear() {
+    const c = document.getElementById('signPadCanvas');
+    if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+    this._padHasInk = false;
+  }
+
+  signPadAdd() {
+    const c = document.getElementById('signPadCanvas');
+    if (!c || !this._padHasInk) { this.showStatus('Draw your signature first', 'error'); return; }
+    const trimmed = this.trimCanvas(c);
+    if (!trimmed) { this.showStatus('Draw your signature first', 'error'); return; }
+
+    // Default placement: ~170pt wide (keep aspect), centred-ish on the current page.
+    const pageWpt = this.canvas.width / this.scale;
+    const pageHpt = this.canvas.height / this.scale;
+    const wPt = Math.min(170, pageWpt - 40);
+    const hPt = wPt * (trimmed.h / trimmed.w);
+
+    this.edits.push({
+      pageIndex: this.currentPage,
+      redact: false,
+      kind: 'image',
+      dataUrl: trimmed.dataUrl,
+      x: Math.max(20, (pageWpt - wPt) / 2),
+      top: Math.max(20, pageHpt * 0.45),
+      width: wPt,
+      height: hPt
+    });
+    this.commitHistory();
+    this.closeSignPad();
+    this.renderCurrentPage();
+    this.showStatus('Signature added — drag it into place, resize with the corner', 'success');
+  }
+
+  /** Crop a canvas to its non-transparent content; returns a trimmed PNG data URL + size. */
+  trimCanvas(canvas) {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    const data = ctx.getImageData(0, 0, w, h).data;
+    let minX = w, minY = h, maxX = 0, maxY = 0, found = false;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (data[(y * w + x) * 4 + 3] > 12) {
+          found = true;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (!found) return null;
+    const pad = 8;
+    minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
+    maxX = Math.min(w - 1, maxX + pad); maxY = Math.min(h - 1, maxY + pad);
+    const tw = maxX - minX + 1, th = maxY - minY + 1;
+    const out = document.createElement('canvas');
+    out.width = tw; out.height = th;
+    out.getContext('2d').drawImage(canvas, minX, minY, tw, th, 0, 0, tw, th);
+    return { dataUrl: out.toDataURL('image/png'), w: tw, h: th };
+  }
+
+  /** Load a data-URL into an HTMLImageElement (used by the flatten fallback). */
+  loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = reject;
+      im.src = src;
+    });
+  }
+
   /**
    * Render each pending insert (added text / signature) as a draggable, resizable overlay
    * so the user can move it into place and size it. Dragging updates the edit's position;
@@ -811,9 +972,34 @@ class PDFEditorApp {
     const ds = (this.canvas.clientWidth || this.canvas.width) / this.canvas.width;
     const unit = this.scale * ds;  // PDF points -> displayed CSS px
     const inserts = this.edits.filter(e =>
-      e.redact === false && e.pageIndex === this.currentPage && e.newText);
+      e.redact === false && e.pageIndex === this.currentPage && (e.newText || e.kind === 'image'));
 
     inserts.forEach(edit => {
+      // Drawn-signature image overlay
+      if (edit.kind === 'image' && edit.dataUrl) {
+        const box = document.createElement('div');
+        box.className = 'insert-overlay insert-image';
+        box.style.left = (edit.x * unit) + 'px';
+        box.style.top = (edit.top * unit) + 'px';
+        box.style.width = (edit.width * unit) + 'px';
+        box.style.height = (edit.height * unit) + 'px';
+        const img = document.createElement('img');
+        img.src = edit.dataUrl;
+        img.draggable = false;
+        box.appendChild(img);
+        const delI = document.createElement('div');
+        delI.className = 'insert-del';
+        delI.textContent = '×';
+        const handleI = document.createElement('div');
+        handleI.className = 'insert-handle';
+        box.appendChild(delI);
+        box.appendChild(handleI);
+        this.wireImageOverlay(box, delI, handleI, edit, unit);
+        wrap.appendChild(box);
+        this.insertOverlays.push(box);
+        return;
+      }
+
       const fontPx = edit.fontSize * unit;
       const ascent = fontPx * 0.8;
 
@@ -1099,7 +1285,12 @@ class PDFEditorApp {
       await page.render({ canvasContext: cx, viewport }).promise;
 
       // Paint this page's edits (coords are PDF points, top-left origin -> * S px).
-      edits.filter(e => e.pageIndex === p).forEach(e => {
+      for (const e of edits.filter(e => e.pageIndex === p)) {
+        if (e.kind === 'image' && e.dataUrl) {
+          const im = await this.loadImage(e.dataUrl);
+          cx.drawImage(im, e.x * S, e.top * S, e.width * S, e.height * S);
+          continue;
+        }
         if (e.kind === 'erase' || (e.redact !== false && e.top != null && e.bottom != null)) {
           cx.fillStyle = '#ffffff';
           cx.fillRect((e.x - 2) * S, (e.top - 1) * S,
@@ -1118,7 +1309,7 @@ class PDFEditorApp {
           cx.font = `${slant}${weight}${fs}px ${fam}`;
           cx.fillText(text, e.x * S, e.baseline * S);
         }
-      });
+      }
 
       const img = await out.embedPng(cnv.toDataURL('image/png'));
       const pv = page.getViewport({ scale: 1 });
@@ -1170,6 +1361,17 @@ class PDFEditorApp {
       const page = pages[edit.pageIndex];
       if (!page) continue;
       const ph = page.getHeight();
+
+      // Drawn-signature image: embed and place (top-left origin -> bottom-left).
+      if (edit.kind === 'image' && edit.dataUrl) {
+        const png = await pdfDoc.embedPng(edit.dataUrl);
+        page.drawImage(png, {
+          x: edit.x, y: ph - edit.top - edit.height,
+          width: edit.width, height: edit.height,
+        });
+        continue;
+      }
+
       const size = edit.fontSize || 12;
       const font = pickFont(edit);
       const text = this.sanitizeForStandardFont((edit.newText || '').replace(/[\r\n]+/g, ' '));

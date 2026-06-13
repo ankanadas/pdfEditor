@@ -213,6 +213,27 @@
       border: 2px solid #fff; border-radius: 50%; cursor: pointer; font-size: 13px; display: none;
     }
     .insert-overlay:hover .insert-handle, .insert-overlay:hover .insert-del { display: block; }
+    .insert-overlay.insert-image { padding: 0; }
+    .insert-overlay.insert-image img { display: block; width: 100%; height: 100%; pointer-events: none; }
+
+    /* Draw-your-signature pad */
+    .signpad-backdrop {
+      display: none; position: fixed; inset: 0; z-index: 1000;
+      background: rgba(20, 22, 40, .45); align-items: center; justify-content: center;
+    }
+    .signpad-backdrop.open { display: flex; }
+    .signpad {
+      background: #fff; border-radius: 14px; padding: 18px 18px 14px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.3); width: 560px; max-width: 92vw;
+    }
+    .signpad-title { font-weight: 700; font-size: 16px; margin-bottom: 4px; }
+    .signpad-sub { color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
+    #signPadCanvas {
+      width: 100%; height: 190px; border: 2px dashed #cfd2e6; border-radius: 10px;
+      background: #fff; touch-action: none; cursor: crosshair; display: block;
+    }
+    .signpad-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+    .signpad-actions .spacer { flex: 1; }
   </style>
 </head>
 <body>
@@ -298,8 +319,8 @@
           <span class="hint">click on the page to place</span>
         </div>
         <div class="ctx ctx-sign">
-          <input type="text" id="signatureInput" class="field" placeholder="Your name…" disabled />
-          <span class="hint">click on the page to place</span>
+          <input type="text" id="signatureInput" class="field" placeholder="Type name, click page…" disabled />
+          <button class="btn" id="drawSignBtn" type="button" title="Draw your signature">✎ Draw</button>
         </div>
 
         <div class="spacer"></div>
@@ -339,10 +360,26 @@
       <li><strong>Open</strong> a PDF (button or drag &amp; drop).</li>
       <li><strong>Edit</strong> — click any line and type to change it in place.</li>
       <li><strong>Text</strong> — type, then click the page to drop new text.</li>
-      <li><strong>Sign</strong> — type your name, click the page to place it.</li>
+      <li><strong>Sign</strong> — type your name (click page), or hit <strong>✎ Draw</strong> to draw it.</li>
+      <li><strong>Erase</strong> — drag a box over anything (e.g. an old signature) to remove it.</li>
       <li><strong>Clear</strong> removes added text/signatures you haven't saved yet.</li>
       <li><strong>Save</strong> downloads the edited PDF.</li>
     </ul>
+  </div>
+
+  <!-- Draw-your-signature pad -->
+  <div id="signPad" class="signpad-backdrop">
+    <div class="signpad">
+      <div class="signpad-title">Draw your signature</div>
+      <div class="signpad-sub">Use your mouse or trackpad to sign below, then add it to the page.</div>
+      <canvas id="signPadCanvas" width="700" height="220"></canvas>
+      <div class="signpad-actions">
+        <button class="btn" id="signPadClear" type="button">Clear</button>
+        <span class="spacer"></span>
+        <button class="btn" id="signPadCancel" type="button">Cancel</button>
+        <button class="btn primary" id="signPadAdd" type="button">Add to page</button>
+      </div>
+    </div>
   </div>
 
   <script>
