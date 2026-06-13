@@ -91,6 +91,10 @@
     .tool.active { background: #efecff; color: var(--brand); border-color: #ddd7ff; }
     .tool:disabled { opacity: .4; cursor: not-allowed; }
     .tool.danger:hover:not(:disabled) { background: #fdeced; color: var(--danger); }
+    /* Primary tools (Edit & Sign): larger, brand-coloured, bolder so they stand out */
+    .tool.featured { color: var(--brand); font-weight: 700; }
+    .tool.featured svg { width: 28px; height: 28px; stroke-width: 2.2; }
+    .tool.featured:hover:not(:disabled) { background: #efecff; color: var(--brand); }
     .sidebar .sep { width: 60%; height: 1px; background: var(--line); margin: 6px 0; }
 
     /* Main column */
@@ -117,17 +121,46 @@
     .pager { display: flex; align-items: center; gap: 6px; }
     .pager #pageInfo { font-size: 13px; color: var(--muted); min-width: 92px; text-align: center; }
 
-    /* Contextual inputs (shown per active tool) */
-    .ctx { display: none; align-items: center; gap: 8px; }
+    /* Prominent contextual action bar (shows what to do for the active tool) */
+    .action-bar {
+      display: none; align-items: center; gap: 10px;
+      padding: 12px 16px; background: #f3f1ff; border-bottom: 1px solid #e2dcff;
+      flex: 0 0 auto; animation: abIn .15s ease;
+    }
+    @keyframes abIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+    body[data-mode="edit"] .action-bar,
+    body[data-mode="text"] .action-bar,
+    body[data-mode="signature"] .action-bar,
+    body[data-mode="erase"] .action-bar { display: flex; }
+    .ab-step {
+      width: 22px; height: 22px; flex: 0 0 auto; border-radius: 50%;
+      background: var(--brand); color: #fff; font-size: 12px; font-weight: 700;
+      display: grid; place-items: center;
+    }
+    .ab-label { font-weight: 700; color: var(--brand-dark); font-size: 14px; }
+    .ab-hint { font-size: 13px; color: #6a5acd; }
+    .ab-or { font-size: 12px; font-weight: 700; color: #8a7fdb; letter-spacing: .5px; }
+    #addFont { padding: 8px 10px; }
+    .ab-toggle {
+      width: 34px; height: 34px; border: 1px solid #c9bfff; background: #fff; color: var(--ink);
+      border-radius: 8px; cursor: pointer; font-size: 14px;
+    }
+    .ab-toggle:hover { background: #efecff; }
+    .ab-toggle.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .ab-toggle i { font-family: Georgia, serif; }
+
+    .ctx { display: none; align-items: center; gap: 10px; }
+    body[data-mode="edit"] .ctx-edit { display: flex; }
     body[data-mode="text"] .ctx-text { display: flex; }
     body[data-mode="signature"] .ctx-sign { display: flex; }
+    body[data-mode="erase"] .ctx-erase { display: flex; }
     .ctx label { font-size: 13px; color: var(--muted); font-weight: 600; }
     .field {
-      padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px; font-size: 13.5px;
-      outline: none; transition: border-color .15s ease;
+      padding: 8px 12px; border: 1px solid #c9bfff; border-radius: 8px; font-size: 14px;
+      outline: none; transition: border-color .15s ease, box-shadow .15s ease; background: #fff;
     }
-    .field:focus { border-color: var(--brand); }
-    #textInput, #signatureInput { width: 190px; }
+    .field:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(109,94,252,.18); }
+    #textInput, #signatureInput { width: 280px; }
     #fontSize { width: 64px; }
     .hint { font-size: 12.5px; color: var(--muted); }
 
@@ -252,16 +285,16 @@
   <div class="workspace">
     <!-- Tool sidebar -->
     <aside class="sidebar">
-      <button class="tool" id="editModeBtn" disabled title="Edit existing text in place">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      <button class="tool featured" id="editModeBtn" disabled title="Edit existing text in place">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h10"/><path d="M3 12h7"/><path d="M3 17h6"/><path d="M18.4 8.6a2 2 0 0 1 2.9 2.8l-5.7 5.7-3.4.6.6-3.4Z"/></svg>
         Edit
       </button>
-      <button class="tool" id="textModeBtn" title="Add a new text box">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5h16v2"/><path d="M12 5v14"/><path d="M9 19h6"/></svg>
-        Text
+      <button class="tool" id="textModeBtn" title="Add new text">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11"/><path d="M4 11h7"/><path d="M4 16h5"/><path d="M18 13v7"/><path d="M14.5 16.5h7"/></svg>
+        Add
       </button>
-      <button class="tool" id="signatureModeBtn" title="Add a typed signature">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c3 0 3-9 6-9s2 7 4 7 2-4 4-4 1 3 4 3"/><path d="M3 21h18"/></svg>
+      <button class="tool featured" id="signatureModeBtn" title="Type or draw a signature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15c2.5 0 3.2-8 5.2-8 1.7 0 1.2 6 3.1 6 1.5 0 1.8-3 3.2-3 1 0 1.3 1.5 2.3 1.5"/><path d="M4 19.5c4-1.5 12-1.5 16 0"/></svg>
         Sign
       </button>
       <button class="tool" id="eraseModeBtn" title="Drag a box over a signature or any content to remove it">
@@ -309,22 +342,39 @@
           </button>
         </div>
 
-        <div class="divider"></div>
-
-        <!-- contextual inputs -->
-        <div class="ctx ctx-text">
-          <input type="text" id="textInput" class="field" placeholder="Text to add…" disabled />
-          <label for="fontSize">Size</label>
-          <input type="number" id="fontSize" class="field" value="14" min="6" max="72" />
-          <span class="hint">click on the page to place</span>
-        </div>
-        <div class="ctx ctx-sign">
-          <input type="text" id="signatureInput" class="field" placeholder="Type name, click page…" disabled />
-          <button class="btn" id="drawSignBtn" type="button" title="Draw your signature">✎ Draw</button>
-        </div>
-
         <div class="spacer"></div>
         <span class="mode-indicator" id="modeIndicator">No PDF loaded</span>
+      </div>
+
+      <!-- Prominent contextual action bar: shows what to do for the active tool -->
+      <div id="actionBar" class="action-bar">
+        <div class="ctx ctx-edit">
+          <span class="ab-label">Edit text</span>
+          <span class="ab-hint">Click any line on the page and type to change it.</span>
+        </div>
+        <div class="ctx ctx-text">
+          <span class="ab-label">Add text</span>
+          <input type="text" id="textInput" class="field" placeholder="Type your text here…" disabled />
+          <select id="addFont" class="field" title="Font">
+            <option value="sans">Sans</option>
+            <option value="serif">Serif</option>
+            <option value="mono">Mono</option>
+          </select>
+          <input type="number" id="fontSize" class="field" value="14" min="6" max="96" title="Font size" />
+          <button class="ab-toggle" id="addBold" type="button" title="Bold"><b>B</b></button>
+          <button class="ab-toggle" id="addItalic" type="button" title="Italic"><i>I</i></button>
+          <span class="ab-hint">→ then click on the page to place it</span>
+        </div>
+        <div class="ctx ctx-sign">
+          <span class="ab-label">Signature</span>
+          <input type="text" id="signatureInput" class="field" placeholder="Type your name…" disabled />
+          <span class="ab-or">OR</span>
+          <button class="btn primary" id="drawSignBtn" type="button" title="Draw your own signature">✎ Create your Own Sign</button>
+        </div>
+        <div class="ctx ctx-erase">
+          <span class="ab-label">Erase</span>
+          <span class="ab-hint">Drag a box over anything (e.g. an old signature) to remove it.</span>
+        </div>
       </div>
 
       <div id="status"></div>
