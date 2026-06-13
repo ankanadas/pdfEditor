@@ -3,276 +3,345 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PDF Editor</title>
+  <title>Free PDF Editor — Edit &amp; Sign PDFs in Your Browser, No Signup</title>
+  <meta name="description" content="Free PDF editor — edit text and sign PDFs right in your browser. No sign-up, no charges, and your file never leaves your device." />
   <style>
-    * {
-      box-sizing: border-box;
+    :root {
+      --brand: #6d5efc;
+      --brand-dark: #5848e0;
+      --ink: #1f2330;
+      --muted: #6b7280;
+      --line: #e7e8ef;
+      --bg: #f4f5fa;
+      --stage: #eceef5;
+      --ok: #16a34a;
+      --danger: #e5484d;
+      --radius: 12px;
     }
-    
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
       margin: 0;
-      padding: 0;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      background: #f5f5f5;
-    }
-    
-    #app {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-    
-    h1 {
-      color: #333;
-      margin: 0 0 20px 0;
-      font-size: 28px;
-    }
-    
-    #toolbar {
-      background: white;
-      padding: 15px;
-      border-radius: 8px;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-      margin-bottom: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
       display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
+      flex-direction: column;
+      overflow: hidden;
     }
-    
-    .toolbar-section {
+
+    /* ---------- App bar ---------- */
+    .appbar {
       display: flex;
-      gap: 10px;
       align-items: center;
-      padding-right: 15px;
-      border-right: 1px solid #ddd;
+      gap: 12px;
+      padding: 10px 18px;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      flex: 0 0 auto;
     }
-    
-    .toolbar-section:last-child {
-      border-right: none;
+    .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
+    .logo .mark {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--brand), #9b8bff);
+      color: #fff; display: grid; place-items: center; font-size: 16px;
     }
-    
-    button {
-      padding: 8px 16px;
-      background: #007bff;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 14px;
-      transition: background 0.2s;
+    .tagline {
+      color: var(--brand); font-weight: 700; font-size: 13.5px; letter-spacing: .2px;
+      padding-left: 14px; margin-left: 14px; border-left: 1px solid var(--line); white-space: nowrap;
     }
-    
-    button:hover:not(:disabled) {
-      background: #0056b3;
+    .appbar .spacer { flex: 1; }
+    @media (max-width: 900px) { .tagline { display: none; } }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12.5px; color: #15803d;
+      background: #e9f9ef; border: 1px solid #cdeed8;
+      padding: 5px 10px; border-radius: 999px; font-weight: 600;
     }
-    
-    button:disabled {
-      background: #ccc;
-      cursor: not-allowed;
+    .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: #9aa0ab; }
+    .pill { color: #6b7280; background: #f4f5fa; border-color: var(--line); }
+    .pill.privacy { color: #15803d; background: #e9f9ef; border-color: #cdeed8; }
+    .pill.ok { color: #15803d; background: #e9f9ef; border-color: #cdeed8; }
+    .pill.ok .dot { background: #16a34a; }
+    .pill.down { color: #b42318; background: #fdeced; border-color: #f6cecf; }
+    .pill.down .dot { background: #e5484d; }
+    .icon-btn {
+      width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--line);
+      background: #fff; color: var(--muted); cursor: pointer; display: grid; place-items: center;
     }
-    
-    button.secondary {
-      background: #6c757d;
+    .icon-btn:hover { background: #f6f7fb; color: var(--ink); }
+
+    /* ---------- Workspace ---------- */
+    .workspace { flex: 1; display: flex; min-height: 0; }
+
+    /* Sidebar */
+    .sidebar {
+      width: 92px; background: #fff; border-right: 1px solid var(--line);
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+      padding: 14px 8px; flex: 0 0 auto;
     }
-    
-    button.secondary:hover:not(:disabled) {
-      background: #545b62;
+    .tool {
+      width: 100%; border: 1px solid transparent; background: transparent; cursor: pointer;
+      border-radius: 10px; padding: 10px 4px; display: flex; flex-direction: column; align-items: center; gap: 5px;
+      color: var(--muted); font-size: 11.5px; font-weight: 600; transition: all .15s ease;
     }
-    
-    input[type="file"] {
-      padding: 8px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      font-size: 14px;
+    .tool svg { width: 22px; height: 22px; }
+    .tool:hover:not(:disabled) { background: #f4f4fb; color: var(--ink); }
+    .tool.active { background: #efecff; color: var(--brand); border-color: #ddd7ff; }
+    .tool:disabled { opacity: .4; cursor: not-allowed; }
+    .tool.danger:hover:not(:disabled) { background: #fdeced; color: var(--danger); }
+    .sidebar .sep { width: 60%; height: 1px; background: var(--line); margin: 6px 0; }
+
+    /* Main column */
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+    /* Toolbar */
+    .toolbar {
+      display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+      background: #fff; border-bottom: 1px solid var(--line); flex: 0 0 auto; flex-wrap: wrap;
     }
-    
-    input[type="text"], input[type="number"] {
-      padding: 6px 10px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      font-size: 14px;
-      width: 150px;
+    .btn {
+      display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+      border: 1px solid var(--line); background: #fff; color: var(--ink);
+      padding: 8px 13px; border-radius: 9px; font-size: 13.5px; font-weight: 600; transition: all .15s ease;
     }
-    
-    label {
-      font-size: 14px;
-      color: #555;
-      font-weight: 500;
+    .btn svg { width: 16px; height: 16px; }
+    .btn:hover:not(:disabled) { background: #f6f7fb; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .btn.primary:hover:not(:disabled) { background: var(--brand-dark); }
+    .divider { width: 1px; height: 26px; background: var(--line); }
+    .toolbar .spacer { flex: 1; }
+
+    .pager { display: flex; align-items: center; gap: 6px; }
+    .pager #pageInfo { font-size: 13px; color: var(--muted); min-width: 92px; text-align: center; }
+
+    /* Contextual inputs (shown per active tool) */
+    .ctx { display: none; align-items: center; gap: 8px; }
+    body[data-mode="text"] .ctx-text { display: flex; }
+    body[data-mode="signature"] .ctx-sign { display: flex; }
+    .ctx label { font-size: 13px; color: var(--muted); font-weight: 600; }
+    .field {
+      padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px; font-size: 13.5px;
+      outline: none; transition: border-color .15s ease;
     }
-    
-    #canvasContainer {
-      background: white;
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 600px;
-    }
-    
-    #canvas {
-      border: 1px solid #ddd;
-      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-      cursor: crosshair;
-      max-width: 100%;
-    }
-    
-    #status {
-      margin-top: 15px;
-      padding: 10px 15px;
-      border-radius: 4px;
-      font-size: 14px;
-      display: none;
-    }
-    
-    #status.success {
-      background: #d4edda;
-      color: #155724;
-      border: 1px solid #c3e6cb;
-      display: block;
-    }
-    
-    #status.error {
-      background: #f8d7da;
-      color: #721c24;
-      border: 1px solid #f5c6cb;
-      display: block;
-    }
-    
-    #status.info {
-      background: #d1ecf1;
-      color: #0c5460;
-      border: 1px solid #bee5eb;
-      display: block;
-    }
-    
+    .field:focus { border-color: var(--brand); }
+    #textInput, #signatureInput { width: 190px; }
+    #fontSize { width: 64px; }
+    .hint { font-size: 12.5px; color: var(--muted); }
+
     .mode-indicator {
-      padding: 6px 12px;
-      background: #e9ecef;
-      border-radius: 4px;
-      font-size: 13px;
-      color: #495057;
-      font-weight: 500;
+      font-size: 12.5px; color: var(--brand); background: #efecff;
+      border: 1px solid #ddd7ff; padding: 6px 11px; border-radius: 999px; font-weight: 600; white-space: nowrap;
     }
-    
-    .mode-indicator.active {
-      background: #007bff;
-      color: white;
+
+    /* Status toast */
+    #status {
+      margin: 10px 16px 0; padding: 10px 14px; border-radius: 9px; font-size: 13.5px; display: none;
     }
-    
+    #status.success { background: #e9f9ef; color: #15803d; border: 1px solid #cdeed8; display: block; }
+    #status.error   { background: #fdeced; color: #b42318; border: 1px solid #f6cecf; display: block; }
+    #status.info    { background: #eaf2ff; color: #1d4ed8; border: 1px solid #cfe0ff; display: block; }
+
+    /* Stage */
+    .stage { flex: 1; position: relative; overflow: auto; background: var(--stage); padding: 28px; }
+
+    #canvasContainer {
+      display: none; justify-content: center; align-items: flex-start; min-height: 100%;
+    }
+    body.has-pdf #canvasContainer { display: flex; }
+    #canvas {
+      background: #fff; border-radius: 4px;
+      box-shadow: 0 8px 30px rgba(20,22,40,.14); max-width: 100%;
+    }
+    body[data-mode="text"] #canvas,
+    body[data-mode="signature"] #canvas { cursor: crosshair; }
+
+    /* Landing / drop zone */
+    .landing { max-width: 640px; margin: 24px auto; }
+    body.has-pdf .landing { display: none; }
+    .landing h1 {
+      text-align: center; font-size: 30px; margin: 6px 0 4px;
+      background: linear-gradient(90deg, var(--brand), #19b36b); -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .landing p.sub { text-align: center; color: var(--muted); margin: 0 0 22px; }
+    .dropzone {
+      display: block; border: 2px dashed #cfd2e6; border-radius: 16px; background: #fff;
+      padding: 46px 24px; text-align: center; transition: all .18s ease; cursor: pointer;
+    }
+    .dropzone.drag { border-color: var(--brand); background: #f7f6ff; }
+    .dropzone .art {
+      width: 96px; height: 96px; margin: 0 auto 14px; border-radius: 20px;
+      background: linear-gradient(135deg, #efeaff, #e6f7ee); display: grid; place-items: center; color: var(--brand);
+    }
+    .dropzone .art svg { width: 48px; height: 48px; }
+    .dropzone .big { font-size: 17px; font-weight: 700; }
+    .dropzone .or { color: var(--muted); font-size: 13px; margin: 8px 0; }
+
+    /* Help drawer */
     #instructions {
-      background: #fff3cd;
-      border: 1px solid #ffeaa7;
-      padding: 15px;
-      border-radius: 4px;
-      margin-bottom: 20px;
-      font-size: 14px;
-      color: #856404;
+      display: none; position: fixed; right: 18px; bottom: 18px; width: 340px; z-index: 500;
+      background: #fff; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 16px 50px rgba(20,22,40,.22);
+      padding: 16px 18px; font-size: 13.5px; color: #374151;
     }
-    
-    #instructions h3 {
-      margin: 0 0 10px 0;
-      font-size: 16px;
-    }
-    
-    #instructions ul {
-      margin: 5px 0;
-      padding-left: 20px;
-    }
-    
-    #instructions li {
-      margin: 5px 0;
-    }
-    
-    /* Editable text boxes for inline editing */
-    .editable-text-box {
-      font-family: inherit;
-      border: 1px solid rgba(0, 123, 255, 0.3);
-      background: rgba(255, 255, 255, 0.95);
-      color: #000;
-      padding: 2px;
-      margin: 0;
-      resize: none;
-      overflow: visible;
-      line-height: 1.2;
-      cursor: text;
-      outline: none;
-      transition: all 0.2s ease;
-      box-sizing: border-box;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-    }
-    
-    .editable-text-box:hover {
-      border-color: rgba(0, 123, 255, 0.5);
-      background: rgba(255, 255, 255, 1);
-    }
-    
-    .editable-text-box:focus {
-      border: 2px solid #007bff !important;
-      background: rgba(255, 255, 255, 1) !important;
-      box-shadow: 0 2px 8px rgba(0, 123, 255, 0.3) !important;
-    }
+    #instructions.open { display: block; }
+    #instructions h3 { margin: 0 0 10px; font-size: 15px; }
+    #instructions ul { margin: 0; padding-left: 18px; }
+    #instructions li { margin: 7px 0; }
+
+    /* Editable line boxes (positioned/styled inline by app.js) */
+    .editable-text-box { font-family: inherit; }
+    .editable-text-box:focus { outline: none; }
   </style>
 </head>
 <body>
-  <div id="app">
-    <h1>📄 PDF Editor</h1>
-    
-    <div id="instructions">
-      <h3>How to use:</h3>
-      <ul>
-        <li><strong>Load PDF:</strong> Click "Choose File" and select a PDF</li>
-        <li><strong>Edit Text:</strong> Click "Edit Text" - editable text boxes will appear over all text. Type directly in the boxes like Google Docs!</li>
-        <li><strong>Add New Text:</strong> Click "Add Text", enter text, then click anywhere on the PDF</li>
-        <li><strong>Add Signature:</strong> Click "Signature", enter your name, then click on the PDF</li>
-        <li><strong>Navigate:</strong> Use Previous/Next buttons to move between pages</li>
-        <li><strong>Save:</strong> Click "Save PDF" to download your edited PDF</li>
-      </ul>
-      <p><strong>Note:</strong> Backend server (Python + PyMuPDF) must be running for proper font preservation. Start it with: <code>cd backend && ./start.sh</code></p>
-    </div>
-    
-    <div id="toolbar">
-      <div class="toolbar-section">
-        <input type="file" id="fileInput" accept=".pdf" />
-      </div>
-      
-      <div class="toolbar-section">
-        <button id="textModeBtn" class="secondary">Add Text</button>
-        <input type="text" id="textInput" placeholder="Enter text..." disabled />
-      </div>
-      
-      <div class="toolbar-section">
-        <button id="editModeBtn" class="secondary">Edit Text</button>
-        <label for="fontSize">Size:</label>
-        <input type="number" id="fontSize" value="12" min="6" max="72" style="width: 60px;" />
-      </div>
-      
-      <div class="toolbar-section">
-        <button id="signatureModeBtn" class="secondary">Signature</button>
-        <input type="text" id="signatureInput" placeholder="Your name..." disabled />
-        <button id="clearSignatureBtn" class="secondary" style="background: #dc3545;">Clear Signature</button>
-      </div>
-      
-      <div class="toolbar-section">
-        <button id="prevPageBtn" disabled>← Previous</button>
-        <span id="pageInfo" style="font-size: 14px; color: #555;">No PDF loaded</span>
-        <button id="nextPageBtn" disabled>Next →</button>
-      </div>
-      
-      <div class="toolbar-section">
-        <button id="saveBtn" disabled>Save PDF</button>
+  <!-- hidden native input; triggered by the Upload / Open buttons and drag-drop -->
+  <input type="file" id="fileInput" accept=".pdf" hidden />
+
+  <header class="appbar">
+    <div class="logo"><span class="mark">P</span> Free PDF Editor</div>
+    <span class="tagline">⚡ Quick edits — no sign-up, no charges</span>
+    <div class="spacer"></div>
+    <span class="pill privacy">🔒 100% in your browser — nothing uploaded</span>
+    <button class="icon-btn" id="helpBtn" title="How to use" aria-label="Help">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 .9-1 1.7"/><circle cx="12" cy="16.5" r=".6" fill="currentColor"/></svg>
+    </button>
+  </header>
+
+  <div class="workspace">
+    <!-- Tool sidebar -->
+    <aside class="sidebar">
+      <button class="tool" id="editModeBtn" disabled title="Edit existing text in place">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        Edit
+      </button>
+      <button class="tool" id="textModeBtn" title="Add a new text box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5h16v2"/><path d="M12 5v14"/><path d="M9 19h6"/></svg>
+        Text
+      </button>
+      <button class="tool" id="signatureModeBtn" title="Add a typed signature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c3 0 3-9 6-9s2 7 4 7 2-4 4-4 1 3 4 3"/><path d="M3 21h18"/></svg>
+        Sign
+      </button>
+      <div class="sep"></div>
+      <button class="tool danger" id="clearSignatureBtn" title="Remove added text / signatures not yet saved">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3 21 8 10 19H5v-5L16 3Z"/><path d="M14 5 19 10"/></svg>
+        Clear
+      </button>
+    </aside>
+
+    <!-- Main: toolbar + stage -->
+    <div class="main">
+      <div class="toolbar">
+        <label class="btn" for="fileInput" title="Open a PDF">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+          Open
+        </label>
+        <span id="fileName" class="hint" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        <button class="btn primary" id="saveBtn" disabled title="Save & download the edited PDF">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h11l3 3v15H5Z"/><path d="M8 3v5h7"/><path d="M8 21v-7h8v7"/></svg>
+          Save
+        </button>
+
+        <div class="divider"></div>
+
+        <div class="pager">
+          <button class="btn" id="prevPageBtn" disabled aria-label="Previous page">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18 9 12l6-6"/></svg>
+          </button>
+          <span id="pageInfo">No PDF loaded</span>
+          <button class="btn" id="nextPageBtn" disabled aria-label="Next page">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- contextual inputs -->
+        <div class="ctx ctx-text">
+          <input type="text" id="textInput" class="field" placeholder="Text to add…" disabled />
+          <label for="fontSize">Size</label>
+          <input type="number" id="fontSize" class="field" value="14" min="6" max="72" />
+          <span class="hint">click on the page to place</span>
+        </div>
+        <div class="ctx ctx-sign">
+          <input type="text" id="signatureInput" class="field" placeholder="Your name…" disabled />
+          <span class="hint">click on the page to place</span>
+        </div>
+
+        <div class="spacer"></div>
         <span class="mode-indicator" id="modeIndicator">No PDF loaded</span>
       </div>
-    </div>
-    
-    <div id="status"></div>
-    
-    <div id="canvasContainer">
-      <canvas id="canvas"></canvas>
+
+      <div id="status"></div>
+
+      <div class="stage" id="stage">
+        <!-- Upload / drop zone (hidden once a PDF is loaded) -->
+        <div class="landing">
+          <h1>Edit. Sign. Done.</h1>
+          <p class="sub">A simple, private PDF editor — your file never leaves your machine.</p>
+          <label class="dropzone" id="dropzone" for="fileInput">
+            <div class="art">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6"/><path d="M12 18v-6"/><path d="m9 15 3-3 3 3"/></svg>
+            </div>
+            <div class="big">Drag &amp; drop your PDF here</div>
+            <div class="or">or</div>
+            <span class="btn primary" style="pointer-events:none">Upload PDF</span>
+            <div class="or" style="margin-top:14px">PDF files up to 10 MB</div>
+          </label>
+        </div>
+
+        <!-- Editor canvas -->
+        <div id="canvasContainer">
+          <canvas id="canvas"></canvas>
+        </div>
+      </div>
     </div>
   </div>
+
+  <!-- Help drawer -->
+  <div id="instructions">
+    <h3>How to use</h3>
+    <ul>
+      <li><strong>Open</strong> a PDF (button or drag &amp; drop).</li>
+      <li><strong>Edit</strong> — click any line and type to change it in place.</li>
+      <li><strong>Text</strong> — type, then click the page to drop new text.</li>
+      <li><strong>Sign</strong> — type your name, click the page to place it.</li>
+      <li><strong>Clear</strong> removes added text/signatures you haven't saved yet.</li>
+      <li><strong>Save</strong> downloads the edited PDF.</li>
+    </ul>
+  </div>
+
+  <script>
+    // Cosmetic interactions only (no document data leaves the page).
+    document.addEventListener('DOMContentLoaded', function () {
+      var fileInput = document.getElementById('fileInput');
+      var dropzone = document.getElementById('dropzone');
+      var stage = document.getElementById('stage');
+
+      // Note: the editor is revealed by app.js after it validates the file size.
+
+      // Drag & drop anywhere on the stage.
+      function stop(e) { e.preventDefault(); e.stopPropagation(); }
+      ['dragenter', 'dragover'].forEach(function (ev) {
+        stage.addEventListener(ev, function (e) { stop(e); if (dropzone) dropzone.classList.add('drag'); });
+      });
+      ['dragleave', 'drop'].forEach(function (ev) {
+        stage.addEventListener(ev, function (e) { stop(e); if (dropzone) dropzone.classList.remove('drag'); });
+      });
+      stage.addEventListener('drop', function (e) {
+        var files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length) {
+          fileInput.files = files;                       // hand the dropped file to the app
+          fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+
+      // Help drawer toggle.
+      var helpBtn = document.getElementById('helpBtn');
+      var help = document.getElementById('instructions');
+      helpBtn.addEventListener('click', function () { help.classList.toggle('open'); });
+    });
+  </script>
 </body>
 </html>

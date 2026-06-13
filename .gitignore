@@ -4,3 +4,8 @@ coverage/
 .DS_Store
 *.log
 .kiro/
+
+# Python backend (local virtualenv & caches) — never commit these
+backend/venv/
+__pycache__/
+*.pyc

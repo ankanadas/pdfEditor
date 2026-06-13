@@ -1,9 +1,19 @@
 import { EditorController } from './core/EditorController.js';
-import { PDFBackendService } from './services/pdfBackendService.js';
+import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+// Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
+// No external network request is made, so the app works fully offline and never reaches
+// out to a third party while handling your document.
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.js',
+  import.meta.url
+).toString();
+
+// Largest PDF a user may open/edit. Keeps per-save memory and server load in check.
+// Change this single number (e.g. to 5) to adjust the limit everywhere in the UI.
+const MAX_FILE_MB = 10;
+const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 
 class PDFEditorApp {
   constructor() {
@@ -29,20 +39,7 @@ class PDFEditorApp {
     this.initializeEventListeners();
     this.setupControllerEvents();
     
-    console.log('PDF Editor App initialized');
-    
-    // Check backend health
-    this.checkBackendHealth();
-  }
-
-  async checkBackendHealth() {
-    const isHealthy = await PDFBackendService.checkHealth();
-    if (isHealthy) {
-      console.log('✅ Backend is running');
-    } else {
-      console.warn('⚠️ Backend is not running. Please start it with: cd backend && ./start.sh');
-      this.showStatus('Warning: Backend not running. Text editing may not work properly.', 'error');
-    }
+    console.log('PDF Editor App initialized (runs entirely in your browser)');
   }
 
   initializeEventListeners() {
@@ -172,55 +169,75 @@ class PDFEditorApp {
   }
 
   /**
-   * Extract text using PDF.js as fallback
+   * Extract text geometry from PDF.js using the SAME viewport transform that paints
+   * the canvas. Every value is stored in canvas (device) pixels at this.scale, so the
+   * editable overlays line up exactly with the rendered page on every document.
+   *
+   * For a text item, tx = viewport.transform ∘ item.transform maps text space to canvas
+   * pixels: tx[4] is the left edge, tx[5] is the baseline (top-origin), and hypot(tx[2],
+   * tx[3]) is the font height in pixels. item.width is in PDF points, so * scale = px.
    */
   async extractTextFromPDFjs() {
-    console.log('Extracting text from all pages using PDF.js...');
+    console.log('Extracting text geometry from all pages using PDF.js...');
     this.extractedTextItems = [];
-    
+
     for (let pageNum = 0; pageNum < this.pdfJsDoc.numPages; pageNum++) {
       const page = await this.pdfJsDoc.getPage(pageNum + 1);
       const viewport = page.getViewport({ scale: this.scale });
       const textContent = await page.getTextContent();
-      
+
       textContent.items
         .filter(item => item.str && item.str.trim().length > 0)
         .forEach(item => {
           const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-          
-          const x = tx[4] / this.scale;
-          const y = (viewport.height - tx[5]) / this.scale;
-          const scaleX = tx[0];
-          const scaleY = tx[3];
-          const width = item.width;
-          const height = item.height;
-          const fontSize = Math.sqrt(scaleX * scaleX + scaleY * scaleY);
-          const fontName = item.fontName || 'Helvetica';
-          
+          const left = tx[4];
+          const baseline = tx[5];
+          const fontHeightPx = Math.hypot(tx[2], tx[3]) || (item.height * this.scale);
+          const widthPx = item.width * this.scale;
+          const ascent = fontHeightPx * 0.8;
+          const descent = fontHeightPx * 0.2;
+
           this.extractedTextItems.push({
             text: item.str,
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            fontSize: fontSize,
-            fontName: fontName,
-            pageIndex: pageNum
+            pageIndex: pageNum,
+            left: left,
+            right: left + widthPx,
+            baseline: baseline,
+            top: baseline - ascent,
+            bottom: baseline + descent,
+            width: widthPx,
+            height: fontHeightPx,
+            fontSizePx: fontHeightPx,
+            fontName: item.fontName || 'Helvetica'
           });
         });
     }
-    
-    console.log('PDF.js extracted', this.extractedTextItems.length, 'text items from all pages');
+
+    console.log('PDF.js extracted', this.extractedTextItems.length, 'text items (canvas px)');
   }
 
   async handleFileSelect(event) {
     const file = event.target.files[0];
     if (!file) return;
 
+    // Enforce the size limit before doing any work.
+    if (file.size > MAX_FILE_BYTES) {
+      const mb = (file.size / (1024 * 1024)).toFixed(1);
+      this.showStatus(`That PDF is ${mb} MB — please choose a file under ${MAX_FILE_MB} MB.`, 'error');
+      document.body.classList.remove('has-pdf');  // keep the upload screen showing
+      event.target.value = '';                     // allow re-selecting after picking a smaller file
+      return;
+    }
+    // Size OK — reveal the editor.
+    document.body.classList.add('has-pdf');
+
     try {
       console.log('File selected:', file.name);
       this.showStatus('Loading PDF...', 'info');
-      
+
+      const fileNameEl = document.getElementById('fileName');
+      if (fileNameEl) fileNameEl.textContent = file.name;
+
       // Store original file
       this.originalFile = file;
       
@@ -254,38 +271,10 @@ class PDFEditorApp {
         this.showStatus(`PDF loaded successfully! ${this.pdfJsDoc.numPages} page(s)`, 'success');
       }
       
-      // Extract text from backend (PyMuPDF) for accurate font information
-      try {
-        console.log('Extracting text from backend...');
-        const extractData = await PDFBackendService.extractText(file);
-        console.log('Backend extracted text:', extractData);
-        
-        // Store all text items from all pages
-        this.extractedTextItems = [];
-        if (extractData.pages) {
-          extractData.pages.forEach(page => {
-            page.textItems.forEach(item => {
-              this.extractedTextItems.push({
-                ...item,
-                pageIndex: page.pageNumber
-              });
-            });
-          });
-        }
-        console.log('Total text items extracted from backend:', this.extractedTextItems.length);
-        
-        // If no text items, fall back to PDF.js extraction
-        if (this.extractedTextItems.length === 0) {
-          console.warn('Backend returned no text items, falling back to PDF.js extraction');
-          await this.extractTextFromPDFjs();
-        }
-      } catch (backendError) {
-        console.error('Backend text extraction failed:', backendError);
-        this.showStatus('Backend unavailable, using fallback text extraction', 'info');
-        // Fall back to PDF.js extraction
-        await this.extractTextFromPDFjs();
-      }
-      
+      // Extract text geometry with PDF.js — the same engine that renders the canvas —
+      // so the editable overlays align exactly. The backend is used only when saving.
+      await this.extractTextFromPDFjs();
+
       this.currentPage = 0;
       await this.renderCurrentPage();
       
@@ -350,7 +339,10 @@ class PDFEditorApp {
       
       await page.render(renderContext).promise;
       console.log('PDF page rendered');
-      
+
+      // Draw any pending added-text / signature inserts for this page on top.
+      this.drawPendingInserts();
+
       // In edit mode, show editable text boxes overlaid on the PDF
       if (this.mode === 'edit') {
         console.log('Edit mode active, creating editable boxes...');
@@ -358,7 +350,7 @@ class PDFEditorApp {
         await new Promise(resolve => setTimeout(resolve, 50));
         this.createEditableTextBoxes();
       }
-      
+
       console.log('Page rendered successfully');
     } catch (error) {
       console.error('Error rendering page:', error);
@@ -370,315 +362,175 @@ class PDFEditorApp {
   }
 
   /**
-   * Create editable text boxes overlaid on the PDF (like Smallpdf)
-   * Uses smart block detection to group text into logical sections
+   * Overlay an editable box on EACH line of text. Every box sits exactly on its original
+   * line (same left, baseline and size) and edits that line in place. Only the lines the
+   * user actually changes are tracked, so saving leaves all other text untouched.
    */
   createEditableTextBoxes() {
-    // Prevent duplicate creation
-    if (this.isCreatingTextBoxes) {
-      console.log('Already creating text boxes, skipping...');
-      return;
-    }
-    
+    if (this.isCreatingTextBoxes) return;
     this.isCreatingTextBoxes = true;
-    
-    console.log('createEditableTextBoxes called');
-    console.log('Total extractedTextItems:', this.extractedTextItems.length);
-    console.log('Current page:', this.currentPage);
-    
-    // Get text items for current page
+
     const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === this.currentPage);
-    console.log('Found', pageTextItems.length, 'text items for page', this.currentPage);
-    
     if (pageTextItems.length === 0) {
-      console.warn('No text items found for current page');
       this.showStatus('No text found on this page to edit', 'info');
       this.isCreatingTextBoxes = false;
       return;
     }
-    
+
     const canvasWrapper = document.getElementById('canvasWrapper');
     if (!canvasWrapper) {
-      console.error('canvasWrapper not found!');
       this.isCreatingTextBoxes = false;
       return;
     }
-    
-    // Use smart block detection to group text into logical sections
-    const textBlocks = this.detectTextBlocks(pageTextItems);
-    console.log('Detected', textBlocks.length, 'text blocks');
-    
-    // Create an editable div for each block
-    textBlocks.forEach((block, index) => {
-      const editableDiv = document.createElement('div');
-      editableDiv.contentEditable = 'true';
-      editableDiv.className = 'editable-text-box';
-      editableDiv.dataset.blockId = block.id;
-      editableDiv.dataset.originalText = block.text;
-      
-      // Set the text content
-      editableDiv.textContent = block.text;
-      
-      // Calculate canvas position
-      // block.y is the TOP of the block in PDF coordinates (origin at bottom-left)
-      // Canvas has origin at top-left, so we need to convert
-      const canvasX = block.x * this.scale;
-      const canvasY = this.canvas.height - (block.y * this.scale);
-      
-      console.log(`Block ${index}: "${block.text.substring(0, 30)}..."`);
-      console.log(`  PDF coords: x=${Math.round(block.x)}, y=${Math.round(block.y)}, w=${Math.round(block.width)}, h=${Math.round(block.height)}`);
-      console.log(`  Canvas coords: x=${Math.round(canvasX)}, y=${Math.round(canvasY)}`);
-      console.log(`  Canvas size: ${this.canvas.width}x${this.canvas.height}, scale: ${this.scale}`);
-      
-      // Style the editable div to look like inline text (Smallpdf style)
-      editableDiv.style.position = 'absolute';
-      editableDiv.style.left = (canvasX - 5) + 'px';
-      editableDiv.style.top = (canvasY - 5) + 'px';
-      
-      // Calculate width based on block size
-      let boxWidth;
-      if (block.lines.length > 5) {
-        // Large block: use most of page width
-        boxWidth = this.canvas.width - (canvasX - 5) - 100;
-      } else {
-        // Smaller blocks: fit content
-        boxWidth = Math.max(block.width * this.scale + 50, 250);
-      }
-      
-      editableDiv.style.width = boxWidth + 'px';
-      editableDiv.style.minHeight = (block.height * this.scale + 10) + 'px';
-      editableDiv.style.height = 'auto';
-      editableDiv.style.fontSize = (block.fontSize * this.scale) + 'px';
-      editableDiv.style.fontFamily = this.getFontFamily(block.fontFamily);
-      editableDiv.style.textAlign = 'left';
-      
-      // Start with NO border - looks like regular text
-      editableDiv.style.border = '2px solid transparent';
-      editableDiv.style.background = 'transparent';
-      editableDiv.style.color = '#000';
-      editableDiv.style.padding = '8px';
-      editableDiv.style.margin = '0';
-      editableDiv.style.lineHeight = '1.5';
-      editableDiv.style.zIndex = '100';
-      editableDiv.style.cursor = 'text';
-      editableDiv.style.outline = 'none';
-      editableDiv.style.boxSizing = 'border-box';
-      editableDiv.style.borderRadius = '2px';
-      editableDiv.style.whiteSpace = 'pre-wrap';
-      editableDiv.style.wordWrap = 'break-word';
-      editableDiv.style.transition = 'all 0.2s ease';
-      
-      // Show dotted border ONLY on focus (Smallpdf behavior)
-      editableDiv.addEventListener('focus', () => {
-        editableDiv.style.border = '2px dotted #4A90E2';
-        editableDiv.style.background = 'rgba(255, 255, 255, 0.98)';
-        editableDiv.style.boxShadow = '0 0 0 3px rgba(74, 144, 226, 0.1)';
-        this.activeEditBox = editableDiv;
+
+    // The canvas may be displayed smaller than its intrinsic pixels (max-width:100%).
+    const displayScale = (this.canvas.clientWidth || this.canvas.width) / this.canvas.width;
+
+    const lines = this.groupTextItemsByLine(pageTextItems);
+    console.log('Editing', lines.length, 'lines; displayScale =', displayScale.toFixed(3));
+
+    // Erase the original text from the canvas (white over each line) while leaving
+    // images/graphics intact, so the editable boxes are the only visible text.
+    this.ctx.save();
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
+    this.ctx.fillStyle = '#ffffff';
+    lines.forEach((line) => {
+      this.ctx.fillRect(line.left - 2, line.top - 2, (line.right - line.left) + 6, (line.bottom - line.top) + 4);
+    });
+    this.ctx.restore();
+
+    lines.forEach((line) => {
+      const div = document.createElement('div');
+      div.contentEditable = 'true';
+      div.className = 'editable-text-box';
+      div.dataset.originalText = line.text;
+      div.textContent = line.text;
+
+      const fontSizePx = line.fontSizePx * displayScale;
+      const lineBoxPx = Math.max((line.bottom - line.top) * displayScale, fontSizePx);
+      const halfLeading = Math.max(0, (lineBoxPx - fontSizePx) / 2);
+      const ascent = fontSizePx * 0.8;
+
+      const leftCss = line.left * displayScale;
+      const topCss = line.baseline * displayScale - ascent - halfLeading;  // sit on the baseline
+      const widthCss = (line.right - line.left) * displayScale;
+
+      div.style.position = 'absolute';
+      div.style.left = (leftCss - 1) + 'px';
+      div.style.top = (topCss - 1) + 'px';
+      div.style.minWidth = Math.max(widthCss, 20) + 'px';   // width:auto -> grows with text
+      div.style.height = (lineBoxPx + 2) + 'px';
+      div.style.fontSize = fontSizePx + 'px';
+      div.style.lineHeight = lineBoxPx + 'px';
+      div.style.fontFamily = this.getFontFamily(line.fontName);
+      div.style.color = '#000';
+      div.style.padding = '0';
+      div.style.margin = '0';
+      div.style.border = '1px solid transparent';
+      div.style.background = 'transparent';
+      div.style.zIndex = '100';
+      div.style.cursor = 'text';
+      div.style.outline = 'none';
+      div.style.boxSizing = 'border-box';
+      div.style.whiteSpace = 'pre';        // single line; typing extends to the right
+      div.style.overflow = 'visible';
+
+      div.addEventListener('focus', () => {
+        div.style.border = '1px solid #4A90E2';
+        div.style.boxShadow = '0 0 0 2px rgba(74,144,226,0.25)';
+        div.style.background = '#ffffff';
+        div.style.zIndex = '200';
+        this.activeEditBox = div;
       });
-      
-      editableDiv.addEventListener('blur', () => {
-        editableDiv.style.border = '2px solid transparent';
-        editableDiv.style.background = 'transparent';
-        editableDiv.style.boxShadow = 'none';
-        
-        // Save changes on blur
-        const newText = editableDiv.textContent;
-        const originalText = editableDiv.dataset.originalText;
-        
-        console.log('Blur event - comparing texts:');
-        console.log('  Original:', JSON.stringify(originalText));
-        console.log('  New:', JSON.stringify(newText));
-        console.log('  Are they different?', newText !== originalText);
-        
-        if (newText !== originalText) {
-          console.log('Block text changed, tracking edit');
-          // Track ONE edit for the entire block (not per item)
-          // Use bottomY for the Y coordinate since that's where text starts
-          const editY = block.bottomY || (block.y - block.height);
-          this.trackEdit({
-            pageIndex: block.items[0].pageIndex,
-            x: block.x,
-            y: editY,
-            width: block.width,
-            height: block.height,
-            fontSize: block.fontSize,
-            fontName: block.fontFamily,
-            text: originalText
-          }, newText);
-          editableDiv.dataset.originalText = newText;
-        } else {
-          console.log('No change detected, not tracking edit');
+
+      div.addEventListener('blur', () => {
+        div.style.border = '1px solid transparent';
+        div.style.boxShadow = 'none';
+        div.style.background = 'transparent';
+        div.style.zIndex = '100';
+        const newText = div.textContent;
+        if (newText !== div.dataset.originalText) {
+          this.trackEdit(this.lineToEdit(line, newText));
+          div.dataset.originalText = newText;
         }
       });
-      
-      canvasWrapper.appendChild(editableDiv);
-      this.editableTextBoxes.push(editableDiv);
+
+      // Keep each box a single line: Enter commits the edit instead of adding a line.
+      div.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); div.blur(); }
+      });
+
+      canvasWrapper.appendChild(div);
+      this.editableTextBoxes.push(div);
     });
-    
-    console.log('Created', this.editableTextBoxes.length, 'editable text blocks');
+
     this.isCreatingTextBoxes = false;
   }
 
   /**
-   * Detect logical text blocks using smart grouping algorithm
-   * Groups lines that are close together (body paragraphs) but keeps
-   * standalone lines (date, headers) separate for precise editing
+   * Convert a line (canvas-pixel geometry) into the edit descriptor the backend expects:
+   * PDF points with a TOP-LEFT origin (x, right, top, bottom, baseline).
    */
-  detectTextBlocks(textItems) {
-    if (textItems.length === 0) return [];
-    
-    // First, group items into lines
-    const lines = this.groupTextItemsByLine(textItems);
-    console.log('Grouped into', lines.length, 'lines');
-    
-    // Sort lines by Y position (top to bottom in PDF coordinates)
-    lines.sort((a, b) => b.y - a.y);
-    
-    // Calculate average line height for spacing analysis
-    const lineHeights = lines.map(line => line.height);
-    const avgLineHeight = lineHeights.reduce((sum, h) => sum + h, 0) / lineHeights.length;
-    console.log('Average line height:', avgLineHeight);
-    
-    // Group lines into blocks based on spacing
-    const blocks = [];
-    let currentBlock = null;
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const prevLine = i > 0 ? lines[i - 1] : null;
-      
-      // Calculate vertical gap from previous line
-      let gap = 0;
-      if (prevLine) {
-        gap = prevLine.y - prevLine.height - line.y;
-      }
-      
-      // Decide if this line starts a new block
-      // Start new block if:
-      // - First line
-      // - Gap is more than normal line spacing (> 1.2x average)
-      let startsNewBlock = false;
-      
-      if (!currentBlock) {
-        startsNewBlock = true;
-      } else if (gap > avgLineHeight * 1.2) {
-        // Any gap larger than normal line spacing = new block
-        startsNewBlock = true;
-      }
-      
-      if (startsNewBlock) {
-        // Save previous block
-        if (currentBlock) {
-          blocks.push(currentBlock);
-        }
-        
-        // Start new block
-        currentBlock = {
-          id: `block-${blocks.length}`,
-          text: line.text,
-          x: line.x,
-          y: line.y,
-          width: line.width,
-          height: line.height,
-          fontSize: line.fontSize,
-          fontFamily: line.fontName,
-          alignment: this.detectAlignment(line.x, this.pageWidth),
-          items: [...line.items],
-          lines: [line],
-          bottomY: line.y - line.height
-        };
-      } else {
-        // Add to current block (lines are close together - same paragraph)
-        currentBlock.text += '\n' + line.text;
-        currentBlock.width = Math.max(currentBlock.width, line.width);
-        currentBlock.bottomY = line.y - line.height;
-        currentBlock.height = currentBlock.y - currentBlock.bottomY;
-        currentBlock.items.push(...line.items);
-        currentBlock.lines.push(line);
-      }
-    }
-    
-    // Add the last block
-    if (currentBlock) {
-      blocks.push(currentBlock);
-    }
-    
-    console.log('Created', blocks.length, 'text blocks');
-    blocks.forEach((block, i) => {
-      console.log(`  Block ${i}: ${block.lines.length} lines, "${block.text.substring(0, 40)}..." at Y=${Math.round(block.y)}, bottomY=${Math.round(block.bottomY || 0)}, height=${Math.round(block.height)}`);
-    });
-    
-    return blocks;
+  lineToEdit(line, newText) {
+    const s = this.scale;
+    return {
+      pageIndex: line.pageIndex,
+      x: line.left / s,
+      right: line.right / s,
+      top: line.top / s,
+      bottom: line.bottom / s,
+      baseline: line.baseline / s,
+      fontSize: line.fontSizePx / s,
+      newText: newText
+    };
   }
 
   /**
-   * Detect text alignment based on X position
-   */
-  detectAlignment(x, pageWidth) {
-    const leftMargin = 50;
-    const rightMargin = pageWidth - 50;
-    const centerZone = pageWidth / 2;
-    
-    if (x < leftMargin + 20) {
-      return 'left';
-    } else if (x > rightMargin - 20) {
-      return 'right';
-    } else if (Math.abs(x - centerZone) < 50) {
-      return 'center';
-    } else {
-      return 'left'; // Default
-    }
-  }
-
-  /**
-   * Group text items that are on the same line
+   * Group text items that share a baseline into a single line. All geometry is in
+   * canvas pixels (top-origin), as produced by extractTextFromPDFjs().
    */
   groupTextItemsByLine(textItems) {
     if (textItems.length === 0) return [];
-    
-    // Sort by Y position first, then X position
+
     const sorted = [...textItems].sort((a, b) => {
-      const yDiff = Math.abs(a.y - b.y);
-      if (yDiff < 2) { // Same line (within 2 points tolerance)
-        return a.x - b.x; // Sort by X
-      }
-      return b.y - a.y; // Sort by Y (top to bottom)
+      if (Math.abs(a.baseline - b.baseline) < 3) return a.left - b.left;  // same line: left to right
+      return a.baseline - b.baseline;                                     // else top to bottom
     });
-    
+
     const lines = [];
     let currentLine = null;
-    
+
     sorted.forEach(item => {
-      if (!currentLine || Math.abs(item.y - currentLine.y) > 2) {
-        // Start a new line
-        if (currentLine) {
-          lines.push(currentLine);
-        }
+      const tol = Math.max(3, item.height * 0.4);
+      if (!currentLine || Math.abs(item.baseline - currentLine.baseline) > tol) {
+        if (currentLine) lines.push(currentLine);
         currentLine = {
           text: item.text,
-          x: item.x,
-          y: item.y,
-          width: item.width,
+          left: item.left,
+          right: item.right,
+          baseline: item.baseline,
+          top: item.top,
+          bottom: item.bottom,
           height: item.height,
-          fontSize: item.fontSize,
+          fontSizePx: item.fontSizePx,
           fontName: item.fontName,
           pageIndex: item.pageIndex,
           items: [item]
         };
       } else {
-        // Add to current line
-        currentLine.text += ' ' + item.text;
-        currentLine.width = (item.x + item.width) - currentLine.x;
+        // Same line: append, inserting a space when there is a real horizontal gap.
+        const gap = item.left - currentLine.right;
+        currentLine.text += (gap > item.height * 0.25 ? ' ' : '') + item.text;
+        currentLine.left = Math.min(currentLine.left, item.left);
+        currentLine.right = Math.max(currentLine.right, item.right);
+        currentLine.top = Math.min(currentLine.top, item.top);
+        currentLine.bottom = Math.max(currentLine.bottom, item.bottom);
         currentLine.height = Math.max(currentLine.height, item.height);
         currentLine.items.push(item);
       }
     });
-    
-    // Add the last line
-    if (currentLine) {
-      lines.push(currentLine);
-    }
-    
+
+    if (currentLine) lines.push(currentLine);
     return lines;
   }
 
@@ -727,38 +579,24 @@ class PDFEditorApp {
   }
 
   /**
-   * Track an edit for later processing
+   * Track a per-line edit for saving. If the same line is edited again, the previous
+   * edit is replaced. `edit` already carries the line geometry and newText.
    */
-  trackEdit(originalItem, newText) {
-    // Find if this item was already edited
-    const existingEditIndex = this.edits.findIndex(edit => 
-      edit.pageIndex === originalItem.pageIndex &&
-      Math.abs(edit.x - originalItem.x) < 1 &&
-      Math.abs(edit.y - originalItem.y) < 1
+  trackEdit(edit) {
+    const existingIndex = this.edits.findIndex(e =>
+      e.pageIndex === edit.pageIndex &&
+      Math.abs(e.x - edit.x) < 1 &&
+      Math.abs(e.baseline - edit.baseline) < 1
     );
-    
-    const edit = {
-      pageIndex: originalItem.pageIndex,
-      x: originalItem.x,
-      y: originalItem.y,
-      width: originalItem.width,
-      height: originalItem.height,
-      fontSize: originalItem.fontSize,
-      fontName: originalItem.fontName,
-      originalText: originalItem.text,
-      newText: newText
-    };
-    
-    if (existingEditIndex >= 0) {
-      // Update existing edit
-      this.edits[existingEditIndex] = edit;
+
+    if (existingIndex >= 0) {
+      this.edits[existingIndex] = edit;
     } else {
-      // Add new edit
       this.edits.push(edit);
     }
-    
+
     console.log('Tracked edit:', edit);
-    this.showStatus(`Text updated: "${originalItem.text}" → "${newText}"`, 'success');
+    this.showStatus(`Updated: "${edit.newText.slice(0, 40)}"`, 'success');
   }
 
   setMode(mode) {
@@ -767,45 +605,36 @@ class PDFEditorApp {
     const previousMode = this.mode;
     this.mode = mode;
     
-    // Update button styles
     const textBtn = document.getElementById('textModeBtn');
     const editBtn = document.getElementById('editModeBtn');
     const sigBtn = document.getElementById('signatureModeBtn');
-    
-    // Reset all buttons
-    [textBtn, editBtn, sigBtn].forEach(btn => {
-      btn.classList.add('secondary');
-      btn.style.background = '';
-    });
-    
+
+    // Highlight the active tool and expose the mode on <body> so the UI (CSS) can
+    // show the relevant inputs / cursor for that tool.
+    [textBtn, editBtn, sigBtn].forEach(btn => btn.classList.remove('active'));
+    document.body.dataset.mode = mode || '';
+
     if (mode === 'text') {
-      textBtn.classList.remove('secondary');
-      textBtn.style.background = '#28a745';
+      textBtn.classList.add('active');
       document.getElementById('textInput').focus();
       this.clearEditableTextBoxes();
-      // Show canvas
       this.canvas.style.opacity = '1';
+      // Leaving edit mode erased the canvas text; re-render to restore it.
+      if (previousMode === 'edit') this.renderCurrentPage();
     } else if (mode === 'edit') {
-      editBtn.classList.remove('secondary');
-      editBtn.style.background = '#28a745';
-      
-      // Hide canvas text completely - editable divs will replace it
-      this.canvas.style.opacity = '0';
-      
-      // Only render if switching FROM another mode TO edit mode
+      editBtn.classList.add('active');
+      // Keep the canvas visible; the editable boxes have an opaque white background
+      // that covers the original text, so the logo and graphics stay on screen.
+      this.canvas.style.opacity = '1';
       if (previousMode !== 'edit') {
-        console.log('Switching to edit mode from', previousMode, '- will render page');
         this.renderCurrentPage();
-      } else {
-        console.log('Already in edit mode, not re-rendering');
       }
     } else if (mode === 'signature') {
-      sigBtn.classList.remove('secondary');
-      sigBtn.style.background = '#28a745';
+      sigBtn.classList.add('active');
       document.getElementById('signatureInput').focus();
       this.clearEditableTextBoxes();
-      // Show canvas
       this.canvas.style.opacity = '1';
+      if (previousMode === 'edit') this.renderCurrentPage();
     }
     
     this.updateModeIndicator();
@@ -831,71 +660,77 @@ class PDFEditorApp {
     }
   }
 
-  async handleCanvasClick(event) {
+  handleCanvasClick(event) {
     if (!this.controller.isLoaded || !this.mode) {
-      this.showStatus('Please load a PDF and select a mode first', 'error');
+      this.showStatus('Open a PDF and pick a mode first', 'error');
       return;
     }
+    if (this.mode === 'edit') return;  // edit mode is handled by the per-line boxes
 
+    // Map the click to intrinsic canvas pixels (handles CSS scaling), then to PDF
+    // points with a top-left origin — the same coordinate space used when saving.
     const rect = this.canvas.getBoundingClientRect();
-    const canvasX = event.clientX - rect.left;
-    const canvasY = event.clientY - rect.top;
-    const x = canvasX / this.scale;
-    const y = this.pageHeight - (canvasY / this.scale); // Convert to PDF coordinates (origin at bottom-left)
+    const toIntrinsic = this.canvas.width / rect.width;
+    const xPt = ((event.clientX - rect.left) * toIntrinsic) / this.scale;
+    const clickYPt = ((event.clientY - rect.top) * toIntrinsic) / this.scale;
 
-    console.log('Canvas click at:', x, y);
-
-    try {
-      if (this.mode === 'edit') {
-        // In edit mode, text boxes handle editing - canvas clicks are ignored
-        return;
-        
-      } else if (this.mode === 'text') {
-        const text = document.getElementById('textInput').value.trim();
-        if (!text) {
-          this.showStatus('Please enter text first', 'error');
-          return;
-        }
-
-        const textEditor = this.controller.getTextEditor();
-        await textEditor.addText(this.currentPage, text, x, y, {
-          size: 16,
-          color: { r: 0, g: 0, b: 0 }
-        });
-
-        this.showStatus(`Text "${text}" added at position (${Math.round(x)}, ${Math.round(y)})`, 'success');
-        
-        // Re-render to show the new text
-        this.renderCurrentPage();
-        
-        // Clear input
-        document.getElementById('textInput').value = '';
-        
-      } else if (this.mode === 'signature') {
-        const signatureText = document.getElementById('signatureInput').value.trim();
-        if (!signatureText) {
-          this.showStatus('Please enter your name first', 'error');
-          return;
-        }
-
-        const signatureEditor = this.controller.getSignatureEditor();
-        await signatureEditor.addTypedSignature(this.currentPage, signatureText, x, y, {
-          fontSize: 24,
-          color: { r: 0, g: 0, b: 0.5 }
-        });
-
-        this.showStatus(`Signature "${signatureText}" added`, 'success');
-        
-        // Re-render to show the new signature
-        this.renderCurrentPage();
-        
-        // Clear input
-        document.getElementById('signatureInput').value = '';
-      }
-    } catch (error) {
-      console.error('Error handling canvas click:', error);
-      this.showStatus(`Error: ${error.message}`, 'error');
+    if (this.mode === 'text') {
+      const text = document.getElementById('textInput').value.trim();
+      if (!text) { this.showStatus('Type the text to add first', 'error'); return; }
+      const fontSize = parseInt(document.getElementById('fontSize').value, 10) || 14;
+      this.placeInsert(xPt, clickYPt, text, fontSize, 'text');
+      this.showStatus(`Added "${text}" — click Save PDF to keep it`, 'success');
+      document.getElementById('textInput').value = '';
+    } else if (this.mode === 'signature') {
+      const name = document.getElementById('signatureInput').value.trim();
+      if (!name) { this.showStatus('Type your name first', 'error'); return; }
+      this.placeInsert(xPt, clickYPt, name, 26, 'signature');
+      this.showStatus('Signature placed — click Save PDF to keep it', 'success');
     }
+  }
+
+  /**
+   * Queue an inserted item (added text or a typed signature) at a click point. The click
+   * is treated as the top-left of the text, so the baseline sits ~one ascent below it.
+   * It is drawn as a preview now and inserted for real by the backend on Save.
+   */
+  placeInsert(xPt, topPt, text, fontSize, style) {
+    this.edits.push({
+      pageIndex: this.currentPage,
+      redact: false,            // nothing to remove — this is an insert, not a replace
+      style: style,             // 'text' or 'signature'
+      x: xPt,
+      baseline: topPt + fontSize * 0.8,
+      fontSize: fontSize,
+      newText: text
+    });
+    this.renderCurrentPage();
+  }
+
+  /**
+   * Draw pending inserts (added text / signatures) for the current page onto the canvas
+   * as a live preview. They become permanent in the PDF when the user clicks Save.
+   */
+  drawPendingInserts() {
+    const inserts = this.edits.filter(e =>
+      e.redact === false && e.pageIndex === this.currentPage && e.newText);
+    if (inserts.length === 0) return;
+
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.textBaseline = 'alphabetic';
+    inserts.forEach(e => {
+      const fontPx = e.fontSize * this.scale;
+      if (e.style === 'signature') {
+        ctx.font = `italic ${fontPx}px "Snell Roundhand","Apple Chancery","Brush Script MT",cursive`;
+      } else {
+        ctx.font = `${fontPx}px Arial, Helvetica, sans-serif`;
+      }
+      ctx.fillText(e.newText, e.x * this.scale, e.baseline * this.scale);
+    });
+    ctx.restore();
   }
 
   async savePDF() {
@@ -905,138 +740,118 @@ class PDFEditorApp {
     }
 
     try {
-      this.showStatus('Saving PDF...', 'info');
-      
-      // If there are edits, use backend to process them
-      if (this.edits.length > 0) {
-        console.log('Processing', this.edits.length, 'edits through backend');
-        
-        if (!this.originalFileData) {
-          throw new Error('Original PDF data not available');
-        }
-        
-        // Use backend to edit PDF
-        const editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits);
-        const blob = new Blob([editedPdfBytes], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'edited-document.pdf';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        
-        this.showStatus('PDF saved successfully! Reloading edited version...', 'success');
-        
-        // Update the original file data with the edited version
-        // This ensures subsequent edits build on top of previous changes
-        this.originalFileData = editedPdfBytes;
-        
-        // Reload the PDF to show the edited version
-        const loadingTask = pdfjsLib.getDocument({ data: editedPdfBytes.slice(0) });
-        this.pdfJsDoc = await loadingTask.promise;
-        
-        // Re-extract text from the edited PDF
-        const editedBlob = new Blob([editedPdfBytes], { type: 'application/pdf' });
-        const editedFile = new File([editedBlob], 'edited-document.pdf', { type: 'application/pdf' });
-        
-        try {
-          const extractData = await PDFBackendService.extractText(editedFile);
-          this.extractedTextItems = [];
-          if (extractData.pages) {
-            extractData.pages.forEach(page => {
-              page.textItems.forEach(item => {
-                this.extractedTextItems.push({
-                  ...item,
-                  pageIndex: page.pageNumber
-                });
-              });
-            });
-          }
-        } catch (backendError) {
-          console.error('Backend text extraction failed after save:', backendError);
-        }
-        
-        // Clear edits and re-render
-        this.edits = [];
-        await this.renderCurrentPage();
-        
-        this.showStatus('PDF saved and reloaded successfully!', 'success');
-      } else {
-        // No edits, use regular save
-        await this.controller.saveAs('edited-document.pdf');
+      this.showStatus('Saving PDF…', 'info');
+
+      if (!this.originalFileData) {
+        throw new Error('Original PDF data not available');
       }
+
+      // Build the edited PDF entirely in the browser with pdf-lib (no server).
+      const editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
+
+      // Download it.
+      const blob = new Blob([editedPdfBytes], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'edited-document.pdf';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      // Keep editing on top of the saved version: reload + re-extract geometry.
+      this.originalFileData = editedPdfBytes;
+      const loadingTask = pdfjsLib.getDocument({ data: editedPdfBytes.slice(0) });
+      this.pdfJsDoc = await loadingTask.promise;
+      await this.extractTextFromPDFjs();
+      this.edits = [];
+      await this.renderCurrentPage();
+
+      this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
     } catch (error) {
       console.error('Save error:', error);
       this.showStatus(`Failed to save: ${error.message}`, 'error');
     }
   }
 
-  async clearSignature() {
-    if (!this.controller.isLoaded) {
-      this.showStatus('No PDF loaded', 'error');
-      return;
+  /**
+   * Apply all edits to the PDF in the browser using pdf-lib and return the new bytes.
+   * Coordinates in `edits` are PDF points with a TOP-LEFT origin; pdf-lib uses a
+   * BOTTOM-LEFT origin, so y is flipped with pageHeight.
+   *  - replace edits (redact !== false): cover the original line with a white box, then
+   *    draw the new text at the original baseline.
+   *  - insert edits (added text / signatures): just draw the text (signatures in italic).
+   */
+  async applyEditsWithPdfLib(originalBytes, edits) {
+    const pdfDoc = await PDFDocument.load(originalBytes);
+    const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const italic = await pdfDoc.embedFont(StandardFonts.HelveticaOblique);
+    const pages = pdfDoc.getPages();
+    const white = rgb(1, 1, 1);
+    const black = rgb(0, 0, 0);
+
+    for (const edit of edits) {
+      const page = pages[edit.pageIndex];
+      if (!page) continue;
+      const ph = page.getHeight();
+      const size = edit.fontSize || 12;
+      const font = edit.style === 'signature' ? italic : regular;
+      const text = this.sanitizeForStandardFont((edit.newText || '').replace(/[\r\n]+/g, ' '));
+
+      // Replace: cover the original line first.
+      if (edit.redact !== false && edit.top != null && edit.bottom != null) {
+        page.drawRectangle({
+          x: edit.x - 2,
+          y: ph - edit.bottom - 1,
+          width: (edit.right - edit.x) + 4,
+          height: (edit.bottom - edit.top) + 2,
+          color: white,
+        });
+      }
+
+      if (!text) continue;
+      try {
+        page.drawText(text, { x: edit.x, y: ph - edit.baseline, size, font, color: black });
+      } catch (e) {
+        // Last-resort: strip anything the standard font still can't encode.
+        const safe = text.replace(/[^\x20-\x7E]/g, '?');
+        page.drawText(safe, { x: edit.x, y: ph - edit.baseline, size, font, color: black });
+      }
     }
 
-    try {
-      this.showStatus('Clearing signature...', 'info');
-      
-      if (!this.originalFileData) {
-        throw new Error('Original PDF data not available');
-      }
-      
-      // Use backend to clear signature
-      const clearedPdfBytes = await PDFBackendService.clearSignature(this.originalFileData);
-      
-      // Download the cleared PDF immediately
-      const blob = new Blob([clearedPdfBytes], { type: 'application/pdf' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'cleared-signature.pdf';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      
-      this.showStatus('Signature cleared and PDF saved! Reloading...', 'success');
-      
-      // Update the original file data so future edits use the cleared version
-      this.originalFileData = clearedPdfBytes;
-      
-      // Reload the PDF
-      const loadingTask = pdfjsLib.getDocument({ data: clearedPdfBytes.slice(0) });
-      this.pdfJsDoc = await loadingTask.promise;
-      
-      // Re-extract text
-      const clearedBlob = new Blob([clearedPdfBytes], { type: 'application/pdf' });
-      const clearedFile = new File([clearedBlob], 'cleared-document.pdf', { type: 'application/pdf' });
-      
-      try {
-        const extractData = await PDFBackendService.extractText(clearedFile);
-        this.extractedTextItems = [];
-        if (extractData.pages) {
-          extractData.pages.forEach(page => {
-            page.textItems.forEach(item => {
-              this.extractedTextItems.push({
-                ...item,
-                pageIndex: page.pageNumber
-              });
-            });
-          });
-        }
-      } catch (backendError) {
-        console.error('Backend text extraction failed after clear:', backendError);
-      }
-      
-      // Re-render
-      await this.renderCurrentPage();
-      
-      this.showStatus('Signature cleared and saved successfully!', 'success');
-    } catch (error) {
-      console.error('Clear signature error:', error);
-      this.showStatus(`Failed to clear signature: ${error.message}`, 'error');
+    return pdfDoc.save();
+  }
+
+  /**
+   * Keep only characters the built-in Helvetica (WinAnsi) can render — Latin-1 plus the
+   * common typographic extras (• – — ' ' " " … € ™). Anything else becomes '?'.
+   */
+  sanitizeForStandardFont(s) {
+    const extras = new Set(['•', '–', '—', '‘', '’', '“', '”', '…', '€', '™', '©', '®',
+      'š', 'ž', 'Š', 'Ž', 'Œ', 'œ', 'Ÿ', 'ƒ', '†', '‡', '‰', '‹', '›']);
+    let out = '';
+    for (const ch of s) {
+      const c = ch.codePointAt(0);
+      if ((c >= 0x20 && c <= 0x7e) || (c >= 0xa0 && c <= 0xff) || extras.has(ch)) out += ch;
+      else out += '?';
+    }
+    return out;
+  }
+
+  /**
+   * Remove pending (unsaved) added text and signatures, then re-render. Items already
+   * saved into the PDF are baked in and are not affected.
+   */
+  clearSignature() {
+    const before = this.edits.length;
+    this.edits = this.edits.filter(e => e.redact !== false);  // keep line edits, drop inserts
+    const removed = before - this.edits.length;
+    if (removed > 0) {
+      this.renderCurrentPage();
+      this.showStatus(`Removed ${removed} added item(s)`, 'info');
+    } else {
+      this.showStatus('Nothing to clear (added text/signatures are removed before saving)', 'info');
     }
   }
 

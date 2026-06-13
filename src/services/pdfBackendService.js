@@ -2,7 +2,9 @@
  * Service to communicate with Python backend for PDF processing
  */
 
-const BACKEND_URL = 'http://localhost:5000';
+// Use 127.0.0.1 (not "localhost") and port 5001: on macOS, port 5000 is taken by
+// AirPlay Receiver, and "localhost" can resolve to IPv6 (::1) and miss the backend.
+const BACKEND_URL = 'http://127.0.0.1:5001';
 
 export class PDFBackendService {
   /**
