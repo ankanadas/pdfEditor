@@ -7,7 +7,7 @@
   "scripts": {
     "test": "jest",
     "test:watch": "jest --watch",
-    "build": "webpack --mode production",
+    "build": "webpack --mode production && cp robots.txt sitemap.xml dist/",
     "dev": "webpack serve --mode development"
   },
   "keywords": [
