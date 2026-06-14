@@ -88,13 +88,24 @@
     }
     .tool svg { width: 22px; height: 22px; }
     .tool:hover:not(:disabled) { background: #f4f4fb; color: var(--ink); }
-    .tool.active { background: #efecff; color: var(--brand); border-color: #ddd7ff; }
+    /* Selected tool: solid brand fill + white icon/label so it clearly stands out.
+       `.sidebar …` raises specificity above `.tool.featured` so the white text wins. */
+    .sidebar .tool.active {
+      background: var(--brand); color: #fff; border-color: var(--brand); font-weight: 700;
+      box-shadow: 0 4px 12px rgba(109,94,252,.38);
+    }
     .tool:disabled { opacity: .4; cursor: not-allowed; }
     .tool.danger:hover:not(:disabled) { background: #fdeced; color: var(--danger); }
     /* Primary tools (Edit & Sign): larger, brand-coloured, bolder so they stand out */
-    .tool.featured { color: var(--brand); font-weight: 700; }
+    .tool.featured { position: relative; color: var(--brand); font-weight: 700; }
     .tool.featured svg { width: 28px; height: 28px; stroke-width: 2.2; }
     .tool.featured:hover:not(:disabled) { background: #efecff; color: var(--brand); }
+    /* Gold star marks the most-useful tools (Edit & Sign) */
+    .tool.featured::after {
+      content: '★'; position: absolute; top: 3px; right: 8px;
+      font-size: 11px; line-height: 1; color: #f6a609; text-shadow: 0 0 1px rgba(0,0,0,.15);
+    }
+    .sidebar .tool.featured.active::after { color: #ffd54a; }
     .sidebar .sep { width: 60%; height: 1px; background: var(--line); margin: 6px 0; }
 
     /* Main column */
@@ -406,7 +417,7 @@
   <div class="workspace">
     <!-- Tool sidebar -->
     <aside class="sidebar">
-      <button class="tool featured" id="editModeBtn" disabled title="Edit existing text in place">
+      <button class="tool featured" id="editModeBtn" disabled title="★ Most useful — edit existing text in place">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h10"/><path d="M3 12h7"/><path d="M3 17h6"/><path d="M18.4 8.6a2 2 0 0 1 2.9 2.8l-5.7 5.7-3.4.6.6-3.4Z"/></svg>
         Edit
       </button>
@@ -414,7 +425,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11"/><path d="M4 11h7"/><path d="M4 16h5"/><path d="M18 13v7"/><path d="M14.5 16.5h7"/></svg>
         Add
       </button>
-      <button class="tool featured" id="signatureModeBtn" disabled title="Type or draw a signature">
+      <button class="tool featured" id="signatureModeBtn" disabled title="★ Most useful — type, draw or upload a signature">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15c2.5 0 3.2-8 5.2-8 1.7 0 1.2 6 3.1 6 1.5 0 1.8-3 3.2-3 1 0 1.3 1.5 2.3 1.5"/><path d="M4 19.5c4-1.5 12-1.5 16 0"/></svg>
         Sign
       </button>
