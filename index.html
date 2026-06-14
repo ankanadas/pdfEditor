@@ -6,6 +6,9 @@
   <title>Free PDF Editor — Edit &amp; Sign PDFs in Your Browser, No Signup</title>
   <meta name="description" content="Free PDF editor — edit text and sign PDFs right in your browser. No sign-up, no charges, and your file never leaves your device." />
   <meta name="google-site-verification" content="y1V-GZtScvUVhoCN5ZD2h_mxjS4QseHyGwXCaAQwx9c" />
+  <!-- High-fidelity edit backend (PyMuPDF on Render). If it's unreachable, the editor falls
+       back to fully client-side saving automatically. -->
+  <script>window.PDF_BACKEND_URL = "https://pdf-editor-backend-jndx.onrender.com";</script>
   <style>
     :root {
       --brand: #6d5efc;

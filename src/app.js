@@ -178,6 +178,9 @@ class PDFEditorApp {
     ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn',
      'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'clearSignatureBtn']
       .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+    // Warm the edit backend now (free hosts sleep when idle) so it's awake by the time the
+    // user saves — avoids the first save silently falling back to client-side. Fire-and-forget.
+    PDFBackendService.checkHealth().catch(() => {});
   }
 
   setupControllerEvents() {
