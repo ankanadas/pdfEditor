@@ -200,17 +200,19 @@
     /* Stage */
     .stage { flex: 1; position: relative; overflow: auto; background: var(--stage); padding: 28px; }
 
+    /* All pages stacked vertically and scrolled in the stage */
     #canvasContainer {
-      display: none; justify-content: center; align-items: flex-start; min-height: 100%;
+      display: none; flex-direction: column; align-items: center; gap: 22px; min-height: 100%;
     }
     body.has-pdf #canvasContainer { display: flex; }
-    #canvas {
-      background: #fff; border-radius: 4px;
+    .page-wrap { position: relative; line-height: 0; }
+    .page-canvas {
+      display: block; background: #fff; border-radius: 4px;
       box-shadow: 0 8px 30px rgba(20,22,40,.14); max-width: 100%;
     }
-    body[data-mode="text"] #canvas,
-    body[data-mode="signature"] #canvas { cursor: crosshair; }
-    body[data-mode="erase"] #canvas { cursor: crosshair; }
+    body[data-mode="text"] .page-canvas,
+    body[data-mode="signature"] .page-canvas,
+    body[data-mode="erase"] .page-canvas { cursor: crosshair; }
 
     /* Landing / drop zone */
     .landing { max-width: 640px; margin: 24px auto; }
@@ -287,6 +289,33 @@
     }
     .signpad-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
     .signpad-actions .spacer { flex: 1; }
+    /* Signature dialog tabs / panels */
+    .sign-tabs { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+    .sign-tabs .spacer { flex: 1; }
+    .sign-tab {
+      border: none; background: none; cursor: pointer; padding: 9px 14px; font-size: 14px;
+      font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px;
+    }
+    .sign-tab:hover { color: var(--ink); }
+    .sign-tab.active { color: var(--brand); border-bottom-color: var(--brand); }
+    .sign-colors { display: inline-flex; gap: 6px; }
+    .sign-color { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #fff; outline: 1px solid var(--line); cursor: pointer; padding: 0; }
+    .sign-color.active { outline: 2px solid var(--brand); }
+    .sign-panel[data-panel="type"] #signTypeInput { width: 100%; font-size: 15px; margin-bottom: 12px; }
+    .sign-fonts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .sign-font {
+      border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; cursor: pointer;
+      font-size: 30px; line-height: 1.4; color: #111318; min-height: 56px; display: flex; align-items: center;
+      overflow: hidden; white-space: nowrap; background: #fff;
+    }
+    .sign-font:hover { background: #f7f6ff; }
+    .sign-font.active { border-color: var(--brand); box-shadow: 0 0 0 2px rgba(109,94,252,.2); }
+    .sign-font .ph { color: #b6bac6; }
+    .sign-image-drop {
+      display: flex; align-items: center; justify-content: center; min-height: 180px; padding: 16px;
+      border: 2px dashed #cfd2e6; border-radius: 10px; text-align: center; color: var(--muted); cursor: pointer;
+    }
+    #signImagePreview { max-width: 100%; max-height: 180px; }
 
     /* Confirm dialog */
     .confirm-backdrop {
@@ -399,12 +428,6 @@
           <button class="ab-toggle" id="addItalic" type="button" title="Italic"><i>I</i></button>
           <span class="ab-hint">→ then click on the page to place it</span>
         </div>
-        <div class="ctx ctx-sign">
-          <span class="ab-label">Signature</span>
-          <input type="text" id="signatureInput" class="field" placeholder="Type your name…" disabled />
-          <span class="ab-or">OR</span>
-          <button class="btn primary" id="drawSignBtn" type="button" title="Draw your own signature">✎ Create your Own Sign</button>
-        </div>
         <div class="ctx ctx-erase">
           <span class="ab-label">Erase</span>
           <span class="ab-hint">Drag a box over anything (e.g. an old signature) to remove it.</span>
@@ -425,14 +448,12 @@
             <div class="big">Drag &amp; drop your PDF here</div>
             <div class="or">or</div>
             <span class="btn primary" style="pointer-events:none">Upload PDF</span>
-            <div class="or" style="margin-top:14px">PDF files up to 10 MB</div>
+            <div class="or" style="margin-top:14px">PDF files up to 100 MB</div>
           </label>
         </div>
 
-        <!-- Editor canvas -->
-        <div id="canvasContainer">
-          <canvas id="canvas"></canvas>
-        </div>
+        <!-- Editor pages (one canvas per page, stacked, built by app.js) -->
+        <div id="canvasContainer"></div>
       </div>
     </div>
   </div>
@@ -444,7 +465,7 @@
       <li><strong>Open</strong> a PDF (button or drag &amp; drop).</li>
       <li><strong>Edit</strong> — click any line and type to change it in place.</li>
       <li><strong>Text</strong> — type, then click the page to drop new text.</li>
-      <li><strong>Sign</strong> — type your name (click page), or hit <strong>✎ Draw</strong> to draw it.</li>
+      <li><strong>Sign</strong> — draw, type, or upload a signature in the popup, then drag it into place.</li>
       <li><strong>Erase</strong> — drag a box over anything (e.g. an old signature) to remove it.</li>
       <li><strong>Clear</strong> removes added text/signatures you haven't saved yet.</li>
       <li><strong>Save</strong> downloads the edited PDF.</li>
@@ -463,12 +484,41 @@
     </div>
   </div>
 
-  <!-- Draw-your-signature pad -->
+  <!-- Signature dialog: Draw / Type / Image -->
   <div id="signPad" class="signpad-backdrop">
     <div class="signpad">
-      <div class="signpad-title">Draw your signature</div>
-      <div class="signpad-sub">Use your mouse or trackpad to sign below, then add it to the page.</div>
-      <canvas id="signPadCanvas" width="700" height="220"></canvas>
+      <div class="signpad-title">Add signature</div>
+
+      <div class="sign-tabs">
+        <button class="sign-tab active" data-tab="draw" type="button">Draw</button>
+        <button class="sign-tab" data-tab="type" type="button">Type</button>
+        <button class="sign-tab" data-tab="image" type="button">Image</button>
+        <span class="spacer"></span>
+        <span class="sign-colors" title="Ink colour">
+          <button class="sign-color active" data-color="#111318" style="background:#111318" type="button"></button>
+          <button class="sign-color" data-color="#1d4ed8" style="background:#1d4ed8" type="button"></button>
+          <button class="sign-color" data-color="#2563eb" style="background:#2563eb" type="button"></button>
+        </span>
+      </div>
+
+      <div class="sign-panel" data-panel="draw">
+        <canvas id="signPadCanvas" width="700" height="220"></canvas>
+        <div class="signpad-sub">Use your mouse or trackpad to sign above.</div>
+      </div>
+
+      <div class="sign-panel" data-panel="type" hidden>
+        <input type="text" id="signTypeInput" class="field" placeholder="Type your name" />
+        <div id="signFontList" class="sign-fonts"></div>
+      </div>
+
+      <div class="sign-panel" data-panel="image" hidden>
+        <label class="sign-image-drop" for="signImageInput">
+          <input type="file" id="signImageInput" accept="image/*" hidden />
+          <span id="signImagePrompt">Click to choose a signature image (PNG with transparent background works best)</span>
+          <img id="signImagePreview" alt="" hidden />
+        </label>
+      </div>
+
       <div class="signpad-actions">
         <button class="btn" id="signPadClear" type="button">Clear</button>
         <span class="spacer"></span>

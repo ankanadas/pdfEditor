@@ -10,17 +10,16 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString();
 
-// Largest PDF a user may open/edit. Keeps per-save memory and server load in check.
-// Change this single number (e.g. to 5) to adjust the limit everywhere in the UI.
-const MAX_FILE_MB = 10;
+// Largest PDF a user may open/edit. Change this single number to adjust the limit.
+// Note: very large PDFs are slower to render/save since everything runs in the browser.
+const MAX_FILE_MB = 100;
 const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 
 class PDFEditorApp {
   constructor() {
     this.controller = new EditorController();
-    this.canvas = document.getElementById('canvas');
-    this.ctx = this.canvas.getContext('2d');
-    this.currentPage = 0;
+    this.pageViews = [];   // one {pageNum, page, viewport, canvas, ctx, wrapper} per page
+    this.currentPage = 0;  // page currently in view (for the indicator / page nav)
     this.mode = null; // 'text', 'signature', or 'edit'
     this.pageWidth = 612; // Standard US Letter width in points
     this.pageHeight = 792; // Standard US Letter height in points
@@ -71,8 +70,7 @@ class PDFEditorApp {
     });
 
     document.getElementById('signatureModeBtn').addEventListener('click', () => {
-      console.log('Signature button clicked');
-      this.setMode('signature');
+      this.openSignPad();   // opens the Draw / Type / Image dialog
     });
 
     document.getElementById('eraseModeBtn')?.addEventListener('click', () => {
@@ -112,57 +110,47 @@ class PDFEditorApp {
       this.nextPage();
     });
 
-    // Canvas click
-    this.canvas.addEventListener('click', (e) => {
-      this.handleCanvasClick(e);
-    });
-
-    // Erase tool: drag a rectangle over content (e.g. a signature) to white it out.
-    this.canvas.addEventListener('mousedown', (e) => this.onEraseStart(e));
+    // Per-page canvas click & erase-drag listeners are attached in buildPages().
+    // Global move/up so an erase drag keeps tracking outside the page canvas.
     window.addEventListener('mousemove', (e) => this.onEraseMove(e));
     window.addEventListener('mouseup', (e) => this.onEraseEnd(e));
+
+    // Track which page is in view (for the page indicator) as the stage scrolls.
+    document.getElementById('stage')?.addEventListener('scroll', () => this.updateCurrentPageFromScroll());
 
     // Add-text bold/italic toggles
     document.getElementById('addBold')?.addEventListener('click', (e) => e.currentTarget.classList.toggle('on'));
     document.getElementById('addItalic')?.addEventListener('click', (e) => e.currentTarget.classList.toggle('on'));
 
-    // Draw-your-own-signature pad
-    document.getElementById('drawSignBtn')?.addEventListener('click', () => this.openSignPad());
+    // Signature dialog (Draw / Type / Image)
     document.getElementById('signPadClear')?.addEventListener('click', () => this.signPadClear());
     document.getElementById('signPadCancel')?.addEventListener('click', () => this.closeSignPad());
     document.getElementById('signPadAdd')?.addEventListener('click', () => this.signPadAdd());
-    this.initSignaturePad();
+    this.initSignatureDialog();
 
-    // Setup canvas wrapper for text box overlays
-    const canvasContainer = document.getElementById('canvasContainer');
-    canvasContainer.style.position = 'relative';
-    
-    const canvasWrapper = document.createElement('div');
-    canvasWrapper.id = 'canvasWrapper';
-    canvasWrapper.style.position = 'relative';
-    canvasWrapper.style.display = 'inline-block';
-    
-    const canvas = this.canvas;
-    canvas.parentNode.insertBefore(canvasWrapper, canvas);
-    canvasWrapper.appendChild(canvas);
   }
 
-  previousPage() {
-    if (this.currentPage > 0) {
-      this.clearEditableTextBoxes();
-      this.currentPage--;
-      this.renderCurrentPage();
-      this.updatePageInfo();
-    }
+  previousPage() { this.scrollToPage(this.currentPage - 1); }
+  nextPage() { this.scrollToPage(this.currentPage + 1); }
+
+  scrollToPage(i) {
+    const pv = this.pageViews[i];
+    if (!pv) return;
+    pv.wrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    this.currentPage = i;
+    this.updatePageInfo();
   }
 
-  nextPage() {
-    if (this.pdfJsDoc && this.currentPage < this.pdfJsDoc.numPages - 1) {
-      this.clearEditableTextBoxes();
-      this.currentPage++;
-      this.renderCurrentPage();
-      this.updatePageInfo();
+  /** Update the current-page indicator from the scroll position. */
+  updateCurrentPageFromScroll() {
+    const stage = document.getElementById('stage');
+    if (!stage || !this.pageViews.length) return;
+    const mid = stage.scrollTop + stage.clientHeight / 2;
+    let best = 0;
+    for (let i = 0; i < this.pageViews.length; i++) {
+      if (this.pageViews[i].wrapper.offsetTop <= mid) best = i;
     }
+    if (best !== this.currentPage) { this.currentPage = best; this.updatePageInfo(); }
   }
 
   updatePageInfo() {
@@ -174,7 +162,7 @@ class PDFEditorApp {
 
   /** Enable all the tools/controls that require a loaded PDF. */
   enableUiAfterLoad() {
-    ['saveBtn', 'textInput', 'signatureInput', 'prevPageBtn', 'nextPageBtn',
+    ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn',
      'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'clearSignatureBtn']
       .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
   }
@@ -331,8 +319,9 @@ class PDFEditorApp {
       await this.extractTextFromPDFjs();
 
       this.currentPage = 0;
-      await this.renderCurrentPage();
-      
+      await this.buildPages();
+      document.getElementById('stage')?.scrollTo({ top: 0 });
+
     } catch (error) {
       console.error('Error loading PDF:', error);
       
@@ -350,73 +339,77 @@ class PDFEditorApp {
     }
   }
 
-  async renderCurrentPage() {
-    console.log('renderCurrentPage called, isRendering:', this.isRendering);
-    
-    if (!this.controller.isLoaded || !this.pdfJsDoc) {
-      console.log('No PDF loaded yet');
-      return;
-    }
-    
-    if (this.isRendering) {
-      console.log('Already rendering, skipping...');
-      return;
-    }
-    
-    this.isRendering = true;
-    console.log('Starting render, set isRendering = true');
-    
-    // Clear overlays before rendering
-    this.clearEditableTextBoxes();
-    this.clearInsertOverlays();
+  /**
+   * Build the stacked, scrollable view: one canvas + overlay wrapper per page.
+   * Called when a document is (re)loaded. Preserves nothing — full DOM rebuild.
+   */
+  async buildPages() {
+    if (!this.pdfJsDoc) return;
+    const container = document.getElementById('canvasContainer');
+    if (!container) return;
+    container.innerHTML = '';
+    this.pageViews = [];
 
-    try {
-      console.log('Rendering page', this.currentPage + 1);
-      
-      // Get the page from PDF.js
-      const page = await this.pdfJsDoc.getPage(this.currentPage + 1); // PDF.js uses 1-based indexing
+    for (let i = 0; i < this.pdfJsDoc.numPages; i++) {
+      const page = await this.pdfJsDoc.getPage(i + 1);
       const viewport = page.getViewport({ scale: this.scale });
-      
-      // Set canvas size to match PDF page
-      this.canvas.width = viewport.width;
-      this.canvas.height = viewport.height;
-      this.pageWidth = page.view[2]; // Original page width
-      this.pageHeight = page.view[3]; // Original page height
 
-      console.log('Canvas size:', this.canvas.width, 'x', this.canvas.height);
+      const wrapper = document.createElement('div');
+      wrapper.className = 'page-wrap';
+      wrapper.dataset.page = String(i);
 
-      // Render the PDF page
-      // Note: PDF.js renders everything (text, images, graphics) onto the canvas
-      // We can't selectively hide text, so in edit mode our editable divs will overlay it
-      const renderContext = {
-        canvasContext: this.ctx,
-        viewport: viewport
-      };
-      
-      await page.render(renderContext).promise;
-      console.log('PDF page rendered');
+      const canvas = document.createElement('canvas');
+      canvas.className = 'page-canvas';
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      wrapper.appendChild(canvas);
+      container.appendChild(wrapper);
 
-      // Draw pending edits on top so they're visible in every mode.
-      this.drawPendingErases();
-      if (this.mode !== 'edit') this.drawPendingLineEdits();  // edit mode shows them in boxes
-      this.createInsertOverlays();
-
-      // In edit mode, show editable text boxes overlaid on the PDF
-      if (this.mode === 'edit') {
-        console.log('Edit mode active, creating editable boxes...');
-        // Small delay to ensure canvas is fully rendered
-        await new Promise(resolve => setTimeout(resolve, 50));
-        this.createEditableTextBoxes();
-      }
-
-      console.log('Page rendered successfully');
-    } catch (error) {
-      console.error('Error rendering page:', error);
-      this.showStatus('Error rendering PDF page', 'error');
-    } finally {
-      this.isRendering = false;
-      console.log('Render complete, set isRendering = false');
+      const pv = { pageNum: i, page, viewport, canvas, ctx: canvas.getContext('2d'), wrapper };
+      canvas.addEventListener('click', (e) => this.handleCanvasClick(e, pv));
+      canvas.addEventListener('mousedown', (e) => this.onEraseStart(e, pv));
+      this.pageViews.push(pv);
     }
+
+    this.pageWidth = this.pageViews[0] ? this.pageViews[0].page.view[2] : 612;
+    this.pageHeight = this.pageViews[0] ? this.pageViews[0].page.view[3] : 792;
+    this.currentPage = 0;
+    await this.refresh();
+    this.updatePageInfo();
+  }
+
+  /**
+   * Re-paint every page's bitmap and rebuild its overlays in place (keeps the DOM and
+   * scroll position). Use for edits / mode changes. Alias: renderCurrentPage().
+   */
+  async refresh() {
+    if (!this.pageViews.length) return;
+    if (this._refreshing) { this._refreshPending = true; return; }
+    this._refreshing = true;
+    try {
+      do {
+        this._refreshPending = false;
+        for (const pv of this.pageViews) {
+          this.clearPageOverlays(pv);
+          await pv.page.render({ canvasContext: pv.ctx, viewport: pv.viewport }).promise;
+          this.drawPendingErases(pv);
+          if (this.mode !== 'edit') this.drawPendingLineEdits(pv);  // edit mode shows them in boxes
+          this.createInsertOverlays(pv);
+          if (this.mode === 'edit') this.createEditableTextBoxes(pv);
+        }
+      } while (this._refreshPending);
+    } catch (error) {
+      console.error('Error rendering pages:', error);
+    } finally {
+      this._refreshing = false;
+    }
+  }
+
+  // Back-compat: existing call sites use renderCurrentPage() to mean "refresh overlays".
+  renderCurrentPage() { return this.refresh(); }
+
+  clearPageOverlays(pv) {
+    pv.wrapper.querySelectorAll('.editable-text-box, .insert-overlay').forEach(el => el.remove());
   }
 
   /**
@@ -424,38 +417,25 @@ class PDFEditorApp {
    * line (same left, baseline and size) and edits that line in place. Only the lines the
    * user actually changes are tracked, so saving leaves all other text untouched.
    */
-  createEditableTextBoxes() {
-    if (this.isCreatingTextBoxes) return;
-    this.isCreatingTextBoxes = true;
+  createEditableTextBoxes(pv) {
+    const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === pv.pageNum);
+    if (pageTextItems.length === 0) return;
 
-    const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === this.currentPage);
-    if (pageTextItems.length === 0) {
-      this.showStatus('No text found on this page to edit', 'info');
-      this.isCreatingTextBoxes = false;
-      return;
-    }
-
-    const canvasWrapper = document.getElementById('canvasWrapper');
-    if (!canvasWrapper) {
-      this.isCreatingTextBoxes = false;
-      return;
-    }
-
+    const canvasWrapper = pv.wrapper;
     // The canvas may be displayed smaller than its intrinsic pixels (max-width:100%).
-    const displayScale = (this.canvas.clientWidth || this.canvas.width) / this.canvas.width;
+    const displayScale = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
 
     const lines = this.groupTextItemsByLine(pageTextItems);
-    console.log('Editing', lines.length, 'lines; displayScale =', displayScale.toFixed(3));
 
     // Erase the original text from the canvas (white over each line) while leaving
     // images/graphics intact, so the editable boxes are the only visible text.
-    this.ctx.save();
-    this.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
-    this.ctx.fillStyle = '#ffffff';
+    pv.ctx.save();
+    pv.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
+    pv.ctx.fillStyle = '#ffffff';
     lines.forEach((line) => {
-      this.ctx.fillRect(line.left - 2, line.top - 2, (line.right - line.left) + 6, (line.bottom - line.top) + 4);
+      pv.ctx.fillRect(line.left - 2, line.top - 2, (line.right - line.left) + 6, (line.bottom - line.top) + 4);
     });
-    this.ctx.restore();
+    pv.ctx.restore();
 
     lines.forEach((line) => {
       const div = document.createElement('div');
@@ -524,10 +504,7 @@ class PDFEditorApp {
       });
 
       canvasWrapper.appendChild(div);
-      this.editableTextBoxes.push(div);
     });
-
-    this.isCreatingTextBoxes = false;
   }
 
   /**
@@ -633,28 +610,10 @@ class PDFEditorApp {
    * Clear all editable text boxes
    */
   clearEditableTextBoxes() {
-    console.log('clearEditableTextBoxes called, currently have', this.editableTextBoxes.length, 'boxes');
-    
-    // Find all text boxes in the DOM (in case array is out of sync)
-    const canvasWrapper = document.getElementById('canvasWrapper');
-    if (canvasWrapper) {
-      const allTextBoxes = canvasWrapper.querySelectorAll('.editable-text-box');
-      console.log('Found', allTextBoxes.length, 'text boxes in DOM');
-      allTextBoxes.forEach(box => {
-        box.remove();
-      });
-    }
-    
-    // Also clear from array
-    this.editableTextBoxes.forEach(box => {
-      if (box && box.parentNode) {
-        box.parentNode.removeChild(box);
-      }
-    });
-    
+    const container = document.getElementById('canvasContainer');
+    if (container) container.querySelectorAll('.editable-text-box').forEach(el => el.remove());
     this.editableTextBoxes = [];
     this.activeEditBox = null;
-    console.log('All text boxes cleared');
   }
 
   /**
@@ -714,31 +673,14 @@ class PDFEditorApp {
     if (mode === 'text') {
       textBtn.classList.add('active');
       document.getElementById('textInput').focus();
-      this.clearEditableTextBoxes();
-      this.canvas.style.opacity = '1';
-      // Leaving edit mode erased the canvas text; re-render to restore it.
-      if (previousMode === 'edit') this.renderCurrentPage();
     } else if (mode === 'edit') {
       editBtn.classList.add('active');
-      // Keep the canvas visible; the editable boxes have an opaque white background
-      // that covers the original text, so the logo and graphics stay on screen.
-      this.canvas.style.opacity = '1';
-      if (previousMode !== 'edit') {
-        this.renderCurrentPage();
-      }
-    } else if (mode === 'signature') {
-      sigBtn.classList.add('active');
-      document.getElementById('signatureInput').focus();
-      this.clearEditableTextBoxes();
-      this.canvas.style.opacity = '1';
-      if (previousMode === 'edit') this.renderCurrentPage();
     } else if (mode === 'erase') {
       if (eraseBtn) eraseBtn.classList.add('active');
-      this.clearEditableTextBoxes();
-      this.canvas.style.opacity = '1';
-      if (previousMode === 'edit') this.renderCurrentPage();
     }
 
+    // Rebuild overlays for the new mode (edit boxes vs. painted edits) on every page.
+    if (previousMode !== mode) this.refresh();
     this.updateModeIndicator();
   }
 
@@ -753,9 +695,6 @@ class PDFEditorApp {
     } else if (this.mode === 'edit') {
       indicator.textContent = 'Editing Text';
       indicator.classList.add('active');
-    } else if (this.mode === 'signature') {
-      indicator.textContent = 'Signature';
-      indicator.classList.add('active');
     } else if (this.mode === 'erase') {
       indicator.textContent = 'Erase';
       indicator.classList.add('active');
@@ -765,7 +704,7 @@ class PDFEditorApp {
     }
   }
 
-  handleCanvasClick(event) {
+  handleCanvasClick(event, pv) {
     if (!this.controller.isLoaded) {
       this.showStatus('Open a PDF first.', 'error');
       return;
@@ -776,10 +715,10 @@ class PDFEditorApp {
     }
     if (this.mode === 'edit') return;  // edit mode is handled by the per-line boxes
 
-    // Map the click to intrinsic canvas pixels (handles CSS scaling), then to PDF
-    // points with a top-left origin — the same coordinate space used when saving.
-    const rect = this.canvas.getBoundingClientRect();
-    const toIntrinsic = this.canvas.width / rect.width;
+    // Map the click to that page's intrinsic canvas pixels (handles CSS scaling), then
+    // to PDF points (top-left origin) — the coordinate space used when saving.
+    const rect = pv.canvas.getBoundingClientRect();
+    const toIntrinsic = pv.canvas.width / rect.width;
     const xPt = ((event.clientX - rect.left) * toIntrinsic) / this.scale;
     const clickYPt = ((event.clientY - rect.top) * toIntrinsic) / this.scale;
 
@@ -792,15 +731,11 @@ class PDFEditorApp {
         bold: document.getElementById('addBold')?.classList.contains('on'),
         italic: document.getElementById('addItalic')?.classList.contains('on'),
       };
-      this.placeInsert(xPt, clickYPt, text, fontSize, 'text', opts);
+      this.placeInsert(xPt, clickYPt, text, fontSize, 'text', opts, pv.pageNum);
       this.showStatus(`Added "${text}" — click Save PDF to keep it`, 'success');
       document.getElementById('textInput').value = '';
-    } else if (this.mode === 'signature') {
-      const name = document.getElementById('signatureInput').value.trim();
-      if (!name) { this.showStatus('Type your name first', 'error'); return; }
-      this.placeInsert(xPt, clickYPt, name, 26, 'signature');
-      this.showStatus('Signature placed — click Save PDF to keep it', 'success');
     }
+    // Signatures are added via the Sign dialog (drawn/typed/image), not by clicking.
   }
 
   /**
@@ -808,9 +743,9 @@ class PDFEditorApp {
    * is treated as the top-left of the text, so the baseline sits ~one ascent below it.
    * It is drawn as a preview now and inserted for real by the backend on Save.
    */
-  placeInsert(xPt, topPt, text, fontSize, style, opts = {}) {
+  placeInsert(xPt, topPt, text, fontSize, style, opts = {}, pageNum = this.currentPage) {
     this.edits.push({
-      pageIndex: this.currentPage,
+      pageIndex: pageNum,
       redact: false,            // nothing to remove — this is an insert, not a replace
       style: style,             // 'text' or 'signature'
       x: xPt,
@@ -826,8 +761,8 @@ class PDFEditorApp {
   }
 
   clearInsertOverlays() {
-    const wrap = document.getElementById('canvasWrapper');
-    if (wrap) wrap.querySelectorAll('.insert-overlay').forEach(el => el.remove());
+    const container = document.getElementById('canvasContainer');
+    if (container) container.querySelectorAll('.insert-overlay').forEach(el => el.remove());
     this.insertOverlays = [];
   }
 
@@ -874,8 +809,46 @@ class PDFEditorApp {
     });
   }
 
-  // ----- Draw-your-own-signature pad -----
-  initSignaturePad() {
+  // ----- Signature dialog: Draw / Type / Image -----
+  // Fonts offered on the Type tab. Each typed signature is rasterised to an image in the
+  // chosen font, so the saved result looks EXACTLY like the preview (no font substitution).
+  static get SIGN_FONTS() {
+    return [
+      '"Snell Roundhand","Savoye LET",cursive',
+      '"Brush Script MT","Bradley Hand",cursive',
+      '"Apple Chancery","Segoe Script",cursive',
+      '"Savoye LET","Snell Roundhand",cursive',
+    ];
+  }
+
+  initSignatureDialog() {
+    this.signTab = 'draw';
+    this.signColor = '#111318';
+    this.signTypeFont = PDFEditorApp.SIGN_FONTS[0];
+    this.signImageData = null;
+
+    // Tabs
+    document.querySelectorAll('.sign-tab').forEach(tab => {
+      tab.addEventListener('click', () => this.setSignTab(tab.dataset.tab));
+    });
+    // Colours
+    document.querySelectorAll('.sign-color').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.signColor = btn.dataset.color;
+        document.querySelectorAll('.sign-color').forEach(b => b.classList.toggle('active', b === btn));
+        this.renderSignFontList();   // recolour the type previews
+      });
+    });
+    // Type input -> refresh font previews
+    document.getElementById('signTypeInput')?.addEventListener('input', () => this.renderSignFontList());
+    // Image upload
+    document.getElementById('signImageInput')?.addEventListener('change', (e) => this.onSignImage(e));
+
+    this.initDrawPad();
+    this.renderSignFontList();
+  }
+
+  initDrawPad() {
     const c = document.getElementById('signPadCanvas');
     if (!c) return;
     const ctx = c.getContext('2d');
@@ -892,7 +865,8 @@ class PDFEditorApp {
       if (!drawing) return;
       e.preventDefault();
       const p = pos(e);
-      ctx.strokeStyle = '#11131c'; ctx.lineWidth = 2.8; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.strokeStyle = this.signColor || '#111318';
+      ctx.lineWidth = 2.8; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       ctx.lineTo(p.x, p.y); ctx.stroke();
       this._padHasInk = true;
     };
@@ -905,9 +879,51 @@ class PDFEditorApp {
     c.addEventListener('touchend', end);
   }
 
+  setSignTab(tab) {
+    this.signTab = tab;
+    document.querySelectorAll('.sign-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    document.querySelectorAll('.sign-panel').forEach(p => { p.hidden = (p.dataset.panel !== tab); });
+  }
+
+  /** Render the Type tab's font choices, previewing the entered name in each font/colour. */
+  renderSignFontList() {
+    const list = document.getElementById('signFontList');
+    if (!list) return;
+    const name = (document.getElementById('signTypeInput')?.value || '').trim();
+    list.innerHTML = '';
+    PDFEditorApp.SIGN_FONTS.forEach((font) => {
+      const opt = document.createElement('div');
+      opt.className = 'sign-font' + (font === this.signTypeFont ? ' active' : '');
+      opt.style.fontFamily = font;
+      opt.style.color = this.signColor;
+      if (name) opt.textContent = name;
+      else { const ph = document.createElement('span'); ph.className = 'ph'; ph.textContent = 'Your name'; opt.appendChild(ph); }
+      opt.addEventListener('click', () => {
+        this.signTypeFont = font;
+        list.querySelectorAll('.sign-font').forEach(el => el.classList.toggle('active', el === opt));
+      });
+      list.appendChild(opt);
+    });
+  }
+
+  onSignImage(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      this.signImageData = reader.result;
+      const img = document.getElementById('signImagePreview');
+      const prompt = document.getElementById('signImagePrompt');
+      if (img) { img.src = reader.result; img.hidden = false; }
+      if (prompt) prompt.hidden = true;
+    };
+    reader.readAsDataURL(file);
+  }
+
   openSignPad() {
     if (!this.controller.isLoaded) { this.showStatus('Open a PDF first', 'error'); return; }
     this.signPadClear();
+    this.setSignTab('draw');
     document.getElementById('signPad')?.classList.add('open');
   }
 
@@ -942,25 +958,45 @@ class PDFEditorApp {
     const c = document.getElementById('signPadCanvas');
     if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
     this._padHasInk = false;
+    const ti = document.getElementById('signTypeInput'); if (ti) ti.value = '';
+    this.signImageData = null;
+    const img = document.getElementById('signImagePreview'); if (img) { img.hidden = true; img.src = ''; }
+    const prompt = document.getElementById('signImagePrompt'); if (prompt) prompt.hidden = false;
+    this.renderSignFontList();
   }
 
-  signPadAdd() {
-    const c = document.getElementById('signPadCanvas');
-    if (!c || !this._padHasInk) { this.showStatus('Draw your signature first', 'error'); return; }
-    const trimmed = this.trimCanvas(c);
-    if (!trimmed) { this.showStatus('Draw your signature first', 'error'); return; }
+  async signPadAdd() {
+    let dataUrl = null, ratio = 0.3;
 
-    // Default placement: ~170pt wide (keep aspect), centred-ish on the current page.
-    const pageWpt = this.canvas.width / this.scale;
-    const pageHpt = this.canvas.height / this.scale;
-    const wPt = Math.min(170, pageWpt - 40);
-    const hPt = wPt * (trimmed.h / trimmed.w);
+    if (this.signTab === 'draw') {
+      const c = document.getElementById('signPadCanvas');
+      const trimmed = c && this._padHasInk ? this.trimCanvas(c) : null;
+      if (!trimmed) { this.showStatus('Draw your signature first', 'error'); return; }
+      dataUrl = trimmed.dataUrl; ratio = trimmed.h / trimmed.w;
+    } else if (this.signTab === 'type') {
+      const name = (document.getElementById('signTypeInput')?.value || '').trim();
+      if (!name) { this.showStatus('Type your name first', 'error'); return; }
+      const out = this.renderTypedSignature(name, this.signTypeFont, this.signColor);
+      dataUrl = out.dataUrl; ratio = out.h / out.w;
+    } else if (this.signTab === 'image') {
+      if (!this.signImageData) { this.showStatus('Choose an image first', 'error'); return; }
+      dataUrl = this.signImageData;
+      ratio = await this.imageRatio(dataUrl);
+    }
+    if (!dataUrl) return;
+
+    // Place on the page currently in view, centred-ish, ~180pt wide (keep aspect).
+    const pv = this.pageViews[this.currentPage] || this.pageViews[0];
+    const pageWpt = pv ? pv.canvas.width / this.scale : 612;
+    const pageHpt = pv ? pv.canvas.height / this.scale : 792;
+    const wPt = Math.min(180, pageWpt - 40);
+    const hPt = wPt * ratio;
 
     this.edits.push({
-      pageIndex: this.currentPage,
+      pageIndex: pv ? pv.pageNum : this.currentPage,
       redact: false,
       kind: 'image',
-      dataUrl: trimmed.dataUrl,
+      dataUrl: dataUrl,
       x: Math.max(20, (pageWpt - wPt) / 2),
       top: Math.max(20, pageHpt * 0.45),
       width: wPt,
@@ -968,8 +1004,31 @@ class PDFEditorApp {
     });
     this.commitHistory();
     this.closeSignPad();
-    this.renderCurrentPage();
+    this.refresh();
     this.showStatus('Signature added — drag it into place, resize with the corner', 'success');
+  }
+
+  /** Rasterise typed text in a given font/colour to a trimmed transparent PNG. */
+  renderTypedSignature(text, fontStack, color) {
+    const fontPx = 80, pad = 24;
+    const meas = document.createElement('canvas').getContext('2d');
+    meas.font = `${fontPx}px ${fontStack}`;
+    const w = Math.max(1, Math.ceil(meas.measureText(text).width)) + pad * 2;
+    const h = Math.ceil(fontPx * 1.6) + pad;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const cx = c.getContext('2d');
+    cx.font = `${fontPx}px ${fontStack}`;
+    cx.fillStyle = color || '#111318';
+    cx.textBaseline = 'middle';
+    cx.fillText(text, pad, h / 2);
+    const trimmed = this.trimCanvas(c) || { dataUrl: c.toDataURL('image/png'), w, h };
+    return trimmed;
+  }
+
+  /** Natural height/width ratio of an image data-URL. */
+  imageRatio(src) {
+    return this.loadImage(src).then(im => (im.naturalHeight / im.naturalWidth) || 0.4).catch(() => 0.4);
   }
 
   /** Crop a canvas to its non-transparent content; returns a trimmed PNG data URL + size. */
@@ -1014,13 +1073,13 @@ class PDFEditorApp {
    * the resize handle changes its font size; the × button deletes it. All changes are
    * undoable and are written into the PDF (at the same spot) on Save.
    */
-  createInsertOverlays() {
-    const wrap = document.getElementById('canvasWrapper');
+  createInsertOverlays(pv) {
+    const wrap = pv.wrapper;
     if (!wrap) return;
-    const ds = (this.canvas.clientWidth || this.canvas.width) / this.canvas.width;
+    const ds = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
     const unit = this.scale * ds;  // PDF points -> displayed CSS px
     const inserts = this.edits.filter(e =>
-      e.redact === false && e.pageIndex === this.currentPage && (e.newText || e.kind === 'image'));
+      e.redact === false && e.pageIndex === pv.pageNum && (e.newText || e.kind === 'image'));
 
     inserts.forEach(edit => {
       // Drawn-signature image overlay
@@ -1187,10 +1246,10 @@ class PDFEditorApp {
   /**
    * Draw pending erase rectangles (white-out areas, e.g. an old signature) as a preview.
    */
-  drawPendingErases() {
-    const erases = this.edits.filter(e => e.kind === 'erase' && e.pageIndex === this.currentPage);
+  drawPendingErases(pv) {
+    const erases = this.edits.filter(e => e.kind === 'erase' && e.pageIndex === pv.pageNum);
     if (erases.length === 0) return;
-    const ctx = this.ctx;
+    const ctx = pv.ctx;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = '#ffffff';
@@ -1205,13 +1264,13 @@ class PDFEditorApp {
    * Draw pending line text-edits onto the canvas (white-cover the original line, then the
    * new text) so an edit stays visible in EVERY mode — not only inside the edit boxes.
    */
-  drawPendingLineEdits() {
+  drawPendingLineEdits(pv) {
     const S = this.scale;
     const list = this.edits.filter(e =>
-      e.redact !== false && e.kind !== 'erase' && e.pageIndex === this.currentPage &&
+      e.redact !== false && e.kind !== 'erase' && e.pageIndex === pv.pageNum &&
       e.top != null && e.newText != null);
     if (list.length === 0) return;
-    const cx = this.ctx;
+    const cx = pv.ctx;
     cx.save();
     cx.setTransform(1, 0, 0, 1, 0, 0);
     list.forEach(e => {
@@ -1231,22 +1290,22 @@ class PDFEditorApp {
     cx.restore();
   }
 
-  /** Find a pending line-edit that matches a given extracted line (by position). */
+  /** Find a pending line-edit that matches a given extracted line (by page + position). */
   findLineEdit(line) {
     const s = this.scale;
     const xPt = line.left / s, basePt = line.baseline / s;
     return this.edits.find(e =>
-      e.redact !== false && e.kind !== 'erase' && e.pageIndex === this.currentPage &&
+      e.redact !== false && e.kind !== 'erase' && e.pageIndex === line.pageIndex &&
       Math.abs(e.x - xPt) < 1.5 && Math.abs(e.baseline - basePt) < 1.5);
   }
 
   // ----- Erase tool (drag a rectangle to white-out content) -----
-  onEraseStart(event) {
+  onEraseStart(event, pv) {
     if (this.mode !== 'erase' || !this.controller.isLoaded) return;
     event.preventDefault();
-    const rect = this.canvas.getBoundingClientRect();
-    this.eraseDrag = { startX: event.clientX, startY: event.clientY, rect };
-    const wrap = document.getElementById('canvasWrapper');
+    const rect = pv.canvas.getBoundingClientRect();
+    this.eraseDrag = { startX: event.clientX, startY: event.clientY, rect, pv };
+    const wrap = pv.wrapper;
     const sel = document.createElement('div');
     sel.style.position = 'absolute';
     sel.style.border = '1.5px dashed #e5484d';
@@ -1271,6 +1330,7 @@ class PDFEditorApp {
   onEraseEnd(event) {
     if (!this.eraseDrag) return;
     const r = this.eraseDrag.rect;
+    const pv = this.eraseDrag.pv;
     const x0 = this.eraseDrag.startX - r.left, y0 = this.eraseDrag.startY - r.top;
     const x1 = event.clientX - r.left, y1 = event.clientY - r.top;
     if (this.eraseSel) { this.eraseSel.remove(); this.eraseSel = null; }
@@ -1278,17 +1338,17 @@ class PDFEditorApp {
 
     const leftCss = Math.min(x0, x1), topCss = Math.min(y0, y1);
     const wCss = Math.abs(x1 - x0), hCss = Math.abs(y1 - y0);
-    if (wCss < 4 || hCss < 4) return;  // ignore stray clicks
+    if (!pv || wCss < 4 || hCss < 4) return;  // ignore stray clicks
 
-    // Displayed px -> intrinsic canvas px -> PDF points (top-left origin).
-    const toIntrinsic = this.canvas.width / r.width;
+    // Displayed px -> that page's intrinsic canvas px -> PDF points (top-left origin).
+    const toIntrinsic = pv.canvas.width / r.width;
     const xPt = (leftCss * toIntrinsic) / this.scale;
     const topPt = (topCss * toIntrinsic) / this.scale;
     const wPt = (wCss * toIntrinsic) / this.scale;
     const hPt = (hCss * toIntrinsic) / this.scale;
 
     this.edits.push({
-      pageIndex: this.currentPage,
+      pageIndex: pv.pageNum,
       kind: 'erase',
       x: xPt,
       right: xPt + wPt,
@@ -1349,7 +1409,7 @@ class PDFEditorApp {
         await this.extractTextFromPDFjs();
         this.edits = [];
         this.resetHistory();   // the saved file is the new baseline
-        await this.renderCurrentPage();
+        await this.buildPages();
         this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
       }
     } catch (error) {
