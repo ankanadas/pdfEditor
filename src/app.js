@@ -1,5 +1,5 @@
 import { EditorController } from './core/EditorController.js';
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
@@ -76,6 +76,18 @@ class PDFEditorApp {
     document.getElementById('eraseModeBtn')?.addEventListener('click', () => {
       this.setMode('erase');
     });
+
+    document.getElementById('stampModeBtn')?.addEventListener('click', () => {
+      this.setMode('stamp');
+    });
+    // Stamp picker chips: choose which stamp to drop on the next page click.
+    this.activeStamp = null;
+    document.querySelectorAll('.stamp-chip').forEach(chip => {
+      chip.addEventListener('click', () =>
+        this.selectStampChip(chip, { label: chip.dataset.label, color: chip.dataset.color }));
+    });
+    // Upload a custom stamp image -> adds a selectable thumbnail chip.
+    document.getElementById('customStampInput')?.addEventListener('change', (e) => this.onCustomStampUpload(e));
 
     // Clear signature button
     document.getElementById('clearSignatureBtn').addEventListener('click', () => {
@@ -163,7 +175,7 @@ class PDFEditorApp {
   /** Enable all the tools/controls that require a loaded PDF. */
   enableUiAfterLoad() {
     ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn',
-     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'clearSignatureBtn']
+     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'clearSignatureBtn']
       .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
   }
 
@@ -664,10 +676,11 @@ class PDFEditorApp {
     const editBtn = document.getElementById('editModeBtn');
     const sigBtn = document.getElementById('signatureModeBtn');
     const eraseBtn = document.getElementById('eraseModeBtn');
+    const stampBtn = document.getElementById('stampModeBtn');
 
     // Highlight the active tool and expose the mode on <body> so the UI (CSS) can
     // show the relevant inputs / cursor for that tool.
-    [textBtn, editBtn, sigBtn, eraseBtn].forEach(btn => btn && btn.classList.remove('active'));
+    [textBtn, editBtn, sigBtn, eraseBtn, stampBtn].forEach(btn => btn && btn.classList.remove('active'));
     document.body.dataset.mode = mode || '';
 
     if (mode === 'text') {
@@ -677,6 +690,8 @@ class PDFEditorApp {
       editBtn.classList.add('active');
     } else if (mode === 'erase') {
       if (eraseBtn) eraseBtn.classList.add('active');
+    } else if (mode === 'stamp') {
+      if (stampBtn) stampBtn.classList.add('active');
     }
 
     // Rebuild overlays for the new mode (edit boxes vs. painted edits) on every page.
@@ -697,6 +712,9 @@ class PDFEditorApp {
       indicator.classList.add('active');
     } else if (this.mode === 'erase') {
       indicator.textContent = 'Erase';
+      indicator.classList.add('active');
+    } else if (this.mode === 'stamp') {
+      indicator.textContent = 'Stamp';
       indicator.classList.add('active');
     } else {
       indicator.textContent = 'Pick a tool';
@@ -734,8 +752,133 @@ class PDFEditorApp {
       this.placeInsert(xPt, clickYPt, text, fontSize, 'text', opts, pv.pageNum);
       this.showStatus(`Added "${text}" — click Save PDF to keep it`, 'success');
       document.getElementById('textInput').value = '';
+    } else if (this.mode === 'stamp') {
+      if (!this.activeStamp) { this.showStatus('Pick a stamp (Approved, Reject, …) first', 'error'); return; }
+      this.placeStamp(xPt, clickYPt, pv);
     }
     // Signatures are added via the Sign dialog (drawn/typed/image), not by clicking.
+  }
+
+  /** Mark a stamp chip (preset or custom) as the selected stamp. */
+  selectStampChip(chip, stamp) {
+    this.activeStamp = stamp;
+    document.querySelectorAll('.stamp-chip').forEach(c => c.classList.toggle('active', c === chip));
+    const name = stamp.label || 'Custom';
+    this.showStatus(`${name} stamp selected — click on the page to place it`, 'success');
+  }
+
+  /** Read an uploaded image, add it as a selectable thumbnail chip, and select it. */
+  onCustomStampUpload(event) {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';   // allow re-uploading the same file later
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result;
+      const ratio = await this.imageRatio(dataUrl);
+      const chips = document.getElementById('stampChips');
+      if (!chips) return;
+
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'stamp-chip custom';
+      const img = document.createElement('img');
+      img.src = dataUrl; img.alt = 'Custom stamp'; img.draggable = false;
+      chip.appendChild(img);
+      const del = document.createElement('span');
+      del.className = 'stamp-chip-x'; del.textContent = '×'; del.title = 'Remove this stamp';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.activeStamp && this.activeStamp.dataUrl === dataUrl) this.activeStamp = null;
+        chip.remove();
+      });
+      chip.appendChild(del);
+
+      const stamp = { label: 'Custom', dataUrl, ratio };
+      chip.addEventListener('click', () => this.selectStampChip(chip, stamp));
+      chips.appendChild(chip);
+      this.selectStampChip(chip, stamp);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  /** Drop the currently-selected stamp (preset or uploaded) centred on the clicked point. */
+  placeStamp(xPt, topPt, pv) {
+    const s = this.activeStamp;
+    let dataUrl, ratio;
+    if (s.dataUrl) {                       // uploaded custom stamp — use the image as-is
+      dataUrl = s.dataUrl;
+      ratio = s.ratio || 0.4;
+    } else {                               // preset stamp — rasterise it
+      const out = this.renderStamp(s.label, s.color);
+      dataUrl = out.dataUrl;
+      ratio = out.h / out.w;
+    }
+    const pageWpt = pv.canvas.width / this.scale;
+    const wPt = Math.min(150, pageWpt - 40);
+    const hPt = wPt * ratio;
+
+    this.edits.push({
+      pageIndex: pv.pageNum,
+      redact: false,
+      kind: 'image',
+      dataUrl,
+      x: Math.max(0, Math.min(xPt - wPt / 2, pageWpt - wPt)),
+      top: Math.max(0, topPt - hPt / 2),
+      width: wPt,
+      height: hPt,
+    });
+    this.commitHistory();
+    this.refresh();
+    this.showStatus(`${s.label || 'Custom'} stamp added — drag to reposition, resize with the corner`, 'success');
+  }
+
+  /**
+   * Rasterise a preset stamp (double-ruled rounded box + bold uppercase label, slightly
+   * tilted like a rubber stamp) to a trimmed transparent PNG, reusing the image-overlay
+   * save pipeline used by signatures.
+   */
+  renderStamp(label, color) {
+    const text = (label || '').toUpperCase();
+    const fontPx = 56, padX = 26, padY = 14, outerLW = 5, innerLW = 2.5, radius = 12;
+    const angle = -7 * Math.PI / 180;
+
+    const meas = document.createElement('canvas').getContext('2d');
+    meas.font = `800 ${fontPx}px Arial, "Helvetica Neue", sans-serif`;
+    const boxW = Math.ceil(meas.measureText(text).width) + padX * 2;
+    const boxH = fontPx + padY * 2;
+
+    // Square canvas large enough to hold the tilted box plus stroke/margin.
+    const size = Math.ceil(Math.hypot(boxW, boxH)) + 40;
+    const c = document.createElement('canvas');
+    c.width = size; c.height = size;
+    const cx = c.getContext('2d');
+    cx.translate(size / 2, size / 2);
+    cx.rotate(angle);
+    cx.strokeStyle = color;
+    cx.fillStyle = color;
+    this._roundRectPath(cx, -boxW / 2, -boxH / 2, boxW, boxH, radius);
+    cx.lineWidth = outerLW; cx.stroke();
+    this._roundRectPath(cx, -boxW / 2 + 6, -boxH / 2 + 6, boxW - 12, boxH - 12, Math.max(4, radius - 5));
+    cx.lineWidth = innerLW; cx.stroke();
+    cx.font = `800 ${fontPx}px Arial, "Helvetica Neue", sans-serif`;
+    cx.textAlign = 'center'; cx.textBaseline = 'middle';
+    cx.fillText(text, 0, 2);
+
+    return this.trimCanvas(c) || { dataUrl: c.toDataURL('image/png'), w: size, h: size };
+  }
+
+  /** Trace a rounded-rectangle path (fallback for canvases without ctx.roundRect). */
+  _roundRectPath(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') { ctx.roundRect(x, y, w, h, r); return; }
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
   }
 
   /**
@@ -767,7 +910,7 @@ class PDFEditorApp {
   }
 
   /** Move / proportional-resize / delete for a drawn-signature image overlay. */
-  wireImageOverlay(box, del, handle, edit, unit) {
+  wireImageOverlay(box, del, handle, rotate, edit, unit) {
     const commit = () => {
       edit.x = parseFloat(box.style.left) / unit;
       edit.top = parseFloat(box.style.top) / unit;
@@ -775,8 +918,27 @@ class PDFEditorApp {
       edit.height = parseFloat(box.style.height) / unit;
       this.commitHistory();
     };
+    // Rotate: drag the top handle around the box centre. Shift snaps to 15°.
+    rotate.addEventListener('mousedown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const r = box.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;  // centre is invariant under rotation
+      const move = (ev) => {
+        let deg = Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180 / Math.PI + 90;
+        if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+        deg = Math.round(deg);
+        edit.rotation = deg;
+        box.style.transform = `rotate(${deg}deg)`;
+      };
+      const up = () => {
+        window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+        this.commitHistory();
+        this.showStatus(`Rotated to ${edit.rotation || 0}°`, 'success');
+      };
+      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+    });
     box.addEventListener('mousedown', (e) => {
-      if (e.target === del || e.target === handle) return;
+      if (e.target === del || e.target === handle || e.target === rotate) return;
       e.preventDefault(); e.stopPropagation();
       const sx = e.clientX, sy = e.clientY;
       const ox = parseFloat(box.style.left), oy = parseFloat(box.style.top);
@@ -824,6 +986,7 @@ class PDFEditorApp {
   initSignatureDialog() {
     this.signTab = 'draw';
     this.signColor = '#111318';
+    this.signPenWidth = 2.8;
     this.signTypeFont = PDFEditorApp.SIGN_FONTS[0];
     this.signImageData = null;
 
@@ -837,6 +1000,13 @@ class PDFEditorApp {
         this.signColor = btn.dataset.color;
         document.querySelectorAll('.sign-color').forEach(b => b.classList.toggle('active', b === btn));
         this.renderSignFontList();   // recolour the type previews
+      });
+    });
+    // Pen width (Draw tab)
+    document.querySelectorAll('.sign-width').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.signPenWidth = parseFloat(btn.dataset.width);
+        document.querySelectorAll('.sign-width').forEach(b => b.classList.toggle('active', b === btn));
       });
     });
     // Type input -> refresh font previews
@@ -866,7 +1036,7 @@ class PDFEditorApp {
       e.preventDefault();
       const p = pos(e);
       ctx.strokeStyle = this.signColor || '#111318';
-      ctx.lineWidth = 2.8; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.lineWidth = this.signPenWidth || 2.8; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       ctx.lineTo(p.x, p.y); ctx.stroke();
       this._padHasInk = true;
     };
@@ -1090,6 +1260,7 @@ class PDFEditorApp {
         box.style.top = (edit.top * unit) + 'px';
         box.style.width = (edit.width * unit) + 'px';
         box.style.height = (edit.height * unit) + 'px';
+        box.style.transform = `rotate(${edit.rotation || 0}deg)`;
         const img = document.createElement('img');
         img.src = edit.dataUrl;
         img.draggable = false;
@@ -1099,9 +1270,13 @@ class PDFEditorApp {
         delI.textContent = '×';
         const handleI = document.createElement('div');
         handleI.className = 'insert-handle';
+        const rotateI = document.createElement('div');
+        rotateI.className = 'insert-rotate';
+        rotateI.title = 'Drag to rotate (hold Shift to snap to 15°)';
         box.appendChild(delI);
         box.appendChild(handleI);
-        this.wireImageOverlay(box, delI, handleI, edit, unit);
+        box.appendChild(rotateI);
+        this.wireImageOverlay(box, delI, handleI, rotateI, edit, unit);
         wrap.appendChild(box);
         this.insertOverlays.push(box);
         return;
@@ -1526,13 +1701,25 @@ class PDFEditorApp {
       if (!page) continue;
       const ph = page.getHeight();
 
-      // Drawn-signature image: embed and place (top-left origin -> bottom-left).
+      // Drawn-signature / stamp image: embed and place (top-left origin -> bottom-left).
       if (edit.kind === 'image' && edit.dataUrl) {
         const png = await pdfDoc.embedPng(edit.dataUrl);
-        page.drawImage(png, {
-          x: edit.x, y: ph - edit.top - edit.height,
-          width: edit.width, height: edit.height,
-        });
+        const w = edit.width, h = edit.height;
+        const rot = edit.rotation || 0;
+        if (!rot) {
+          page.drawImage(png, { x: edit.x, y: ph - edit.top - h, width: w, height: h });
+        } else {
+          // pdf-lib rotates about the (x,y) anchor; offset it so the rotation is about the
+          // image centre (matching the on-screen overlay). CSS rotates clockwise for +deg,
+          // pdf-lib counter-clockwise, so negate the angle.
+          const cx = edit.x + w / 2;
+          const cy = ph - edit.top - h / 2;
+          const rad = -rot * Math.PI / 180;
+          const cos = Math.cos(rad), sin = Math.sin(rad);
+          const ax = cx - (w / 2 * cos - h / 2 * sin);
+          const ay = cy - (w / 2 * sin + h / 2 * cos);
+          page.drawImage(png, { x: ax, y: ay, width: w, height: h, rotate: degrees(-rot) });
+        }
         continue;
       }
 
