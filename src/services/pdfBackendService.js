@@ -2,9 +2,11 @@
  * Service to communicate with Python backend for PDF processing
  */
 
-// Use 127.0.0.1 (not "localhost") and port 5001: on macOS, port 5000 is taken by
-// AirPlay Receiver, and "localhost" can resolve to IPv6 (::1) and miss the backend.
-const BACKEND_URL = 'http://127.0.0.1:5001';
+// Backend base URL. For production (e.g. a hosted Flask app), set `window.PDF_BACKEND_URL`
+// in index.html. In local dev it defaults to 127.0.0.1:5001 — using 127.0.0.1 (not
+// "localhost") because on macOS "localhost" can resolve to IPv6 (::1) and miss the backend,
+// and port 5001 because 5000 is taken by AirPlay Receiver.
+const BACKEND_URL = (typeof window !== 'undefined' && window.PDF_BACKEND_URL) || 'http://127.0.0.1:5001';
 
 export class PDFBackendService {
   /**
@@ -12,12 +14,16 @@ export class PDFBackendService {
    */
   static async checkHealth() {
     try {
-      const response = await fetch(`${BACKEND_URL}/health`);
+      // Short timeout so a missing backend (e.g. on static hosting) falls back to the
+      // client-side save quickly instead of stalling.
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 1500);
+      const response = await fetch(`${BACKEND_URL}/health`, { signal: ctrl.signal });
+      clearTimeout(t);
       const data = await response.json();
       return data.status === 'ok';
     } catch (error) {
-      console.error('Backend health check failed:', error);
-      return false;
+      return false;   // backend unreachable -> caller uses the client-side fallback
     }
   }
 

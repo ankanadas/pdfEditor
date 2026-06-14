@@ -1,0 +1,15 @@
+# Render Blueprint for the PyMuPDF edit backend (the frontend stays on Netlify).
+# Deploy: push this repo to GitHub, then on render.com -> New + -> Blueprint -> pick this repo.
+# Render builds from the backend/ subdir, installs requirements, and runs gunicorn over HTTPS.
+services:
+  - type: web
+    name: pdf-editor-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 2
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"

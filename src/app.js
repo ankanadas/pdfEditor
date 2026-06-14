@@ -1,4 +1,5 @@
 import { EditorController } from './core/EditorController.js';
+import { PDFBackendService } from './services/pdfBackendService.js';
 import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 
@@ -227,7 +228,9 @@ class PDFEditorApp {
       const styles = textContent.styles || {};
 
       textContent.items
-        .filter(item => item.str && item.str.trim().length > 0)
+        // Keep whitespace-only fragments too: many PDFs emit spaces as their own items,
+        // and dropping them is what made tightly-set text lose its word breaks on edit.
+        .filter(item => item.str && item.str.length > 0)
         .forEach(item => {
           const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
           const left = tx[4];
@@ -554,40 +557,56 @@ class PDFEditorApp {
 
     const lines = [];
     let currentLine = null;
+    const startSegment = (item) => {
+      currentLine = {
+        text: item.text,
+        left: item.left, right: item.right, baseline: item.baseline,
+        top: item.top, bottom: item.bottom, height: item.height,
+        fontSizePx: item.fontSizePx, fontName: item.fontName,
+        pageIndex: item.pageIndex, items: [item],
+      };
+      lines.push(currentLine);
+    };
 
     sorted.forEach(item => {
+      const isSpace = !item.text.trim();
       const tol = Math.max(3, item.height * 0.4);
-      if (!currentLine || Math.abs(item.baseline - currentLine.baseline) > tol) {
-        if (currentLine) lines.push(currentLine);
-        currentLine = {
-          text: item.text,
-          left: item.left,
-          right: item.right,
-          baseline: item.baseline,
-          top: item.top,
-          bottom: item.bottom,
-          height: item.height,
-          fontSizePx: item.fontSizePx,
-          fontName: item.fontName,
-          pageIndex: item.pageIndex,
-          items: [item]
-        };
-      } else {
-        // Same line: append, inserting a space when there is a real horizontal gap.
-        const gap = item.left - currentLine.right;
-        currentLine.text += (gap > item.height * 0.25 ? ' ' : '') + item.text;
-        currentLine.left = Math.min(currentLine.left, item.left);
-        currentLine.right = Math.max(currentLine.right, item.right);
-        currentLine.top = Math.min(currentLine.top, item.top);
-        currentLine.bottom = Math.max(currentLine.bottom, item.bottom);
-        currentLine.height = Math.max(currentLine.height, item.height);
-        currentLine.items.push(item);
+      const sameRow = currentLine && Math.abs(item.baseline - currentLine.baseline) <= tol;
+      const gap = sameRow ? item.left - currentLine.right : 0;
+      // A gap far wider than the text is a COLUMN separator (e.g. a right-aligned date or
+      // "GPA: …"). Keep each column as its own segment/box so editing one doesn't reflow the
+      // others and right-aligned items stay in place.
+      const columnBreak = sameRow && !isSpace && gap > item.height * 1.8;
+
+      if (!sameRow || columnBreak) {
+        if (isSpace) return;            // never start a segment on a stray space
+        startSegment(item);
+        return;
       }
+
+      // Same segment: keep the PDF's own spaces (whitespace fragments are preserved during
+      // extraction) and only synthesise a space across a small positional gap.
+      if (isSpace) {
+        if (!/\s$/.test(currentLine.text)) currentLine.text += ' ';
+        return;
+      }
+      const endSp = /\s$/.test(currentLine.text);
+      const startSp = /^\s/.test(item.text);
+      const needSpace = !endSp && !startSp && gap > item.height * 0.18;
+      currentLine.text += (needSpace ? ' ' : '') + item.text;
+      currentLine.left = Math.min(currentLine.left, item.left);
+      currentLine.right = Math.max(currentLine.right, item.right);
+      currentLine.top = Math.min(currentLine.top, item.top);
+      currentLine.bottom = Math.max(currentLine.bottom, item.bottom);
+      currentLine.height = Math.max(currentLine.height, item.height);
+      currentLine.items.push(item);
     });
 
-    if (currentLine) lines.push(currentLine);
-    lines.forEach(line => this.finalizeLineStyle(line));
-    return lines;
+    // Tidy each reconstructed segment and drop any that ended up being only whitespace.
+    lines.forEach(line => { line.text = line.text.replace(/\s+/g, ' ').trim(); });
+    const realLines = lines.filter(line => line.text.length > 0);
+    realLines.forEach(line => this.finalizeLineStyle(line));
+    return realLines;
   }
 
   /**
@@ -599,6 +618,7 @@ class PDFEditorApp {
     const buckets = new Map();   // rounded height -> { chars, height }
     let boldChars = 0, italicChars = 0, serifChars = 0, totalChars = 0;
     for (const it of line.items) {
+      if (!(it.text || '').trim()) continue;   // ignore space-only fragments for font sizing
       const n = Math.max(1, (it.text || '').trim().length);
       totalChars += n;
       if (it.bold) boldChars += n;
@@ -1549,17 +1569,31 @@ class PDFEditorApp {
         throw new Error('Original PDF data not available');
       }
 
-      // Preferred path: edit the real PDF with pdf-lib (keeps selectable text).
-      // Some PDFs are encrypted — pdf-lib can't decrypt them — so on failure we fall
-      // back to flattening each rendered page (with edits) to an image-based PDF.
+      // Save strategy, best fidelity first:
+      //  1) PyMuPDF backend — truly REMOVES replaced text (clean for copy/paste & ATS) and
+      //     re-inserts in a matching Unicode font. Only used if the backend is reachable.
+      //  2) pdf-lib (client-side) — covers the original with a white box + redraws (works
+      //     offline / on static hosting, but leaves the old text hidden underneath).
+      //  3) Flatten to an image PDF — last resort for encrypted PDFs pdf-lib can't open.
       let editedPdfBytes;
       let flattened = false;
+      let viaBackend = false;
       try {
-        editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
-      } catch (vectorErr) {
-        console.warn('Vector save failed, flattening to image PDF instead:', vectorErr);
-        editedPdfBytes = await this.flattenToPdfBytes(this.edits);
-        flattened = true;
+        if (await PDFBackendService.checkHealth()) {
+          editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits);
+          viaBackend = true;
+        } else {
+          editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
+        }
+      } catch (primaryErr) {
+        console.warn('Primary save failed, falling back:', primaryErr);
+        try {
+          editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
+        } catch (vectorErr) {
+          console.warn('Client-side save failed, flattening to image PDF instead:', vectorErr);
+          editedPdfBytes = await this.flattenToPdfBytes(this.edits);
+          flattened = true;
+        }
       }
 
       // Download it.
@@ -1576,15 +1610,22 @@ class PDFEditorApp {
       if (flattened) {
         // Flattened output is image-based; keep editing the original document.
         this.showStatus('Saved a flattened copy — this PDF is protected, so text-level editing wasn\'t possible. To keep selectable text, remove the PDF\'s protection first.', 'info');
-      } else {
-        // Keep editing on top of the saved version: reload + re-extract geometry.
+      } else if (viaBackend) {
+        // The backend truly REMOVED the replaced text, so the saved file is clean. Reload it as
+        // the new baseline so further edits build on the real (de-duplicated) result.
         this.originalFileData = editedPdfBytes;
         const loadingTask = pdfjsLib.getDocument({ data: editedPdfBytes.slice(0) });
         this.pdfJsDoc = await loadingTask.promise;
         await this.extractTextFromPDFjs();
         this.edits = [];
-        this.resetHistory();   // the saved file is the new baseline
+        this.resetHistory();
         await this.buildPages();
+        this.showStatus('Saved! Text was cleanly replaced — selectable & ATS-safe.', 'success');
+      } else {
+        // Client-side white-box path: do NOT reload/re-extract. An edited line is only COVERED
+        // by a white box (its original glyphs remain in the content stream), so re-extraction
+        // would read both the hidden original and the new text and show garbled boxes. Each
+        // save re-applies all edits to the pristine original, so staying put stays correct.
         this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
       }
     } catch (error) {
@@ -1723,7 +1764,7 @@ class PDFEditorApp {
         continue;
       }
 
-      const size = edit.fontSize || 12;
+      let size = edit.fontSize || 12;
       const font = pickFont(edit);
       const text = this.sanitizeForStandardFont((edit.newText || '').replace(/[\r\n]+/g, ' '));
 
@@ -1739,6 +1780,15 @@ class PDFEditorApp {
       }
 
       if (!text) continue;
+      // The substituted standard font is often wider than the PDF's original font, which can
+      // push an edited line off the right edge. Shrink the size just enough to fit the space
+      // from the text's left edge to the page margin so edited lines never get cut off.
+      const avail = page.getWidth() - edit.x - 4;
+      if (avail > 8) {
+        let w = 0;
+        try { w = font.widthOfTextAtSize(text, size); } catch (e) { /* unencodable: handled below */ }
+        if (w > avail) size = Math.max(4, size * (avail / w));
+      }
       try {
         page.drawText(text, { x: edit.x, y: ph - edit.baseline, size, font, color: black });
       } catch (e) {
