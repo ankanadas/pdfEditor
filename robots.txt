@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://pdfeditfree.netlify.app/sitemap.xml
+Sitemap: https://quickpdfeditor.com/sitemap.xml
