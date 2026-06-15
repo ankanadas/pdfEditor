@@ -5,6 +5,7 @@ import base64
 import io
 import math
 import os
+import re
 from PIL import Image
 
 app = Flask(__name__)
@@ -142,6 +143,26 @@ def _font_xrefs_for(page, basefont):
     return [x[1] for x in matches]
 
 
+def _doc_charset_for(doc, basefont, cache):
+    """Set of characters actually drawn with `basefont` anywhere in the document. An embedded
+    font is usually SUBSET — it only contains glyphs for the characters the document uses — so
+    this is a reliable test of what it can render. (Font.has_glyph is not: a subset can keep a
+    cmap entry for a character whose outline was stripped, so it reports a glyph that prints as
+    nothing — which is why a typed 'J' silently disappeared when the letter had no 'J'.)"""
+    target = (basefont or '').split('+')[-1].lower()
+    if target in cache:
+        return cache[target]
+    chars = set()
+    for pg in doc:
+        for block in pg.get_text("dict").get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    if (span.get('font', '') or '').split('+')[-1].lower() == target:
+                        chars.update(span.get('text', ''))
+    cache[target] = chars
+    return chars
+
+
 def _reuse_embedded_font(doc, page, xref, text, cache):
     """Install the PDF's OWN embedded font (by xref) and return (fontname, fitz.Font) if it can
     render every character of `text`; else None. Cached per page so each font is embedded once."""
@@ -164,7 +185,7 @@ def _reuse_embedded_font(doc, page, xref, text, cache):
     return None
 
 
-def _resolve_text_font(doc, page, edit, text, cache):
+def _resolve_text_font(doc, page, edit, text, cache, charset_cache=None):
     """Choose font + size for re-inserting `text`. Prefers the original embedded font at the
     original size (exact match); otherwise an Arial/Times variant. Returns (kwargs, Font, size)."""
     span = edit.get('_span')
@@ -179,10 +200,16 @@ def _resolve_text_font(doc, page, edit, text, cache):
         serif = serif or bool(flags & 4)
         bold = bold or bool(flags & 16)
         italic = italic or bool(flags & 2)
-        for xref in _font_xrefs_for(page, span.get('font', '')):
-            reused = _reuse_embedded_font(doc, page, xref, text, cache)
-            if reused:
-                return dict(fontname=reused[0]), reused[1], size
+        # Only reuse the original (often subset) embedded font if it actually contains every
+        # character we need — otherwise a freshly typed character that never appears in the
+        # document (e.g. a 'J' in a letter that had none) would silently drop. In that case we
+        # fall back to a full Arial/Times so every character renders.
+        avail = _doc_charset_for(doc, span.get('font', ''), charset_cache if charset_cache is not None else {})
+        if all(ord(ch) == 32 or ch in avail for ch in text):
+            for xref in _font_xrefs_for(page, span.get('font', '')):
+                reused = _reuse_embedded_font(doc, page, xref, text, cache)
+                if reused:
+                    return dict(fontname=reused[0]), reused[1], size
     kw = _edit_font_kwargs(serif, bold, italic)
     f = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
     return kw, f, size
@@ -267,6 +294,9 @@ def edit_pdf():
         for edit in edits:
             edits_by_page.setdefault(int(edit.get('pageIndex', 0)), []).append(edit)
 
+        # Cache of "characters this embedded font actually contains", shared across pages.
+        charset_cache = {}
+
         for page_num, page_edits in edits_by_page.items():
             if page_num < 0 or page_num >= len(doc):
                 continue
@@ -282,8 +312,13 @@ def edit_pdf():
                 edit['_span'] = _find_original_span(
                     page, float(edit.get('x', 0)), float(edit.get('baseline', 0)))
 
-            # 1) Redact the original text of REPLACE edits (white fill, no cross-out).
+            # 1) Redact the original text of REPLACE edits, then re-insert the new text.
             #    Insert-only edits (added text / signatures) set redact=False.
+            #    Fill rule:
+            #      * Text replace  -> fill=False: remove ONLY the old text and leave the
+            #        page's graphics intact, so coloured/shaded cells, borders and logos
+            #        survive (no white box over the background).
+            #      * Erase tool    -> fill=white: the user wants a clean white-out.
             did_redact = False
             for edit in page_edits:
                 if not edit.get('redact', True):
@@ -298,10 +333,17 @@ def edit_pdf():
                     min(pw, max(right, x + 2) + 2),
                     min(ph, bottom + 1),
                 )
-                page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
+                is_erase = edit.get('kind') == 'erase'
+                page.add_redact_annot(rect, fill=(1, 1, 1) if is_erase else False, cross_out=False)
                 did_redact = True
             if did_redact:
-                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+                # Keep images; also keep vector graphics where the PyMuPDF build supports it
+                # (the `graphics` option / PDF_REDACT_LINE_ART_NONE was added after 1.23.8),
+                # so the background fill behind replaced text isn't stripped on newer versions.
+                red_kwargs = dict(images=fitz.PDF_REDACT_IMAGE_NONE)
+                if hasattr(fitz, 'PDF_REDACT_LINE_ART_NONE'):
+                    red_kwargs['graphics'] = fitz.PDF_REDACT_LINE_ART_NONE
+                page.apply_redactions(**red_kwargs)
 
             # 2) Insert images (signatures/stamps) and re-insert edited text at its baseline.
             for edit in page_edits:
@@ -314,7 +356,13 @@ def edit_pdf():
                 x = float(edit.get('x', 0))
                 baseline = float(edit.get('baseline', 0))
                 style = edit.get('style', 'text')
-                new_text = (edit.get('newText', '') or '').replace('\n', ' ').replace('\r', '')
+                new_text = (edit.get('newText', '') or '').replace('\r', '').replace('\n', ' ')
+                # Normalise characters a browser's editable box can introduce (non-breaking
+                # spaces, zero-width chars, soft hyphens) so they don't render as a missing-
+                # glyph box (□) in the PDF's subset font.
+                new_text = re.sub(r'[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]', ' ', new_text)
+                new_text = re.sub(r'[\u200b\u200c\u200d\u2060\ufeff\u00ad]', '', new_text)
+                new_text = re.sub(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]', '', new_text)
                 if not new_text:
                     continue
 
@@ -322,7 +370,7 @@ def edit_pdf():
                     kwargs = dict(fontname=SIGN_FONT_NAME, fontfile=SIGN_FONT_FILE)
                     size = float(edit.get('fontSize', 12))
                 else:
-                    kwargs, font, size = _resolve_text_font(doc, page, edit, new_text, font_cache)
+                    kwargs, font, size = _resolve_text_font(doc, page, edit, new_text, font_cache, charset_cache)
                     # Shrink to fit if the text would run past the right margin (e.g. user added
                     # words, or the fallback font is wider) so an edited line is never cut off.
                     avail = pw - x - 4

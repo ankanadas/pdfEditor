@@ -38,6 +38,8 @@ class PDFEditorApp {
     this.isRendering = false; // Prevent multiple simultaneous renders
     this.isCreatingTextBoxes = false; // Prevent duplicate text box creation
     this.eventListenersInitialized = false; // Prevent duplicate event listeners
+    this.selectedThumb = null;  // Pages panel: currently selected thumbnail index (for "insert after")
+    this._pageOpBusy = false;   // Guard so page reorder/delete/insert don't overlap
     
     this.initializeEventListeners();
     this.setupControllerEvents();
@@ -141,6 +143,14 @@ class PDFEditorApp {
     document.getElementById('signPadAdd')?.addEventListener('click', () => this.signPadAdd());
     this.initSignatureDialog();
 
+    // Pages manager (reorder / delete / insert blank pages)
+    document.getElementById('pagesPanelBtn')?.addEventListener('click', () => this.togglePagesPanel());
+    document.getElementById('pagesPanelClose')?.addEventListener('click', () => this.closePagesPanel());
+    document.getElementById('pagesBackdrop')?.addEventListener('click', (e) => {
+      if (e.target.id === 'pagesBackdrop') this.closePagesPanel();   // click outside the drawer
+    });
+    document.getElementById('insertBlankBtn')?.addEventListener('click', () => this.insertBlankPage());
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closePagesPanel(); });
   }
 
   previousPage() { this.scrollToPage(this.currentPage - 1); }
@@ -175,7 +185,7 @@ class PDFEditorApp {
 
   /** Enable all the tools/controls that require a loaded PDF. */
   enableUiAfterLoad() {
-    ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn',
+    ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn', 'pagesPanelBtn',
      'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'clearSignatureBtn']
       .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
     // Warm the edit backend now (free hosts sleep when idle) so it's awake by the time the
@@ -445,12 +455,20 @@ class PDFEditorApp {
 
     const lines = this.groupTextItemsByLine(pageTextItems);
 
-    // Erase the original text from the canvas (white over each line) while leaving
-    // images/graphics intact, so the editable boxes are the only visible text.
+    // Sample each line's background colour from the freshly-rendered (clean) canvas BEFORE
+    // we white it out. Saving then covers replaced text with the cell's OWN colour instead
+    // of white, so coloured/shaded backgrounds survive an edit. (Reads first, writes after,
+    // to avoid interleaving getImageData with fillRect.)
+    lines.forEach((line) => { line.bgColor = this.sampleLineBg(pv, line); });
+
+    // Cover the original text on the canvas so the editable boxes are the only visible text.
+    // Use each line's own background colour (not white) so a shaded/coloured cell keeps its
+    // look while editing — matching what the saved file will show.
     pv.ctx.save();
     pv.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
-    pv.ctx.fillStyle = '#ffffff';
     lines.forEach((line) => {
+      const c = line.bgColor;
+      pv.ctx.fillStyle = c ? `rgb(${c[0]},${c[1]},${c[2]})` : '#ffffff';
       pv.ctx.fillRect(line.left - 2, line.top - 2, (line.right - line.left) + 6, (line.bottom - line.top) + 4);
     });
     pv.ctx.restore();
@@ -509,7 +527,7 @@ class PDFEditorApp {
         div.style.boxShadow = 'none';
         div.style.background = 'transparent';
         div.style.zIndex = '100';
-        const newText = div.textContent;
+        const newText = this.cleanEditableText(div.textContent);
         if (newText !== div.dataset.originalText) {
           this.trackEdit(this.lineToEdit(line, newText));
           div.dataset.originalText = newText;
@@ -523,6 +541,36 @@ class PDFEditorApp {
 
       canvasWrapper.appendChild(div);
     });
+  }
+
+  /**
+   * Find the dominant (background) colour under a text line by reading the rendered canvas.
+   * Glyphs and grid lines are a minority of the pixels in a line's band, so the most common
+   * colour is the cell's background. Returns [r,g,b] (0-255) or null if it can't be read.
+   * Used so an edited line is covered with its own background colour rather than white.
+   */
+  sampleLineBg(pv, line) {
+    try {
+      const cw = pv.canvas.width, ch = pv.canvas.height;
+      const x = Math.max(0, Math.min(cw - 1, Math.floor(line.left)));
+      const y = Math.max(0, Math.min(ch - 1, Math.floor(line.top)));
+      const w = Math.max(1, Math.min(cw - x, Math.ceil(line.right - line.left)));
+      const h = Math.max(1, Math.min(ch - y, Math.ceil(line.bottom - line.top)));
+      const data = pv.ctx.getImageData(x, y, w, h).data;   // device pixels (ignores transform)
+      const counts = new Map();
+      let bestN = 0, bestColor = null;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] < 128) continue;                   // skip transparent
+        // Quantise to 16 levels per channel so near-identical pixels share a bucket.
+        const key = ((data[i] & 0xF0) << 16) | ((data[i + 1] & 0xF0) << 8) | (data[i + 2] & 0xF0);
+        const n = (counts.get(key) || 0) + 1;
+        counts.set(key, n);
+        if (n > bestN) { bestN = n; bestColor = [data[i], data[i + 1], data[i + 2]]; }
+      }
+      return bestColor;
+    } catch (e) {
+      return null;   // e.g. a tainted canvas — fall back to white covering
+    }
   }
 
   /**
@@ -542,6 +590,7 @@ class PDFEditorApp {
       bold: !!line.bold,
       italic: !!line.italic,
       serif: !!line.serif,
+      bgColor: line.bgColor || null,   // [r,g,b] cell background (so a cover box matches, not white)
       newText: newText
     };
   }
@@ -1125,13 +1174,17 @@ class PDFEditorApp {
   }
 
   /** Branded yes/no dialog. Resolves true (proceed) or false (cancel). */
-  confirmDialog(message) {
+  confirmDialog(message, opts = {}) {
     return new Promise((resolve) => {
       const back = document.getElementById('confirmDialog');
       const msg = document.getElementById('confirmMessage');
       const ok = document.getElementById('confirmOk');
       const cancel = document.getElementById('confirmCancel');
+      const title = document.getElementById('confirmTitle');
       if (!back || !ok || !cancel) { resolve(window.confirm(message)); return; }
+      if (title) title.textContent = opts.title || 'Discard your edits?';
+      ok.textContent = opts.okText || 'Open new PDF';
+      cancel.textContent = opts.cancelText || 'Cancel';
       msg.textContent = message;
       back.classList.add('open');
       const finish = (val) => {
@@ -1559,6 +1612,279 @@ class PDFEditorApp {
     this.renderCurrentPage();
   }
 
+  // ---------------------------------------------------------------------------
+  // Pages manager: a drawer of page thumbnails the user can reorder (drag),
+  // delete (hover trash), or extend with blank pages. Each operation rebuilds the
+  // document with pdf-lib and reloads it, so the thumbnails, the scrollable page
+  // view, and the eventual Save output all stay in lockstep automatically.
+  // ---------------------------------------------------------------------------
+
+  togglePagesPanel() {
+    const open = document.getElementById('pagesDrawer')?.classList.contains('open');
+    if (open) this.closePagesPanel(); else this.openPagesPanel();
+  }
+
+  openPagesPanel() {
+    if (!this.controller.isLoaded || !this.pdfJsDoc) {
+      this.showStatus('Open a PDF first', 'error');
+      return;
+    }
+    this.selectedThumb = null;
+    document.getElementById('pagesBackdrop')?.classList.add('open');
+    document.getElementById('pagesDrawer')?.classList.add('open');
+    this.renderPagesPanel();
+  }
+
+  closePagesPanel() {
+    document.getElementById('pagesBackdrop')?.classList.remove('open');
+    document.getElementById('pagesDrawer')?.classList.remove('open');
+  }
+
+  /** Build the thumbnail grid + the "insert position" dropdown from the current document. */
+  renderPagesPanel() {
+    const grid = document.getElementById('pagesGrid');
+    if (!grid || !this.pdfJsDoc) return;
+    const n = this.pdfJsDoc.numPages;
+
+    const count = document.getElementById('pagesCount');
+    if (count) count.textContent = `${n} page${n === 1 ? '' : 's'}`;
+    this.rebuildInsertPosOptions(n);
+
+    grid.innerHTML = '';
+    const hint = document.createElement('div');
+    hint.className = 'pages-hint';
+    hint.textContent = 'Drag to reorder · hover to delete';
+    grid.appendChild(hint);
+
+    for (let i = 0; i < n; i++) {
+      const thumb = document.createElement('div');
+      thumb.className = 'page-thumb';
+      thumb.draggable = true;
+      thumb.dataset.index = String(i);
+      if (i === this.selectedThumb) thumb.classList.add('selected');
+
+      const canvas = document.createElement('canvas');
+      canvas.className = 'thumb-canvas';
+      thumb.appendChild(canvas);
+
+      const del = document.createElement('button');
+      del.className = 'page-thumb-del';
+      del.title = 'Delete this page';
+      del.setAttribute('aria-label', `Delete page ${i + 1}`);
+      del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="m7 7 1 13h8l1-13"/></svg>';
+      del.addEventListener('click', (e) => { e.stopPropagation(); this.deletePage(i); });
+      thumb.appendChild(del);
+
+      const num = document.createElement('div');
+      num.className = 'thumb-num';
+      num.textContent = `Page ${i + 1}`;
+      thumb.appendChild(num);
+
+      thumb.addEventListener('click', () => this.selectThumb(i));
+      this.wireThumbDnD(thumb);
+      grid.appendChild(thumb);
+
+      this.renderThumbCanvas(canvas, i);   // async paint; doesn't block the drawer opening
+    }
+  }
+
+  /** Render page `pageIndex` into the small thumbnail canvas (crisp on HiDPI screens). */
+  async renderThumbCanvas(canvas, pageIndex) {
+    try {
+      const page = await this.pdfJsDoc.getPage(pageIndex + 1);
+      const base = page.getViewport({ scale: 1 });
+      const dpr = window.devicePixelRatio || 1;
+      const scale = (130 / base.width) * dpr;
+      const vp = page.getViewport({ scale });
+      canvas.width = vp.width;
+      canvas.height = vp.height;
+      canvas.style.aspectRatio = `${base.width} / ${base.height}`;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    } catch (e) {
+      console.warn('Thumbnail render failed for page', pageIndex, e);
+    }
+  }
+
+  /** Rebuild the "Insert at" dropdown: After page 1…N, plus End of document. */
+  rebuildInsertPosOptions(n) {
+    const sel = document.getElementById('insertPos');
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (let i = 0; i < n; i++) {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = `After page ${i + 1}`;
+      sel.appendChild(opt);
+    }
+    const end = document.createElement('option');
+    end.value = 'end';
+    end.textContent = 'End of document';
+    sel.appendChild(end);
+    sel.value = (prev === 'end' || (prev !== '' && parseInt(prev, 10) < n)) ? prev : 'end';
+  }
+
+  /** Click a thumbnail to select it (sets "insert after this page"); click again to clear. */
+  selectThumb(i) {
+    this.selectedThumb = (this.selectedThumb === i) ? null : i;
+    document.querySelectorAll('#pagesGrid .page-thumb').forEach((el) => {
+      el.classList.toggle('selected', Number(el.dataset.index) === this.selectedThumb);
+    });
+    const sel = document.getElementById('insertPos');
+    if (sel) sel.value = (this.selectedThumb == null) ? 'end' : String(this.selectedThumb);
+  }
+
+  /** Native HTML5 drag-and-drop wiring for one thumbnail. */
+  wireThumbDnD(thumb) {
+    thumb.addEventListener('dragstart', (e) => {
+      this._dragFrom = Number(thumb.dataset.index);
+      thumb.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', thumb.dataset.index);
+      }
+    });
+    thumb.addEventListener('dragend', () => {
+      thumb.classList.remove('dragging');
+      this.clearDropMarkers();
+    });
+    thumb.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      const rect = thumb.getBoundingClientRect();
+      const after = (e.clientX - rect.left) > rect.width / 2;
+      this.clearDropMarkers();
+      thumb.classList.add(after ? 'drop-after' : 'drop-before');
+    });
+    thumb.addEventListener('dragleave', () => {
+      thumb.classList.remove('drop-before', 'drop-after');
+    });
+    thumb.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const from = this._dragFrom;
+      const j = Number(thumb.dataset.index);
+      const after = thumb.classList.contains('drop-after');
+      this.clearDropMarkers();
+      this._dragFrom = null;
+      if (from == null || Number.isNaN(from)) return;
+      this.movePage(from, after ? j + 1 : j);   // insert before original index (after ? j+1 : j)
+    });
+  }
+
+  clearDropMarkers() {
+    document.querySelectorAll('#pagesGrid .page-thumb.drop-before, #pagesGrid .page-thumb.drop-after')
+      .forEach(el => el.classList.remove('drop-before', 'drop-after'));
+  }
+
+  /** Move page `from` so it lands immediately before original index `insertBefore`. */
+  movePage(from, insertBefore) {
+    if (insertBefore === from || insertBefore === from + 1) return;   // dropped back in place
+    const n = this.pdfJsDoc.numPages;
+    const order = [];
+    for (let i = 0; i < n; i++) {
+      if (i === insertBefore) order.push({ src: from });
+      if (i !== from) order.push({ src: i });
+    }
+    if (insertBefore >= n) order.push({ src: from });   // moved to the very end
+    this.commitPageOrder(order, 'Pages reordered.');
+  }
+
+  /** Remove a page (never the last remaining one). */
+  deletePage(index) {
+    const n = this.pdfJsDoc.numPages;
+    if (n <= 1) { this.showStatus('A PDF must keep at least one page.', 'error'); return; }
+    if (this.selectedThumb === index) this.selectedThumb = null;
+    const order = [];
+    for (let i = 0; i < n; i++) if (i !== index) order.push({ src: i });
+    this.commitPageOrder(order, `Page ${index + 1} deleted.`);
+  }
+
+  /** Insert one blank page at the position chosen in the dropdown (end, or after page N). */
+  async insertBlankPage() {
+    if (!this.pdfJsDoc) return;
+    const sel = document.getElementById('insertPos');
+    const val = sel ? sel.value : 'end';
+    const n = this.pdfJsDoc.numPages;
+    const afterIndex = (val === 'end') ? n - 1 : parseInt(val, 10);
+
+    // Match the blank page's size to a neighbouring page so it looks consistent.
+    const refIdx = Math.min(Math.max(afterIndex, 0), n - 1);
+    const ref = await this.pdfJsDoc.getPage(refIdx + 1);
+    const w = ref.view[2] - ref.view[0];
+    const h = ref.view[3] - ref.view[1];
+
+    const order = [];
+    for (let i = 0; i < n; i++) {
+      order.push({ src: i });
+      if (i === afterIndex) order.push({ blank: true, w, h });
+    }
+    const where = (val === 'end') ? 'at the end' : `after page ${afterIndex + 1}`;
+    await this.commitPageOrder(order, `Blank page inserted ${where}.`);
+  }
+
+  /**
+   * Rebuild the document from an ordered list of page descriptors and reload it.
+   * Each descriptor is { src: indexInCurrentDoc } or { blank: true, w, h }.
+   */
+  async commitPageOrder(order, successMsg) {
+    if (this._pageOpBusy) return;
+
+    // Page structure changes shift page indices, which would invalidate any pending
+    // text edits — confirm before discarding them.
+    if (this.edits.length > 0) {
+      const ok = await this.confirmDialog(
+        'Reorganizing pages applies to the original document and clears your unsaved text edits (their page positions change). Continue?',
+        { title: 'Reorganize pages?', okText: 'Continue', cancelText: 'Cancel' }
+      );
+      if (!ok) return;
+    }
+
+    this._pageOpBusy = true;
+    try {
+      this.showStatus('Updating pages…', 'info');
+      const bytes = await this.applyPageOrder(order);
+
+      // Adopt the rebuilt document as the new baseline and reload everything from it.
+      this.originalFileData = bytes;
+      const loadingTask = pdfjsLib.getDocument({ data: bytes.slice(0) });
+      this.pdfJsDoc = await loadingTask.promise;
+      this.edits = [];
+      this.resetHistory();
+      this.selectedThumb = null;
+
+      await this.extractTextFromPDFjs();
+      await this.buildPages();
+      this.updatePageInfo();
+      this.renderPagesPanel();
+      this.showStatus(successMsg, 'success');
+    } catch (e) {
+      console.error('Page operation failed:', e);
+      this.showStatus(`Couldn't update pages: ${e.message}`, 'error');
+    } finally {
+      this._pageOpBusy = false;
+    }
+  }
+
+  /** Build new PDF bytes from the ordered descriptor list using pdf-lib. */
+  async applyPageOrder(order) {
+    const src = await PDFDocument.load(this.originalFileData, { ignoreEncryption: true });
+    const out = await PDFDocument.create();
+
+    // Copy all needed source pages in one pass (preserves their content & annotations).
+    const srcIndices = order.filter(o => o.src != null).map(o => o.src);
+    const copied = srcIndices.length ? await out.copyPages(src, srcIndices) : [];
+
+    let ci = 0;
+    for (const item of order) {
+      if (item.src != null) out.addPage(copied[ci++]);
+      else out.addPage([item.w || 612, item.h || 792]);   // blank page
+    }
+    return out.save();
+  }
+
   async savePDF() {
     if (!this.controller.isLoaded) {
       this.showStatus('No PDF loaded', 'error');
@@ -1665,7 +1991,9 @@ class PDFEditorApp {
           continue;
         }
         if (e.kind === 'erase' || (e.redact !== false && e.top != null && e.bottom != null)) {
-          cx.fillStyle = '#ffffff';
+          // Text replace covers with the cell's own background colour; Erase uses white.
+          cx.fillStyle = (e.kind !== 'erase' && Array.isArray(e.bgColor))
+            ? `rgb(${e.bgColor[0]},${e.bgColor[1]},${e.bgColor[2]})` : '#ffffff';
           cx.fillRect((e.x - 2) * S, (e.top - 1) * S,
             ((e.right - e.x) + 4) * S, ((e.bottom - e.top) + 2) * S);
         }
@@ -1771,14 +2099,20 @@ class PDFEditorApp {
       const font = pickFont(edit);
       const text = this.sanitizeForStandardFont((edit.newText || '').replace(/[\r\n]+/g, ' '));
 
-      // Replace: cover the original line first.
+      // Replace: cover the original line first. pdf-lib can't delete the underlying glyphs,
+      // so we paint over them — but with the line's OWN background colour (sampled from the
+      // page) so a shaded/coloured cell isn't turned white. The Erase tool still uses white.
       if (edit.redact !== false && edit.top != null && edit.bottom != null) {
+        let coverColor = white;
+        if (edit.kind !== 'erase' && Array.isArray(edit.bgColor)) {
+          coverColor = rgb(edit.bgColor[0] / 255, edit.bgColor[1] / 255, edit.bgColor[2] / 255);
+        }
         page.drawRectangle({
           x: edit.x - 2,
           y: ph - edit.bottom - 1,
           width: (edit.right - edit.x) + 4,
           height: (edit.bottom - edit.top) + 2,
-          color: white,
+          color: coverColor,
         });
       }
 
@@ -1802,6 +2136,19 @@ class PDFEditorApp {
     }
 
     return pdfDoc.save();
+  }
+
+  /**
+   * Normalise text captured from a contentEditable box. Browsers slip in non-breaking
+   * spaces, zero-width characters, soft hyphens, etc. while you type — these have no glyph
+   * in a PDF's subset font and save as a missing-glyph box (□). Convert odd spaces to a
+   * normal space and drop the invisible characters so saved text is exactly what you typed.
+   */
+  cleanEditableText(s) {
+    return (s || '')
+      .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')  // odd spaces -> normal space
+      .replace(/[\u200b\u200c\u200d\u2060\ufeff\u00ad]/g, '')          // zero-width / BOM / soft hyphen
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ''); // control characters
   }
 
   /**
