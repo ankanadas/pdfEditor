@@ -4,6 +4,7 @@ coverage/
 .DS_Store
 *.log
 .kiro/
+.claude/
 
 # Python backend (local virtualenv & caches) — never commit these
 backend/venv/
@@ -12,3 +13,6 @@ __pycache__/
 
 # Test fixtures are real PDFs with personal data — keep them LOCAL only, never commit.
 backend/tests/fixtures/*.pdf
+
+# Test/sample PDFs are never committed (test-document.pdf is regenerable via create-test-pdf.js).
+*.pdf

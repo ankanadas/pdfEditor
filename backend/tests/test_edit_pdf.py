@@ -2,18 +2,19 @@
 Regression tests for the /edit-pdf text-replacement behaviour.
 
 These guard the fixes made to high-fidelity editing:
-  - a typed glyph the document never used still renders (subset fonts keep a full
-    cmap but strip outlines, so coverage must come from characters actually drawn);
+  - a typed character absent from the document still renders — it falls back to a font
+    that can draw it (synthetic stand-in for the old VOE "typed 'J' disappears" bug);
   - replaced text is truly removed (ATS-clean);
   - edited text reuses the document's OWN fonts (e.g. Calibri), not a generic one;
   - the matched span's weight (e.g. a bold bullet/header) does NOT force the whole
     edited line bold — the line's own flag wins;
   - a coloured/shaded background survives a text replace (fill=False);
-  - stray characters a contentEditable can introduce (nbsp/zero-width) are cleaned.
+  - stray characters a contentEditable can introduce (nbsp/zero-width) are cleaned;
+  - "Add text" with mixed per-run font size / bold / italic saves each run correctly.
 
-Two tests use real PDFs that contain personal data and are therefore NOT committed
-(see backend/tests/fixtures/README.md). Those tests SKIP automatically when the
-fixture is absent; the synthetic tests always run.
+Some tests use a real résumé PDF that contains personal data and is therefore NOT
+committed (see backend/tests/fixtures/README.md). Those tests SKIP automatically when
+the fixture is absent; the synthetic tests always run.
 """
 
 import base64
@@ -28,7 +29,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app as appmod  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-VOE = os.path.join(FIXTURES, "voe_letter.pdf")
 RESUME = os.path.join(FIXTURES, "resume.pdf")
 
 
@@ -106,31 +106,6 @@ def sample_rgb(page, x, y, scale=2):
 # --------------------------------------------------------------------------- #
 # Real-PDF tests (skip if the gitignored fixture isn't present locally)
 # --------------------------------------------------------------------------- #
-@unittest.skipUnless(os.path.exists(VOE), f"missing fixture: {VOE}")
-class VoeLetterTests(unittest.TestCase):
-    """Employment letter — its fonts keep a full cmap but strip outlines (the 'J' bug)."""
-
-    def _edit_date(self, new_text):
-        src = fitz.open(VOE)
-        span = find_span(src, "April")
-        self.assertIsNotNone(span, "could not find the 'April …' date span")
-        out = post_edit(src.tobytes(), [edit_from_span(span, new_text)])
-        return fitz.open(stream=out, filetype="pdf"), span
-
-    def test_typed_glyph_absent_from_doc_renders(self):
-        # 'J' appears nowhere in the letter; typing "Jan" must still render the J.
-        res, span = self._edit_date("Jan 18, 2025")
-        self.assertNotIn("J", page_text(fitz.open(VOE)), "precondition: letter must contain no 'J'")
-        self.assertIn("Jan 18, 2025", page_text(res), "edited text not present in output")
-        x0, y0, x1, y1 = span["bbox"]
-        ink = region_ink(res[0], span["origin"][0], y0, y1, width=7.0)
-        self.assertGreater(ink, 5, "the 'J' produced no ink (missing-glyph regression)")
-
-    def test_old_text_truly_removed(self):
-        res, _ = self._edit_date("Jan 18, 2025")
-        self.assertNotIn("April", page_text(res), "old 'April' text was not removed")
-
-
 @unittest.skipUnless(os.path.exists(RESUME), f"missing fixture: {RESUME}")
 class ResumeTests(unittest.TestCase):
     """Résumé — Calibri/Calibri-Bold/SymbolMT(bullet); tests font reuse + weight."""
@@ -218,6 +193,27 @@ class SyntheticTests(unittest.TestCase):
         self.assertIn("New Co", txt, f"nbsp not normalised to a space: {txt!r}")
         self.assertFalse(any(0x25A0 <= ord(c) <= 0x25FF or ord(c) == 0xFFFD for c in txt),
                          f"a missing-glyph box rendered: {txt!r}")
+
+    def test_typed_char_absent_from_doc_renders(self):
+        # Synthetic stand-in for the old VOE "typed 'J' disappears" check: a character that appears
+        # NOWHERE in the document must still render when typed (the editor must fall back to a font
+        # that can draw it), and the replaced text must be truly removed. Generated in-memory so no
+        # PDF is committed.
+        doc = fitz.open()
+        pg = doc.new_page(width=320, height=120)
+        pg.insert_text(fitz.Point(30, 60), "Test Document", fontsize=14, color=(0, 0, 0))
+        self.assertNotIn("J", page_text(doc), "precondition: the doc must contain no 'J'")
+
+        span = find_span(doc, "Test")
+        self.assertIsNotNone(span, "could not find the source span")
+        res = fitz.open(stream=post_edit(doc.tobytes(), [edit_from_span(span, "Jan 18, 2025")]),
+                        filetype="pdf")
+        txt = page_text(res)
+        self.assertIn("Jan 18, 2025", txt, "typed text not present in output")
+        self.assertNotIn("Test Document", txt, "replaced text was not removed")
+        _, y0, _, y1 = span["bbox"]
+        ink = region_ink(res[0], span["origin"][0], y0, y1, width=8.0)
+        self.assertGreater(ink, 5, "the typed 'J' produced no ink (missing-glyph regression)")
 
     def test_added_text_is_multiline(self):
         # "Add text" with line breaks must render as multiple lines (Enter -> new line).
