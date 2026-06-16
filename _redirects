@@ -1,0 +1,6 @@
+# Netlify clean URLs: serve the .html content pages at extension-less paths.
+# (200 = rewrite, so the URL stays clean and canonical tags match.)
+/about      /about.html      200
+/privacy    /privacy.html    200
+/terms      /terms.html      200
+/contact    /contact.html    200

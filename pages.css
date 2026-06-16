@@ -1,0 +1,184 @@
+/* Shared styles for the static content pages (About, Privacy, Terms, Contact).
+   The editor itself (index.html) is a full-screen app shell with its own inline
+   styles; these pages are normal scrolling documents that reuse the same brand
+   tokens and footer so the site feels consistent. */
+:root {
+  --brand: #6d5efc;
+  --brand-dark: #5848e0;
+  --ink: #1f2330;
+  --muted: #5b6270;       /* darkened from #6b7280 for AA contrast on light backgrounds */
+  --line: #e7e8ef;
+  --bg: #f4f5fa;
+  --ok: #16a34a;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  line-height: 1.65;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+a { color: var(--brand-dark); }
+a:hover { color: var(--brand); }
+
+/* Skip link for keyboard / screen-reader users */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--brand-dark);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 0 0 8px 0;
+  z-index: 100;
+  font-weight: 700;
+  text-decoration: none;
+}
+.skip-link:focus { left: 0; color: #fff; }
+
+/* ---------- Site header (shared, links back to the editor) ---------- */
+.site-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+.site-header .logo {
+  display: flex; align-items: center; gap: 10px;
+  font-weight: 700; font-size: 17px; color: var(--ink); text-decoration: none;
+}
+.site-header .logo .mark {
+  width: 30px; height: 30px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--brand), #9b8bff);
+  color: #fff; display: grid; place-items: center; font-size: 16px;
+}
+.site-header .spacer { flex: 1; }
+.site-header .back {
+  font-size: 14px; font-weight: 600; color: var(--brand-dark); text-decoration: none;
+  padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
+}
+.site-header .back:hover { background: #f6f7fb; }
+
+/* ---------- Content ---------- */
+main.page {
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 40px 22px 64px;
+}
+main.page h1 {
+  font-size: 32px;
+  line-height: 1.2;
+  margin: 0 0 6px;
+}
+main.page .updated {
+  color: var(--muted);
+  font-size: 13.5px;
+  margin: 0 0 28px;
+}
+main.page h2 {
+  font-size: 21px;
+  margin: 36px 0 10px;
+  padding-top: 8px;
+}
+main.page h3 { font-size: 16.5px; margin: 22px 0 6px; }
+main.page p, main.page li { font-size: 15.5px; }
+main.page ul, main.page ol { padding-left: 22px; }
+main.page li { margin: 6px 0; }
+main.page .lead {
+  font-size: 17px;
+  color: var(--ink);
+}
+
+.card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  margin: 20px 0;
+}
+.callout {
+  background: #f0fdf4;
+  border: 1px solid #cdeed8;
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin: 20px 0;
+}
+.contact-email {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--brand-dark);
+  text-decoration: none;
+}
+.contact-email:hover { text-decoration: underline; }
+
+/* ---------- Shared footer ---------- */
+.site-footer {
+  flex: 0 0 auto;
+  background: #fff;
+  border-top: 1px solid var(--line);
+  padding: 22px 20px;
+}
+.site-footer .foot-inner {
+  max-width: 980px;
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 22px;
+}
+.site-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+.site-footer nav a {
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+.site-footer nav a:hover { color: var(--brand-dark); text-decoration: underline; }
+.site-footer .foot-spacer { flex: 1; }
+.site-footer .copyright { color: var(--muted); font-size: 13px; }
+
+/* Trust badges (used on footer + homepage) */
+.trust-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: center;
+}
+.trust-badges .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #15803d;
+  background: #e9f9ef;
+  border: 1px solid #cdeed8;
+  padding: 5px 11px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.trust-badges .badge svg { width: 14px; height: 14px; }
+
+@media (max-width: 620px) {
+  main.page h1 { font-size: 26px; }
+  .site-footer .foot-inner { flex-direction: column; align-items: flex-start; }
+}
