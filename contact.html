@@ -52,10 +52,38 @@
     <p class="updated">We usually reply within a couple of business days.</p>
 
     <p class="lead">Have a question, found a bug, or want to share feedback? We would genuinely love to
-      hear from you. The best way to reach us is by email.</p>
+      hear from you. Send a message below — or email us directly. Both reach the same inbox.</p>
+
+    <form name="contact" method="POST" data-netlify="true" netlify-honeypot="bot-field"
+          id="contactForm" class="contact-form">
+      <!-- Required by Netlify Forms so the submission is matched to this form. -->
+      <input type="hidden" name="form-name" value="contact" />
+      <!-- Honeypot: humans leave this empty; bots fill it and the submission is dropped. -->
+      <p class="hp" aria-hidden="true">
+        <label>Leave this field empty: <input name="bot-field" tabindex="-1" autocomplete="off" /></label>
+      </p>
+
+      <div class="field-row">
+        <label for="cf-name">Your name</label>
+        <input id="cf-name" name="name" type="text" autocomplete="name" required />
+      </div>
+      <div class="field-row">
+        <label for="cf-email">Your email</label>
+        <input id="cf-email" name="email" type="email" autocomplete="email" required
+               placeholder="you@example.com" />
+      </div>
+      <div class="field-row">
+        <label for="cf-message">Message</label>
+        <textarea id="cf-message" name="message" rows="6" required
+                  placeholder="How can we help?"></textarea>
+      </div>
+
+      <button type="submit" class="btn-primary">Send message</button>
+      <p id="contactStatus" class="form-status" role="status" aria-live="polite"></p>
+    </form>
 
     <div class="card">
-      <p style="margin:0 0 8px;font-weight:600">Email support</p>
+      <p style="margin:0 0 8px;font-weight:600">Or email us directly</p>
       <a class="contact-email" href="mailto:support@quickpdfeditor.com">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
         support@quickpdfeditor.com
@@ -87,6 +115,40 @@
 
     <p>Prefer to learn more first? Read <a href="/about">about the project</a> or review our
       <a href="/terms">Terms of Service</a>.</p>
+
+    <script>
+      // Submit the Netlify form over AJAX so the visitor stays on the page and sees an
+      // inline confirmation. If JS or the request fails, we point them at the mailto.
+      (function () {
+        var form = document.getElementById('contactForm');
+        var statusEl = document.getElementById('contactStatus');
+        if (!form || !statusEl) return;
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          var btn = form.querySelector('button[type="submit"]');
+          var body = new URLSearchParams(new FormData(form)).toString();
+          if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+          statusEl.className = 'form-status';
+          statusEl.textContent = '';
+          fetch('/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body
+          }).then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            form.reset();
+            statusEl.className = 'form-status ok';
+            statusEl.textContent = 'Thanks! Your message was sent — we’ll reply to your email soon.';
+          }).catch(function () {
+            statusEl.className = 'form-status err';
+            statusEl.innerHTML = 'Sorry, that didn’t go through. Please email ' +
+              '<a href="mailto:support@quickpdfeditor.com">support@quickpdfeditor.com</a> directly.';
+          }).finally(function () {
+            if (btn) { btn.disabled = false; btn.textContent = 'Send message'; }
+          });
+        });
+      })();
+    </script>
   </main>
 
   <footer class="site-footer">

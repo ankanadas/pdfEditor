@@ -52,6 +52,17 @@ describe('public content pages exist and are well-formed', () => {
     expect(ld.length).toBeGreaterThan(0);
     expect(ld.some((o) => o['@type'] === 'ContactPage')).toBe(true);
   });
+
+  it('contact page has a Netlify-wired contact form (name, email, message + honeypot)', () => {
+    const html = read('contact.html');
+    expect(html).toMatch(/<form[^>]*\bname="contact"/);
+    expect(html).toContain('data-netlify="true"');
+    expect(html).toContain('netlify-honeypot="bot-field"');
+    expect(html).toContain('name="form-name" value="contact"'); // required for AJAX + matching
+    for (const field of ['name="name"', 'name="email"', 'name="message"', 'name="bot-field"']) {
+      expect(html).toContain(field);
+    }
+  });
 });
 
 describe('homepage (index.html) trust, footer, a11y and SEO', () => {
