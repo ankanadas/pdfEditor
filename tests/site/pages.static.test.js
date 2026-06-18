@@ -70,18 +70,14 @@ describe('public content pages exist and are well-formed', () => {
 describe('homepage (index.html) trust, footer, a11y and SEO', () => {
   const html = () => read('index.html');
 
-  it('shows the five trust statements on the landing hero', () => {
+  it('keeps the editor hero clean (no heading/subtitle/trust badges) and shows the Secure HTTPS badge in the footer', () => {
     const h = html();
-    for (const phrase of [
-      'No account required',
-      'Free to use',
-      'No subscriptions',
-      'No permanent file storage',
-      'Secure HTTPS connection',
-    ]) {
-      expect(h).toContain(phrase);
-    }
-    expect(h).toContain('class="trust-badges"');
+    // The hero subtitle paragraph and trust-badge row were removed from the editor canvas.
+    expect(h).not.toContain('<p class="sub">');
+    expect(h).not.toContain('class="trust-badges"');
+    // The Secure HTTPS trust badge now lives in the footer.
+    expect(h).toContain('class="foot-badge"');
+    expect(h).toContain('Secure HTTPS connection');
   });
 
   it('has a footer linking to every content page', () => {
