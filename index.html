@@ -108,13 +108,17 @@
       color: #fff; display: grid; place-items: center; font-size: 16px;
     }
     .tagline {
-      color: var(--brand-dark); font-weight: 700; font-size: 15px; letter-spacing: .2px; line-height: 1.35;
-      padding-left: 16px; margin-left: 16px; border-left: 1px solid var(--line); max-width: 64vw;
+      color: var(--brand-dark); font-weight: 700; font-size: 14px; letter-spacing: .2px;
+      padding-left: 16px; margin-left: 16px; border-left: 1px solid var(--line); white-space: nowrap;
     }
-    .tagline strong { color: var(--brand-dark); font-weight: 800; font-size: 16.5px; }
-    .tagline .tag-sub { color: #3f4655; font-weight: 500; }
     .appbar .spacer { flex: 1; }
     @media (max-width: 900px) { .tagline { display: none; } }
+    /* Full-width purple announcement bar at the very top. */
+    .promobar {
+      flex: 0 0 auto; background: var(--brand); color: #fff;
+      text-align: center; font-size: 13px; font-weight: 600; letter-spacing: .2px;
+      padding: 8px 16px;
+    }
     .pill {
       display: inline-flex; align-items: center; gap: 6px;
       font-size: 12.5px; color: #15803d;
@@ -304,12 +308,10 @@
 
     /* Stage */
     .stage {
-      flex: 1; position: relative; overflow: auto; padding: 28px;
-      /* cover keeps the sheet full-bleed (no side gaps); top-anchored so the top is never cut off.
-         A translucent white wash (a little heavier at the top) mutes the doodles, so the Edit/Merge
-         icons read as a subtle backdrop rather than competing with the foreground. */
+      flex: 1; position: relative; overflow: auto; padding: 16px 28px 28px;
+      /* Faint doodle backdrop: full-bleed cover, top-anchored, with a heavy white wash. */
       background:
-        linear-gradient(to bottom, rgba(255, 255, 255, .6), rgba(255, 255, 255, .42)) center / cover no-repeat,
+        linear-gradient(to bottom, rgba(255, 255, 255, .9), rgba(255, 255, 255, .84)) center / cover no-repeat,
         url('/assets/fun-ui/bg-doodles.png') center top / cover no-repeat,
         var(--stage);
     }
@@ -330,8 +332,13 @@
     body[data-mode="stamp"] .page-canvas { cursor: crosshair; }
 
     /* Landing / drop zone */
-    .landing { max-width: 640px; margin: 90px auto 24px; }
+    .landing { max-width: 640px; margin: 0 auto 24px; }
     body.has-pdf .landing { display: none; }
+    .landing h1 {
+      text-align: center; font-size: 34px; margin: 6px 0 4px;
+      background: linear-gradient(90deg, var(--brand), #19b36b); -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .landing p.sub { text-align: center; color: var(--muted); margin: 0 0 22px; }
     .dropzone {
       display: block; border: 2px dashed #cfd2e6; border-radius: 16px; background: #fff;
       padding: 46px 24px; text-align: center; transition: all .18s ease; cursor: pointer;
@@ -587,6 +594,19 @@
     }
     .skip-link:focus { left: 0; }
 
+    /* ---------- Homepage trust badges (shown on the landing hero) ---------- */
+    .trust-badges {
+      display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 10px;
+      margin: 0 0 22px;
+    }
+    .trust-badges .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12.5px; font-weight: 600; color: #15803d;
+      background: #e9f9ef; border: 1px solid #cdeed8;
+      padding: 6px 12px; border-radius: 999px; white-space: nowrap;
+    }
+    .trust-badges .badge svg { width: 14px; height: 14px; flex: 0 0 auto; }
+
     /* ---------- Slim site footer (visible on the editor, fits the app shell) ---------- */
     .appfoot {
       flex: 0 0 auto; background: #fff; border-top: 1px solid var(--line);
@@ -784,9 +804,12 @@
   <!-- hidden native input; triggered by the Upload / Open buttons and drag-drop -->
   <input type="file" id="fileInput" accept=".pdf" hidden />
 
+  <!-- Full-width promo / announcement bar -->
+  <div class="promobar">🤍 You have enough subscriptions. Keep this one free. ✨</div>
+
   <header class="appbar">
     <div class="logo"><span class="mark">P</span> Quick PDF Editor</div>
-    <span class="tagline"><strong>Merge. Edit. Sign. Done.</strong> <span class="tag-sub">A simple, private PDF editor with no account, no subscriptions, and your files are never stored.</span></span>
+    <span class="tagline">Open source · Private by design · No ads or tracking</span>
     <div class="spacer"></div>
     <button class="icon-btn" id="helpBtn" title="How to use" aria-label="Help">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 .9-1 1.7"/><circle cx="12" cy="16.5" r=".6" fill="currentColor"/></svg>
@@ -906,6 +929,15 @@
       <div class="stage" id="stage">
         <!-- Upload / drop zone (hidden once a PDF is loaded) -->
         <div class="landing">
+          <h1>Merge. Edit. Sign. Done.</h1>
+          <p class="sub">A simple, private PDF editor with no account, no subscriptions, and your files are never stored.</p>
+          <div class="trust-badges" aria-label="Why you can trust Quick PDF Editor">
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>No account required</span>
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Free to use</span>
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>No subscriptions</span>
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>No permanent file storage</span>
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Secure HTTPS connection</span>
+          </div>
           <label class="dropzone" id="dropzone" for="fileInput">
             <div class="art">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6"/><path d="M12 18v-6"/><path d="m9 15 3-3 3 3"/></svg>
