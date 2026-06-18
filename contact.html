@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Contact — Quick PDF Editor</title>
+  <title>Contact | Quick PDF Editor</title>
   <meta name="description" content="Get in touch with the Quick PDF Editor team. Email support@quickpdfeditor.com for questions, feedback, bug reports, or privacy requests." />
   <link rel="canonical" href="https://quickpdfeditor.com/contact" />
   <meta name="robots" content="index, follow" />
@@ -11,7 +11,7 @@
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Quick PDF Editor" />
   <meta property="og:url" content="https://quickpdfeditor.com/contact" />
-  <meta property="og:title" content="Contact — Quick PDF Editor" />
+  <meta property="og:title" content="Contact | Quick PDF Editor" />
   <meta property="og:description" content="Email support@quickpdfeditor.com for questions, feedback, or bug reports." />
   <meta property="og:image" content="https://quickpdfeditor.com/og-image.png" />
   <meta name="twitter:card" content="summary_large_image" />
@@ -20,7 +20,7 @@
   {
     "@context": "https://schema.org",
     "@type": "ContactPage",
-    "name": "Contact — Quick PDF Editor",
+    "name": "Contact | Quick PDF Editor",
     "url": "https://quickpdfeditor.com/contact",
     "mainEntity": {
       "@type": "Organization",
@@ -52,7 +52,7 @@
     <p class="updated">We usually reply within a couple of business days.</p>
 
     <p class="lead">Have a question, found a bug, or want to share feedback? We would genuinely love to
-      hear from you. Send a message below — or email us directly. Both reach the same inbox.</p>
+      hear from you. Send a message below, or email us directly. Both reach the same inbox.</p>
 
     <form name="contact" method="POST" data-netlify="true" netlify-honeypot="bot-field"
           id="contactForm" class="contact-form">
@@ -138,7 +138,7 @@
             if (!res.ok) throw new Error('HTTP ' + res.status);
             form.reset();
             statusEl.className = 'form-status ok';
-            statusEl.textContent = 'Thanks! Your message was sent — we’ll reply to your email soon.';
+            statusEl.textContent = 'Thanks! Your message was sent, and we’ll reply to your email soon.';
           }).catch(function () {
             statusEl.className = 'form-status err';
             statusEl.innerHTML = 'Sorry, that didn’t go through. Please email ' +

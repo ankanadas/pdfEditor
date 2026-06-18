@@ -1,5 +1,6 @@
 import { EditorController } from './core/EditorController.js';
 import { PDFBackendService } from './services/pdfBackendService.js';
+import { initMerge } from './merge.js';
 import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 
@@ -213,6 +214,33 @@ class PDFEditorApp {
     // Warm the edit backend now (free hosts sleep when idle) so it's awake by the time the
     // user saves — avoids the first save silently falling back to client-side. Fire-and-forget.
     PDFBackendService.checkHealth().catch(() => {});
+  }
+
+  /** Clear the loaded PDF and return to the empty upload state. Used by the Merge panel
+   *  when the user removes the current document (the one open here). */
+  closeDocument() {
+    this.pdfJsDoc = null;
+    this.originalFile = null;
+    this.originalFileData = null;
+    this.edits = [];
+    this.currentPage = 0;
+    if (typeof this.resetHistory === 'function') this.resetHistory();
+    document.body.classList.remove('has-pdf');
+    document.body.removeAttribute('data-mode');
+    const container = document.getElementById('canvasContainer');
+    if (container) container.innerHTML = '';
+    const fileNameEl = document.getElementById('fileName');
+    if (fileNameEl) fileNameEl.textContent = '';
+    const fileInput = document.getElementById('fileInput');
+    if (fileInput) fileInput.value = '';
+    const pageInfo = document.getElementById('pageInfo');
+    if (pageInfo) pageInfo.textContent = 'No PDF loaded';
+    const modeIndicator = document.getElementById('modeIndicator');
+    if (modeIndicator) modeIndicator.textContent = 'No PDF loaded';
+    ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn', 'pagesPanelBtn',
+     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'clearSignatureBtn']
+      .forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = true; });
+    document.querySelectorAll('.tool.active').forEach((el) => el.classList.remove('active'));
   }
 
   setupControllerEvents() {
@@ -1553,6 +1581,7 @@ class PDFEditorApp {
       if (title) title.textContent = opts.title || 'Discard your edits?';
       ok.textContent = opts.okText || 'Open new PDF';
       cancel.textContent = opts.cancelText || 'Cancel';
+      ok.classList.toggle('confirm-danger', !!opts.danger);   // red confirm for destructive actions
       msg.textContent = message;
       back.classList.add('open');
       const finish = (val) => {
@@ -2343,41 +2372,51 @@ class PDFEditorApp {
       return;
     }
 
+    this.showStatus('Saving PDF…', 'info');
+
+    if (!this.originalFileData) {
+      this.showStatus('Failed to save: the original PDF data is not available.', 'error');
+      return;
+    }
+
+    // Produce the edited bytes with a fallback chain, best fidelity first. Each step is
+    // guarded so a failure cleanly tries the next; a real "Failed to save" is shown only
+    // when every path fails and no file is produced.
+    //  1) PyMuPDF backend  - truly removes replaced text (clean for copy/paste & ATS).
+    //  2) pdf-lib (client) - covers the original and redraws (works offline / static host).
+    //  3) Flatten to image - last resort for PDFs pdf-lib can't traverse (odd page trees,
+    //     encryption, etc.). This is what handles "Pages tree contains circular reference".
+    let editedPdfBytes = null;
+    let flattened = false;
+    let viaBackend = false;
+
     try {
-      this.showStatus('Saving PDF…', 'info');
-
-      if (!this.originalFileData) {
-        throw new Error('Original PDF data not available');
+      if (await PDFBackendService.checkHealth()) {
+        editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits);
+        viaBackend = true;
       }
+    } catch (e) { console.warn('Backend save failed, trying client-side:', e); }
 
-      // Save strategy, best fidelity first:
-      //  1) PyMuPDF backend — truly REMOVES replaced text (clean for copy/paste & ATS) and
-      //     re-inserts in a matching Unicode font. Only used if the backend is reachable.
-      //  2) pdf-lib (client-side) — covers the original with a white box + redraws (works
-      //     offline / on static hosting, but leaves the old text hidden underneath).
-      //  3) Flatten to an image PDF — last resort for encrypted PDFs pdf-lib can't open.
-      let editedPdfBytes;
-      let flattened = false;
-      let viaBackend = false;
+    if (!editedPdfBytes) {
       try {
-        if (await PDFBackendService.checkHealth()) {
-          editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits);
-          viaBackend = true;
-        } else {
-          editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
-        }
-      } catch (primaryErr) {
-        console.warn('Primary save failed, falling back:', primaryErr);
-        try {
-          editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
-        } catch (vectorErr) {
-          console.warn('Client-side save failed, flattening to image PDF instead:', vectorErr);
-          editedPdfBytes = await this.flattenToPdfBytes(this.edits);
-          flattened = true;
-        }
-      }
+        editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
+      } catch (e) { console.warn('Client-side (vector) save failed, flattening instead:', e); }
+    }
 
-      // Download it.
+    if (!editedPdfBytes) {
+      try {
+        editedPdfBytes = await this.flattenToPdfBytes(this.edits);
+        flattened = true;
+      } catch (e) { console.warn('Flatten save failed:', e); }
+    }
+
+    if (!editedPdfBytes) {
+      this.showStatus('Failed to save. Please reload the page and try again.', 'error');
+      return;
+    }
+
+    // Download it. The save has succeeded the moment this completes.
+    try {
       const blob = new Blob([editedPdfBytes], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -2387,13 +2426,20 @@ class PDFEditorApp {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Download failed:', e);
+      this.showStatus('Failed to save: could not start the download.', 'error');
+      return;
+    }
 
+    // Post-save housekeeping. The file is ALREADY saved, so any error here is non-fatal
+    // and must never turn a successful save into a "Failed to save" message.
+    try {
       if (flattened) {
-        // Flattened output is image-based; keep editing the original document.
-        this.showStatus('Saved a flattened copy — this PDF is protected, so text-level editing wasn\'t possible. To keep selectable text, remove the PDF\'s protection first.', 'info');
+        this.showStatus('Saved a flattened copy. This PDF is protected, so text-level editing wasn\'t possible. To keep selectable text, remove the PDF\'s protection first.', 'info');
       } else if (viaBackend) {
-        // The backend truly REMOVED the replaced text, so the saved file is clean. Reload it as
-        // the new baseline so further edits build on the real (de-duplicated) result.
+        // The backend truly removed the replaced text, so reload the clean result as the new
+        // baseline so further edits build on it.
         this.originalFileData = editedPdfBytes;
         const loadingTask = pdfjsLib.getDocument({ data: editedPdfBytes.slice(0) });
         this.pdfJsDoc = await loadingTask.promise;
@@ -2401,23 +2447,17 @@ class PDFEditorApp {
         this.edits = [];
         this.resetHistory();
         await this.buildPages();
-        this.showStatus('Saved! Text was cleanly replaced — selectable & ATS-safe.', 'success');
+        this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
       } else {
-        // Client-side white-box path: do NOT reload/re-extract. An edited line is only COVERED
-        // by a white box (its original glyphs remain in the content stream), so re-extraction
-        // would read both the hidden original and the new text and show garbled boxes. Each
-        // save re-applies all edits to the pristine original, so staying put stays correct.
         this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
       }
-
-      // After a successful save, refresh the page so the user starts from a clean slate and
-      // can't accidentally re-edit a just-saved file in a stale state. The short delay lets the
-      // success toast show and the download begin first.
-      setTimeout(() => window.location.reload(), 1600);
-    } catch (error) {
-      console.error('Save error:', error);
-      this.showStatus(`Failed to save: ${error.message}`, 'error');
+    } catch (e) {
+      console.warn('Post-save refresh failed (the file was already saved):', e);
+      this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
     }
+
+    // Refresh to a clean slate once the toast + download have started.
+    setTimeout(() => window.location.reload(), 1600);
   }
 
   /**
@@ -2700,9 +2740,15 @@ class PDFEditorApp {
    * "Discard": drop ALL unsaved changes (added text, signatures, erases, line edits),
    * reverting to the loaded PDF. Undoable. Items already saved into the file are kept.
    */
-  clearSignature() {
+  async clearSignature() {
     const n = this.edits.length;
     if (n === 0) { this.showStatus('Nothing to discard', 'info'); return; }
+    // Confirm first (same warning style as the Merge cancel dialog).
+    const ok = await this.confirmDialog(
+      `This removes your ${n} unsaved change${n === 1 ? '' : 's'}. You can still bring them back with Undo.`,
+      { title: 'Discard your changes?', okText: 'Discard', cancelText: 'Cancel', danger: true }
+    );
+    if (!ok) return;
     // Discard ALL unsaved changes (added text, signatures, erases, edits). Undoable.
     this.edits = [];
     this.commitHistory();
@@ -2741,5 +2787,6 @@ class PDFEditorApp {
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
-  new PDFEditorApp();
+  window.pdfEditorApp = new PDFEditorApp();   // exposed so Merge can clear the open doc
+  initMerge();   // wire up the client-side "Merge PDF" feature (self-contained)
 });

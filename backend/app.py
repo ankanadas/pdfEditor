@@ -646,9 +646,49 @@ def clear_signature():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/decrypt', methods=['POST'])
+@limiter.limit(RATE_HEAVY)
+def decrypt_pdf():
+    """Return an unencrypted copy of a PDF that is encrypted but openable without a
+    password (empty user password / permission-only restrictions). The client-side Merge
+    feature uses this because pdf-lib cannot decrypt. PDFs that need a real password are
+    reported back (needsPassword) so the UI can ask the user to unlock them first.
+    Nothing is stored — the file is decrypted in memory and the bytes are returned."""
+    try:
+        data = request.get_json(silent=True) or {}
+        if 'pdfBase64' not in data:
+            return jsonify({"success": False, "error": "Missing required fields"}), 400
+
+        pdf_bytes = base64.b64decode(data['pdfBase64'])
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        except Exception:
+            return jsonify({"success": False, "error": "Could not read PDF"}), 400
+
+        # A real password is required only if the empty password fails to authenticate.
+        if doc.needs_pass and not doc.authenticate(""):
+            doc.close()
+            return jsonify({"success": False, "needsPassword": True,
+                            "error": "This PDF needs a password to open."}), 200
+
+        # Re-save with encryption explicitly removed (the default KEEP would retain it).
+        output_bytes = doc.tobytes(encryption=fitz.PDF_ENCRYPT_NONE, deflate=True, garbage=3)
+        doc.close()
+        return jsonify({
+            "success": True,
+            "pdfBase64": base64.b64encode(output_bytes).decode('utf-8'),
+        })
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 if __name__ == '__main__':
     print("🚀 PDF Editor Backend starting...")
-    print("📝 Endpoints: GET /health, POST /extract-text, POST /edit-pdf, POST /clear-signature")
+    print("📝 Endpoints: GET /health, POST /extract-text, POST /edit-pdf, POST /clear-signature, POST /decrypt")
     # In production (Render/Railway/Fly) gunicorn serves the `app` object and the platform sets
     # $PORT; we then bind 0.0.0.0 so the host can reach us. With no $PORT (local dev) we keep
     # 127.0.0.1:5001 — localhost-only, never exposed on the network. Port 5000 is avoided
