@@ -509,7 +509,11 @@ class PDFEditorApp {
     // we white it out. Saving then covers replaced text with the cell's OWN colour instead
     // of white, so coloured/shaded backgrounds survive an edit. (Reads first, writes after,
     // to avoid interleaving getImageData with fillRect.)
-    lines.forEach((line) => { line.bgColor = this.sampleLineBg(pv, line); });
+    lines.forEach((line) => {
+      const c = this.sampleLineColors(pv, line);
+      line.bgColor = c.bg;          // covers the line with its real background (e.g. dark)
+      line.textColor = c.text;      // shows the editable text in its real colour (e.g. white)
+    });
 
     // Cover the original text on the canvas so the editable boxes are the only visible text.
     // Use each line's own background colour (not white) so a shaded/coloured cell keeps its
@@ -558,11 +562,17 @@ class PDFEditorApp {
       div.style.fontFamily = line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily;
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
-      // Readable preview text colour: light text on a dark line, dark on a light one (the saved
-      // file uses the exact original colour; this just keeps the editing box legible on dark pages).
-      const bg = line.bgColor;
-      const lum = bg ? (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) : 255;
-      div.style.color = lum < 140 ? '#fff' : '#000';
+      // Show the editable text in the line's REAL colour so the box blends into the page (e.g.
+      // white text on a dark headline). If text-colour detection failed, fall back to a readable
+      // contrast vs the background. (The saved file uses the exact original colour regardless.)
+      const tc = line.textColor;
+      if (tc) {
+        div.style.color = `rgb(${tc[0]},${tc[1]},${tc[2]})`;
+      } else {
+        const bg = line.bgColor;
+        const lum = bg ? (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) : 255;
+        div.style.color = lum < 140 ? '#fff' : '#000';
+      }
       div.style.padding = '0';
       div.style.margin = '0';
       div.style.border = '1px solid transparent';
@@ -604,12 +614,15 @@ class PDFEditorApp {
   }
 
   /**
-   * Find the dominant (background) colour under a text line by reading the rendered canvas.
-   * Glyphs and grid lines are a minority of the pixels in a line's band, so the most common
-   * colour is the cell's background. Returns [r,g,b] (0-255) or null if it can't be read.
-   * Used so an edited line is covered with its own background colour rather than white.
+   * Read a text line from the rendered canvas and return BOTH its background colour and its
+   * text colour: { bg:[r,g,b]|null, text:[r,g,b]|null }. The background is taken from the
+   * line's border ring (the edges are least likely to be covered by glyphs) so it stays correct
+   * even for a big bold headline where the glyphs are the majority of the band; the text colour
+   * is the dominant interior colour that differs from the background. This lets an edit cover the
+   * line with its REAL background (e.g. dark) and show the editable text in its REAL colour (e.g.
+   * white) — so editing white-on-dark text is seamless instead of a white box.
    */
-  sampleLineBg(pv, line) {
+  sampleLineColors(pv, line) {
     try {
       const cw = pv.canvas.width, ch = pv.canvas.height;
       const x = Math.max(0, Math.min(cw - 1, Math.floor(line.left)));
@@ -617,19 +630,37 @@ class PDFEditorApp {
       const w = Math.max(1, Math.min(cw - x, Math.ceil(line.right - line.left)));
       const h = Math.max(1, Math.min(ch - y, Math.ceil(line.bottom - line.top)));
       const data = pv.ctx.getImageData(x, y, w, h).data;   // device pixels (ignores transform)
-      const counts = new Map();
-      let bestN = 0, bestColor = null;
+      const key = (i) => ((data[i] & 0xF0) << 16) | ((data[i + 1] & 0xF0) << 8) | (data[i + 2] & 0xF0);
+
+      // Background = modal colour of the border ring (top/bottom rows + left/right columns).
+      const ring = new Map(), rep = new Map();
+      const tally = (px, py) => {
+        const i = (py * w + px) * 4;
+        if (data[i + 3] < 128) return;
+        const k = key(i);
+        ring.set(k, (ring.get(k) || 0) + 1);
+        if (!rep.has(k)) rep.set(k, [data[i], data[i + 1], data[i + 2]]);
+      };
+      for (let px = 0; px < w; px++) { tally(px, 0); tally(px, h - 1); }
+      for (let py = 0; py < h; py++) { tally(0, py); tally(w - 1, py); }
+      let bg = null, bgN = -1;
+      for (const [k, n] of ring) { if (n > bgN) { bgN = n; bg = rep.get(k); } }
+
+      // Text = the most common colour over the whole band that is far from the background.
+      const all = new Map(), allRep = new Map();
       for (let i = 0; i < data.length; i += 4) {
-        if (data[i + 3] < 128) continue;                   // skip transparent
-        // Quantise to 16 levels per channel so near-identical pixels share a bucket.
-        const key = ((data[i] & 0xF0) << 16) | ((data[i + 1] & 0xF0) << 8) | (data[i + 2] & 0xF0);
-        const n = (counts.get(key) || 0) + 1;
-        counts.set(key, n);
-        if (n > bestN) { bestN = n; bestColor = [data[i], data[i + 1], data[i + 2]]; }
+        if (data[i + 3] < 128) continue;
+        const k = key(i);
+        all.set(k, (all.get(k) || 0) + 1);
+        if (!allRep.has(k)) allRep.set(k, [data[i], data[i + 1], data[i + 2]]);
       }
-      return bestColor;
+      const far = (c) => !bg || (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) > 70);
+      let text = null, textN = 0;
+      for (const [k, n] of all) { const c = allRep.get(k); if (far(c) && n > textN) { textN = n; text = c; } }
+
+      return { bg, text };
     } catch (e) {
-      return null;   // e.g. a tainted canvas — fall back to white covering
+      return { bg: null, text: null };   // e.g. a tainted canvas — caller falls back
     }
   }
 
