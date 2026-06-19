@@ -410,8 +410,11 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
                 base = xref_base.get(xref, '')
                 charset = _font_charset(doc, base, charset_cache)
                 nm = base.lower()
-                is_bold = ('bold' in nm) or ('black' in nm) or ('heavy' in nm) or ('semibold' in nm)
-                is_italic = ('italic' in nm) or ('oblique' in nm)
+                # Include LaTeX Computer Modern names (cmbx = bold extended, cmti/cmsl = italic/slanted)
+                # so an embedded CM bold/italic font is recognised as style-matched and reused, rather
+                # than diverted to a fallback on re-insert.
+                is_bold = any(k in nm for k in ('bold', 'black', 'heavy', 'semibold', 'cmbx'))
+                is_italic = any(k in nm for k in ('italic', 'oblique', 'cmti', 'cmsl'))
                 style_ok = (is_bold == want_bold) and (is_italic == want_italic)
                 options.append((dict(fontname=ent[0]), ent[1], charset, style_ok))
     # Level 2: when the original font is a NON-embedded standard font (Helvetica/Times/Courier),
@@ -437,18 +440,25 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
 
 
 def _pick_font(ch, options):
-    """Pick (kwargs, Font) for one character, preferring: (1) an embedded font that actually drew it
-    AND matches the line's weight/slant, then (2) any embedded font that drew it (keeps a document
-    font), then (3) the full fallback. Spaces go with the first option (any font advances a space)."""
+    """Pick (kwargs, Font) for one character, preferring: (1) an embedded font that drew it AND
+    matches the line's weight/slant, then (2) the weight/slant-matched FALLBACK when it can draw the
+    character, then (3) any embedded font that drew it, then (4) the full fallback. Step 2 keeps a
+    NEW character the document's own fonts never drew — a digit typed into a bold heading whose
+    subset font lacks digit glyphs — in the line's weight, instead of borrowing a wrong-weight
+    document font (which made typed numbers come out regular inside a bold line). Spaces go with the
+    first option (any font advances a space)."""
     if ch == ' ':
         return options[0][0], options[0][1]
     for kwargs, font, charset, style_ok in options:    # 1: drawn-with + right weight/slant
         if charset is not None and style_ok and ch in charset:
             return kwargs, font
-    for kwargs, font, charset, style_ok in options:    # 2: drawn-with (any embedded weight)
+    fb = options[-1]                                    # 2: weight/slant-matched fallback (if it has it)
+    if fb[2] is None and fb[1].has_glyph(ord(ch)):
+        return fb[0], fb[1]
+    for kwargs, font, charset, style_ok in options:    # 3: drawn-with (any embedded weight)
         if charset is not None and ch in charset:
             return kwargs, font
-    for kwargs, font, charset, style_ok in options:    # 3: full fallback
+    for kwargs, font, charset, style_ok in options:    # 4: full fallback
         if charset is None:
             return kwargs, font
     return options[-1][0], options[-1][1]
@@ -488,11 +498,43 @@ def _runs_to_segments(runs, base_size, base_bold, base_italic):
     return out if any(parts for parts in out) else None
 
 
-def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None, color=(0, 0, 0)):
+def _detect_align(page, span):
+    """Best-effort alignment of `span`'s line so a replacement of a different length keeps it:
+    'right' for a right-aligned column (several rows end at the SAME x while starting at varying x —
+    e.g. résumé dates), 'center' for a line centred in the content area and indented from both
+    margins (e.g. a name title), else 'left'. Conservative: anything unclear stays 'left'."""
+    if not span:
+        return 'left'
+    sx0, _, sx1, _ = span['bbox']
+    boxes = [sp['bbox'] for b in page.get_text("dict").get("blocks", [])
+             for line in b.get("lines", []) for sp in line.get("spans", []) if sp.get('text', '').strip()]
+    if len(boxes) < 3:
+        return 'left'
+    margin_left = min(b[0] for b in boxes)
+    content_right = max(b[2] for b in boxes)
+    indent = sx0 - margin_left
+    # right-aligned column: >=3 rows whose right edge matches this one, lining up tighter on the
+    # right than on the left (so it's a right-aligned column, not a justified/left block).
+    same_right = [b for b in boxes if abs(b[2] - sx1) < 1.5]
+    if len(same_right) >= 3 and indent > 30:
+        l_spread = max(b[0] for b in same_right) - min(b[0] for b in same_right)
+        r_spread = max(b[2] for b in same_right) - min(b[2] for b in same_right)
+        if l_spread > r_spread + 1.0:
+            return 'right'
+    # centred: midpoint near the content centre, clearly indented on both sides.
+    center = (sx0 + sx1) / 2
+    if abs(center - (margin_left + content_right) / 2) < 8 and indent > 25 and (content_right - sx1) > 25:
+        return 'center'
+    return 'left'
+
+
+def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None, color=(0, 0, 0), anchor=None):
     """Draw `text` at (x, baseline), switching font per run so every character uses a font that
     contains it. Groups consecutive same-font characters, shrinks to fit `avail` width, then
     inserts each run, advancing x by its measured width. `morph` (a (fixpoint, Matrix) pair)
-    rotates the drawn text about a pivot — used for rotated "Add text" boxes."""
+    rotates the drawn text about a pivot — used for rotated "Add text" boxes. `anchor`
+    (align, box_left, box_right) re-anchors a right-/centre-aligned replacement so a shorter/longer
+    edit keeps the line's alignment instead of always starting at the left."""
     runs, cur, cur_opt = [], [], None
     for ch in text:
         if ch == ' ' and cur_opt is not None:
@@ -510,14 +552,22 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None,
     total = sum(opt[1].text_length(s, fontsize=size) for opt, s in runs)
     if total > avail > 8:
         size = max(4.0, size * avail / total)
+        total = sum(opt[1].text_length(s, fontsize=size) for opt, s in runs)   # after shrink
 
     cx = x
+    if anchor:
+        align, box_left, box_right = anchor
+        if align == 'right':
+            cx = max(box_left, box_right - total)
+        elif align == 'center':
+            cx = max(box_left, (box_left + box_right) / 2 - total / 2)
+    start = cx
     extra = {'morph': morph} if morph else {}
     for opt, s in runs:
         kwargs, font = opt
         page.insert_text(fitz.Point(cx, baseline), s, fontsize=size, color=color, **kwargs, **extra)
         cx += font.text_length(s, fontsize=size)
-    return cx - x          # total advance width (lets a caller chain segments on one line)
+    return cx - start          # drawn advance width (lets a caller chain segments on one line)
 
 
 @app.route('/health', methods=['GET'])
@@ -614,6 +664,13 @@ def edit_pdf():
             page = doc[page_num]
             pw, ph = page.rect.width, page.rect.height
             font_cache = {}
+            # Capture hyperlink annotations now: apply_redactions drops the ones overlapping an
+            # edited line, so we re-add the lost ones after re-inserting (keeps links clickable).
+            try:
+                saved_links = [l for l in page.get_links() if l.get('uri')]
+            except Exception:
+                saved_links = []
+            redact_rects = []
 
             # 0) BEFORE redacting, capture each replaced line's original font + size so the
             #    replacement matches exactly (redaction deletes the spans, so we must look now).
@@ -628,6 +685,9 @@ def edit_pdf():
                 edit['_lineStyle'] = _line_uniform_style(page, (
                     x, float(edit.get('top', 0)),
                     float(edit.get('right', x)), float(edit.get('bottom', 0))))
+                # Detected alignment, so a different-length replacement keeps a right-aligned date
+                # column or a centred title aligned (re-anchored on re-insert), not left-shifted.
+                edit['_align'] = _detect_align(page, edit['_span'])
 
             # 1) Redact the original text of REPLACE edits, then re-insert the new text.
             #    Insert-only edits (added text / signatures) set redact=False.
@@ -652,6 +712,7 @@ def edit_pdf():
                 )
                 is_erase = edit.get('kind') == 'erase'
                 page.add_redact_annot(rect, fill=(1, 1, 1) if is_erase else False, cross_out=False)
+                redact_rects.append(rect)
                 did_redact = True
             if did_redact:
                 # Keep images; also keep vector graphics where the PyMuPDF build supports it
@@ -736,12 +797,28 @@ def edit_pdf():
                                                             pw - cx - 4, morph, color=text_color)
                             prev_max = this_max
                     else:
+                        # Replace edits re-anchor to keep right/centre alignment; added text is left.
+                        anchor = None if is_insert else (
+                            edit.get('_align', 'left'), x, float(edit.get('right', x)))
                         line_h = size * 1.2
                         for i, ln in enumerate(text_lines):
                             if ln.strip():
-                                _insert_text_runs(page, x, baseline + i * line_h, ln, size, options, pw - x - 4, morph, color=text_color)
+                                _insert_text_runs(page, x, baseline + i * line_h, ln, size, options,
+                                                  pw - x - 4, morph, color=text_color, anchor=anchor)
                 # Note: never log the document's text content (keeps the app traceless).
                 print(f"  page {page_num}: [{style}] text written at ({x:.1f}, {baseline:.1f})")
+
+            # Re-add hyperlinks the redaction dropped (so an edited footer/contact line stays
+            # clickable). Only restore links that OVERLAP a redacted rect — those are the ones
+            # apply_redactions removed; others survived. Avoids get_links() here (it can raise right
+            # after redaction) and avoids duplicating links that weren't touched.
+            for l in saved_links:
+                r = fitz.Rect(l['from'])
+                if any(r.intersects(rr) for rr in redact_rects):
+                    try:
+                        page.insert_link({"kind": fitz.LINK_URI, "from": r, "uri": l['uri']})
+                    except Exception:
+                        pass
 
         output_bytes = doc.tobytes(deflate=True, garbage=3)
         doc.close()
