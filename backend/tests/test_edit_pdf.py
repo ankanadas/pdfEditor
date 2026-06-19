@@ -244,6 +244,28 @@ class SyntheticTests(unittest.TestCase):
         self.assertTrue(latin and all("Helvetica" in s["font"] for s in latin),
                         f"Latin text lost the standard font, got {[s['font'] for s in latin]}")
 
+    def test_edit_keeps_line_in_one_font(self):
+        # A word whose font drew it ONLY on this line must not scatter across other embedded fonts
+        # when edited. Reproduces the "SUMMARY -> CMCSC10/CMR10/CMBX12/CMTI10" scatter: charsets are
+        # warmed from the ORIGINAL doc (before redaction) so the line keeps its own font.
+        f1 = "/System/Library/Fonts/Supplemental/Times New Roman.ttf"
+        f2 = "/System/Library/Fonts/Supplemental/Georgia.ttf"
+        if not (os.path.exists(f1) and os.path.exists(f2)):
+            self.skipTest("needs two distinct embeddable system fonts")
+        doc = fitz.open()
+        pg = doc.new_page(width=400, height=200)
+        pg.insert_text((40, 60), "WIDGET", fontsize=16, fontfile=f1, fontname="F1")   # unique here
+        pg.insert_text((40, 120), "WIDGET", fontsize=16, fontfile=f2, fontname="F2")  # same chars, other font
+        src = doc.tobytes()
+        sdoc = fitz.open(stream=src, filetype="pdf")
+        span = next(s for b in sdoc[0].get_text("dict")["blocks"] for l in b.get("lines", [])
+                    for s in l["spans"] if "WIDGET" in s["text"] and abs(s["origin"][1] - 60) < 3)
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "WIDGET")]), filetype="pdf")
+        line = [s for b in res[0].get_text("dict")["blocks"] for l in b.get("lines", [])
+                for s in l["spans"] if "WIDGET" in s["text"] and abs(s["origin"][1] - 60) < 4]
+        fonts = {s["font"] for s in line}
+        self.assertEqual(len(fonts), 1, f"edited line scattered across fonts: {fonts}")
+
     def test_erase_still_whitens(self):
         # The erase tool (kind='erase') must still paint white.
         doc = fitz.open()

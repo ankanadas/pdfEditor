@@ -337,6 +337,22 @@ def _font_charset(doc, basefont, cache):
     return chars
 
 
+def _warm_charsets(doc, cache):
+    """Pre-compute every font's drawn-character set from the ORIGINAL document, in one pass, BEFORE
+    any redaction. Redaction removes an edited line's text, so if charsets were built afterwards the
+    line's OWN glyphs would look 'undrawable' by their own font and each character would scatter to
+    whatever other embedded font happened to draw it elsewhere (a word ending up in 4 fonts). Seeding
+    from the original keeps 'drawn == has an outline' (so subset fonts stay honest) while ensuring a
+    font is always credited with the characters it actually drew, including on the edited line."""
+    for pg in doc:
+        for block in pg.get_text("dict").get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    key = (span.get('font', '') or '').split('+')[-1].lower()
+                    if key:
+                        cache.setdefault(key, set()).update(span.get('text', ''))
+
+
 def _install_embedded_font(doc, page, xref, cache):
     """Embed the PDF's OWN font (by xref) into the page once and return (fontname, fitz.Font),
     or None if it can't be extracted. Cached per page so each font is embedded only once."""
@@ -586,8 +602,11 @@ def edit_pdf():
         for edit in edits:
             edits_by_page.setdefault(int(edit.get('pageIndex', 0)), []).append(edit)
 
-        # Cache of "characters this embedded font actually drew", shared across pages.
+        # Cache of "characters this embedded font actually drew", shared across pages. Warm it from
+        # the ORIGINAL doc now, before any redaction, so an edited line's own glyphs aren't lost and
+        # its characters don't scatter across multiple fonts on re-insert.
         charset_cache = {}
+        _warm_charsets(doc, charset_cache)
 
         for page_num, page_edits in edits_by_page.items():
             if page_num < 0 or page_num >= len(doc):
