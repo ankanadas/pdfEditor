@@ -146,7 +146,7 @@
     .tool {
       width: 100%; border: 1px solid transparent; background: transparent; cursor: pointer;
       border-radius: 10px; padding: 10px 4px; display: flex; flex-direction: column; align-items: center; gap: 5px;
-      color: var(--muted); font-size: 11.5px; font-weight: 600; transition: all .15s ease;
+      color: var(--ink); font-size: 13px; font-weight: 600; transition: all .15s ease;
     }
     .tool svg { width: 22px; height: 22px; }
     /* Sticker icons (fun-ui): raster PNGs with transparent backgrounds. */
@@ -163,16 +163,10 @@
     }
     .tool:disabled { opacity: .4; cursor: not-allowed; }
     .tool.danger:hover:not(:disabled) { background: #fdeced; color: var(--danger); }
-    /* Primary tools (Edit & Sign): larger, brand-coloured, bolder so they stand out */
-    .tool.featured { position: relative; color: var(--brand); font-weight: 700; }
+    /* Primary tools (Edit & Sign): slightly bolder; dark label, no star badge */
+    .tool.featured { color: var(--ink); font-weight: 700; }
     .tool.featured svg { width: 28px; height: 28px; stroke-width: 2.2; }
-    .tool.featured:hover:not(:disabled) { background: #efecff; color: var(--brand); }
-    /* Gold star marks the most-useful tools (Edit & Sign) */
-    .tool.featured::after {
-      content: '★'; position: absolute; top: 3px; right: 8px;
-      font-size: 11px; line-height: 1; color: #f6a609; text-shadow: 0 0 1px rgba(0,0,0,.15);
-    }
-    .sidebar .tool.featured.active::after { color: #ffd54a; }
+    .tool.featured:hover:not(:disabled) { background: #efecff; color: var(--ink); }
     .sidebar .sep { width: 60%; height: 1px; background: var(--line); margin: 6px 0; }
 
     /* Main column */
@@ -623,10 +617,10 @@
       background: var(--brand); color: #fff; border-color: var(--brand); font-weight: 700;
       box-shadow: 0 4px 12px rgba(109, 94, 252, .38);
     }
-    /* Merge: the new headline tool, brand-coloured so it stands out (no star). */
-    .tool.merge-tool { color: var(--brand); font-weight: 700; }
+    /* Merge: the headline tool (no star); dark label like the rest. */
+    .tool.merge-tool { color: var(--ink); font-weight: 700; }
     .tool.merge-tool svg { width: 26px; height: 26px; }
-    .tool.merge-tool:hover:not(:disabled) { background: #efecff; color: var(--brand); }
+    .tool.merge-tool:hover:not(:disabled) { background: #efecff; color: var(--ink); }
     @media (max-width: 640px) { .rightbar { width: 96px; } }
 
     /* ===================== Merge modal (centred, ~90% of screen) ===================== */
@@ -802,7 +796,7 @@
   <div class="workspace">
     <!-- Tool sidebar -->
     <aside class="sidebar">
-      <button class="tool featured" id="editModeBtn" disabled title="★ Most useful: edit existing text in place">
+      <button class="tool featured" id="editModeBtn" disabled title="Most useful: edit existing text in place">
         <img class="tool-ico" src="/assets/fun-ui/edit.png" alt="" aria-hidden="true">
         Edit
       </button>
@@ -810,7 +804,7 @@
         <img class="tool-ico" src="/assets/fun-ui/add.png" alt="" aria-hidden="true">
         Add
       </button>
-      <button class="tool featured" id="signatureModeBtn" disabled title="★ Most useful: type, draw or upload a signature">
+      <button class="tool featured" id="signatureModeBtn" disabled title="Most useful: type, draw or upload a signature">
         <img class="tool-ico" src="/assets/fun-ui/sign.png" alt="" aria-hidden="true">
         Sign
       </button>
