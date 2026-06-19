@@ -508,6 +508,11 @@ class PDFEditorApp {
 
     const lines = this.groupTextItemsByLine(pageTextItems);
 
+    // Correct bold/italic from PDF.js's loaded fonts now that the page has rendered, so the edit
+    // box previews the real weight (a non-embedded "Helvetica-Bold" heading the font-NAME guess
+    // missed) — matching what the save produces.
+    this.refineLineStylesFromPdfjs(pv, lines);
+
     // Sample each line's background colour from the freshly-rendered (clean) canvas BEFORE
     // we white it out. Saving then covers replaced text with the cell's OWN colour instead
     // of white, so coloured/shaded backgrounds survive an edit. (Reads first, writes after,
@@ -576,7 +581,12 @@ class PDFEditorApp {
       // a matching system family (Times/Arial) as the fallback, so glyphs the (subset) font lacks
       // — and Type 3 fonts PDF.js can't expose — still render instead of showing missing boxes.
       const fallbackFamily = line.serif ? '"Times New Roman", Times, serif' : 'Arial, Helvetica, sans-serif';
-      div.style.fontFamily = line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily;
+      // Mirror PDF.js's own text rendering: a non-embedded standard font uses the system-font
+      // @font-face PDF.js injected (line.fontCss -> real Helvetica); an embedded font uses its
+      // loadedName web font. Either way the edit box matches the page; fall back if neither resolves.
+      div.style.fontFamily = line.fontCss
+        ? `${line.fontCss}, ${fallbackFamily}`
+        : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily);
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
       // Show the editable text in the line's REAL colour so the box blends into the page (e.g.
@@ -826,6 +836,58 @@ class PDFEditorApp {
     line.bold = totalChars > 0 && boldChars * 2 > totalChars;
     line.italic = totalChars > 0 && italicChars * 2 > totalChars;
     line.serif = totalChars > 0 && serifChars * 2 >= totalChars;
+  }
+
+  /**
+   * The weight/slant PDF.js computed for a loaded font — the SAME source PDF.js uses to style its
+   * own text layer (commonObjs holds the parsed font with .bold/.black/.italic). Read at EDIT time,
+   * after the page has rendered, so the object is resolved. This recovers a bold/italic the font-NAME
+   * heuristic misses for NON-EMBEDDED standard fonts (a "Helvetica-Bold" heading PDF.js draws via a
+   * system font, not a loadedName web font). Returns null when the font object isn't available.
+   */
+  fontStyleFromPdfjs(pv, fontName) {
+    try {
+      const objs = pv && pv.page && pv.page.commonObjs;
+      if (!objs || !fontName || !objs.has(fontName)) return null;
+      const f = objs.get(fontName);
+      if (!f) return null;
+      // For a NON-embedded standard font, PDF.js renders via a system-font @font-face it injects
+      // during render (systemFontInfo.css -> src: local(Helvetica…)); reuse that exact family so the
+      // edit box shows the real font, not the Arial fallback. Embedded fonts have no systemFontInfo.
+      const css = (f.systemFontInfo && f.systemFontInfo.css) ? f.systemFontInfo.css : null;
+      return { bold: !!(f.black || f.bold), italic: !!f.italic, css };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Correct each line's bold/italic from PDF.js's loaded font objects (authoritative) before we
+   * style the editable overlay. Mirrors the backend: only adopt a style when the WHOLE line is
+   * uniformly that style, so a mixed line (bold label + regular body) isn't forced bold; and only
+   * ADDS a style (never clears a correctly-detected one). Keeps the in-edit preview matching what
+   * the save produces. No-op for lines whose fonts PDF.js hasn't resolved.
+   */
+  refineLineStylesFromPdfjs(pv, lines) {
+    lines.forEach((line) => {
+      const items = (line.items || []).filter(it => (it.text || '').trim());
+      if (!items.length) return;
+      let known = 0, boldAll = true, italicAll = true;
+      for (const it of items) {
+        const st = this.fontStyleFromPdfjs(pv, it.fontName);
+        if (!st) continue;
+        known++;
+        if (!st.bold) boldAll = false;
+        if (!st.italic) italicAll = false;
+      }
+      if (known === items.length) {        // every item's font was resolvable -> trust it
+        if (boldAll) line.bold = true;
+        if (italicAll) line.italic = true;
+      }
+      // Reuse PDF.js's own font family for the line so the overlay matches the page exactly.
+      const head = this.fontStyleFromPdfjs(pv, line.fontName);
+      if (head && head.css) line.fontCss = head.css;
+    });
   }
 
   /**

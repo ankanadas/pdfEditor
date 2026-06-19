@@ -124,20 +124,32 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(got[0]["font"], "Calibri",
                          f"expected the document font 'Calibri', got {got[0]['font']!r}")
 
-    def test_matched_bold_span_does_not_force_bold(self):
-        # Anchor on a BOLD span (Calibri-Bold) but say the line is regular (bold=False):
-        # the re-inserted text must come out regular, not bold.
+    def test_mixed_weight_line_not_forced_bold(self):
+        # A line that MIXES bold (title/company) and regular (punctuation/location). Editing the
+        # whole line with bold=False must NOT force the regular text bold just because the line
+        # starts with a bold span — only a UNIFORMLY bold line recovers bold (see the synthetic test).
         src = fitz.open(RESUME)
-        span = find_span(src, "Software Engineer")
-        self.assertIsNotNone(span, "could not find a bold 'Software Engineer' span")
-        self.assertIn("Bold", span["font"], "precondition: anchor span should be bold")
-        res = fitz.open(stream=post_edit(src.tobytes(),
-                        [edit_from_span(span, "engineering team lead", bold=False)]), filetype="pdf")
+        line = next((l for pno in range(len(src))
+                     for b in src[pno].get_text("dict")["blocks"]
+                     for l in b.get("lines", [])
+                     if "Software Engineer" in "".join(s["text"] for s in l["spans"])), None)
+        self.assertIsNotNone(line, "could not find the 'Software Engineer' line")
+        fonts = [s["font"] for s in line["spans"]]
+        self.assertTrue(any("Bold" in f for f in fonts) and any("Bold" not in f for f in fonts),
+                        f"precondition: line should mix bold + regular spans, got {fonts}")
+        x0, y0, x1, y1 = line["bbox"]
+        oy = line["spans"][0]["origin"][1]
+        edit = {"pageIndex": 0, "x": round(x0, 1), "right": round(x1, 1),
+                "top": round(y0, 1), "bottom": round(y1, 1), "baseline": round(oy, 1),
+                "fontSize": round(line["spans"][0]["size"], 1),
+                "bold": False, "italic": False, "serif": False,
+                "newText": "engineering team lead role"}
+        res = fitz.open(stream=post_edit(src.tobytes(), [edit]), filetype="pdf")
         got = spans_with(res, "engineer")
         self.assertTrue(got, "edited text not found in output")
         for s in got:
             self.assertNotIn("Bold", s["font"],
-                             f"edited regular line rendered bold: {s['font']!r}")
+                             f"mixed regular line rendered bold: {s['font']!r}")
 
     def test_no_characters_dropped(self):
         # Every typed character of a body edit must survive (no silent drops / boxes).
@@ -184,6 +196,53 @@ class SyntheticTests(unittest.TestCase):
         r, g, b = (c >> 16 & 255, c >> 8 & 255, c & 255)
         self.assertTrue(r > 220 and g > 220 and b > 220,
                         f"text colour not preserved, span colour {(r, g, b)} (expected ~white)")
+
+    def test_uniform_bold_line_recovers_bold(self):
+        # A heading drawn in a standard bold font (Helvetica-Bold). The frontend can't see the
+        # weight in pdf.js's loadedName, so it sends bold=False — but the whole line is uniformly
+        # bold, so the replacement must come back bold (the "RYZE AI -> ArialMT regular" bug).
+        doc = fitz.open()
+        pg = doc.new_page(width=400, height=160)
+        pg.insert_text(fitz.Point(30, 80), "RYZE AI", fontsize=40, fontname="hebo")  # Helvetica-Bold
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "RYZE AI")
+        self.assertIsNotNone(span, "could not find the bold heading span")
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "RYZE89 AI", bold=False)]),
+                        filetype="pdf")
+        got = spans_with(res, "RYZE89")
+        self.assertTrue(got, "edited heading not found in output")
+        self.assertTrue(any(("Bold" in s["font"]) or (s["flags"] & 16) for s in got),
+                        f"uniformly-bold heading came back regular: {[s['font'] for s in got]}")
+
+    def test_standard_font_name_preserved(self):
+        # A non-embedded standard font (Helvetica-Bold) must be re-emitted under its OWN name, not
+        # substituted with Arial — so the edited heading still reads 'Helvetica-Bold' in the output.
+        doc = fitz.open()
+        pg = doc.new_page(width=400, height=160)
+        pg.insert_text(fitz.Point(30, 80), "RYZE AI", fontsize=40, fontname="hebo")  # Helvetica-Bold
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "RYZE AI")
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "RYZE89 AI", bold=False)]),
+                        filetype="pdf")
+        got = spans_with(res, "RYZE89")
+        self.assertTrue(got, "edited heading not found in output")
+        self.assertTrue(all("Helvetica" in s["font"] for s in got),
+                        f"standard font not preserved, got {[s['font'] for s in got]}")
+
+    def test_non_winansi_char_falls_back_from_base14(self):
+        # The standard-font re-emit only covers Latin-1. A character outside it (an em-dash) must
+        # still render — it falls through to a real Unicode TTF — while the Latin text keeps the
+        # standard font name.
+        doc = fitz.open()
+        pg = doc.new_page(width=400, height=160)
+        pg.insert_text(fitz.Point(30, 80), "Title here", fontsize=24, fontname="helv")  # Helvetica
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "Title here")
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "Title — End")]), filetype="pdf")
+        self.assertIn("—", page_text(res), "em-dash dropped instead of falling back to a TTF")
+        latin = [s for s in spans_with(res, "Title")]
+        self.assertTrue(latin and all("Helvetica" in s["font"] for s in latin),
+                        f"Latin text lost the standard font, got {[s['font'] for s in latin]}")
 
     def test_erase_still_whitens(self):
         # The erase tool (kind='erase') must still paint white.
