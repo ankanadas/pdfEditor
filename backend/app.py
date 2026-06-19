@@ -1,5 +1,8 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 import fitz  # PyMuPDF
 import base64
 import io
@@ -9,7 +12,68 @@ import re
 from PIL import Image
 
 app = Flask(__name__)
-CORS(app)  # Allow requests from the frontend
+
+# Behind Render's TLS-terminating proxy: trust one X-Forwarded-For / -Proto hop so
+# request.remote_addr (the rate-limit key) is the real client, not the proxy. Locally
+# there is no proxy header, so this is a no-op in development.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+# ---- CORS ----------------------------------------------------------------------------
+# Only our own frontend (production + local dev) may call this API from a browser.
+# Override with the ALLOWED_ORIGINS env var (comma-separated). NOTE: CORS is enforced by
+# the browser — it stops other sites' pages from using fetch() against us; it is NOT a
+# server-side firewall (curl / server scripts ignore it). Abuse throttling is the rate
+# limiter's job, below.
+_DEFAULT_ORIGINS = (
+    "https://quickpdfeditor.com,https://www.quickpdfeditor.com,"
+    "http://localhost:9000,http://127.0.0.1:9000"
+)
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",") if o.strip()
+]
+CORS(
+    app,
+    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+    max_age=86400,
+)
+
+# ---- Rate limiting (abuse / DoS protection) ------------------------------------------
+# Per-client-IP limits. Storage defaults to in-memory; set RATELIMIT_STORAGE_URI to a
+# Redis URL to share counts across gunicorn workers and instances. With in-memory storage
+# and N workers, each worker counts independently, so the real limit is ~N x the numbers
+# below — fine for abuse prevention; use Redis (or `--workers 1`) for exact limits.
+# Set RATELIMIT_ENABLED=0 as an ops kill-switch to disable limiting entirely.
+RATE_DEFAULTS = ["60 per minute", "600 per hour"]
+RATE_HEAVY = "30 per minute;300 per hour"  # CPU/memory-heavy PDF endpoints
+
+app.config["RATELIMIT_ENABLED"] = os.environ.get("RATELIMIT_ENABLED", "1") not in ("0", "false", "False")
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=RATE_DEFAULTS,
+    storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
+    headers_enabled=True,
+    strategy="fixed-window",
+)
+
+
+@limiter.request_filter
+def _skip_preflight_and_loopback():
+    # Never throttle CORS preflight requests, or loopback traffic (local dev, health
+    # probes, same-host calls). In production every real request arrives via Render's
+    # proxy carrying the client's real IP (see ProxyFix above), so loopback never
+    # matches genuine user traffic — this only spares localhost and the test suite.
+    return request.method == "OPTIONS" or request.remote_addr in ("127.0.0.1", "::1")
+
+
+@app.errorhandler(429)
+def _rate_limited(_e):
+    # JSON 429 to match the rest of the API. flask-cors still attaches the CORS headers
+    # to this response, so the browser can read it.
+    return jsonify({"error": "Too many requests — please slow down and try again in a moment."}), 429
 
 # Defense-in-depth file-size limit (the frontend also blocks oversized files).
 # The editor sends the PDF base64-encoded (~1.34x larger), so the raw request cap is
@@ -322,12 +386,14 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None)
 
 
 @app.route('/health', methods=['GET'])
+@limiter.exempt
 def health():
     """Health check endpoint"""
     return jsonify({"status": "ok", "message": "PDF Editor Backend is running"})
 
 
 @app.route('/extract-text', methods=['POST'])
+@limiter.limit(RATE_HEAVY)
 def extract_text():
     """Extract text with positions from a PDF (kept for compatibility; the frontend
     now uses PDF.js for geometry and only relies on the backend for editing/saving)."""
@@ -373,6 +439,7 @@ def extract_text():
 
 
 @app.route('/edit-pdf', methods=['POST'])
+@limiter.limit(RATE_HEAVY)
 def edit_pdf():
     """Replace edited lines in place.
 
