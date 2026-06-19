@@ -614,49 +614,56 @@ class PDFEditorApp {
   }
 
   /**
-   * Read a text line from the rendered canvas and return BOTH its background colour and its
-   * text colour: { bg:[r,g,b]|null, text:[r,g,b]|null }. The background is taken from the
-   * line's border ring (the edges are least likely to be covered by glyphs) so it stays correct
-   * even for a big bold headline where the glyphs are the majority of the band; the text colour
-   * is the dominant interior colour that differs from the background. This lets an edit cover the
+   * Read a text line from the rendered canvas and return BOTH its background colour and its text
+   * colour: { bg:[r,g,b]|null, text:[r,g,b]|null }. The background is sampled from the PADDING
+   * just OUTSIDE the line's box (that area is page background, never glyphs) so it stays correct
+   * even for a big bold headline whose own box is wall-to-wall glyphs; the text colour is the
+   * dominant colour INSIDE the box that differs from the background. This lets an edit cover the
    * line with its REAL background (e.g. dark) and show the editable text in its REAL colour (e.g.
    * white) — so editing white-on-dark text is seamless instead of a white box.
    */
   sampleLineColors(pv, line) {
     try {
       const cw = pv.canvas.width, ch = pv.canvas.height;
-      const x = Math.max(0, Math.min(cw - 1, Math.floor(line.left)));
-      const y = Math.max(0, Math.min(ch - 1, Math.floor(line.top)));
-      const w = Math.max(1, Math.min(cw - x, Math.ceil(line.right - line.left)));
-      const h = Math.max(1, Math.min(ch - y, Math.ceil(line.bottom - line.top)));
-      const data = pv.ctx.getImageData(x, y, w, h).data;   // device pixels (ignores transform)
+      const lh = Math.max(1, line.bottom - line.top);
+      const padX = Math.max(6, Math.round(lh * 0.5));   // sample a margin to the sides...
+      const padY = Math.max(4, Math.round(lh * 0.35));  // ...and just above / below the text
+      const ex0 = Math.max(0, Math.floor(line.left) - padX);
+      const ey0 = Math.max(0, Math.floor(line.top) - padY);
+      const ex1 = Math.min(cw, Math.ceil(line.right) + padX);
+      const ey1 = Math.min(ch, Math.ceil(line.bottom) + padY);
+      const w = Math.max(1, ex1 - ex0), h = Math.max(1, ey1 - ey0);
+      const data = pv.ctx.getImageData(ex0, ey0, w, h).data;   // device pixels (ignores transform)
+      // The original text box, in this region's local coordinates.
+      const ix0 = Math.floor(line.left) - ex0, iy0 = Math.floor(line.top) - ey0;
+      const ix1 = Math.ceil(line.right) - ex0, iy1 = Math.ceil(line.bottom) - ey0;
       const key = (i) => ((data[i] & 0xF0) << 16) | ((data[i + 1] & 0xF0) << 8) | (data[i + 2] & 0xF0);
 
-      // Background = modal colour of the border ring (top/bottom rows + left/right columns).
-      const ring = new Map(), rep = new Map();
-      const tally = (px, py) => {
-        const i = (py * w + px) * 4;
-        if (data[i + 3] < 128) return;
-        const k = key(i);
-        ring.set(k, (ring.get(k) || 0) + 1);
-        if (!rep.has(k)) rep.set(k, [data[i], data[i + 1], data[i + 2]]);
-      };
-      for (let px = 0; px < w; px++) { tally(px, 0); tally(px, h - 1); }
-      for (let py = 0; py < h; py++) { tally(0, py); tally(w - 1, py); }
-      let bg = null, bgN = -1;
-      for (const [k, n] of ring) { if (n > bgN) { bgN = n; bg = rep.get(k); } }
-
-      // Text = the most common colour over the whole band that is far from the background.
-      const all = new Map(), allRep = new Map();
-      for (let i = 0; i < data.length; i += 4) {
-        if (data[i + 3] < 128) continue;
-        const k = key(i);
-        all.set(k, (all.get(k) || 0) + 1);
-        if (!allRep.has(k)) allRep.set(k, [data[i], data[i + 1], data[i + 2]]);
+      const padC = new Map(), padRep = new Map(), inC = new Map(), inRep = new Map();
+      for (let py = 0; py < h; py++) {
+        const inRow = py >= iy0 && py < iy1;
+        for (let px = 0; px < w; px++) {
+          const i = (py * w + px) * 4;
+          if (data[i + 3] < 128) continue;
+          const k = key(i);
+          if (inRow && px >= ix0 && px < ix1) {        // inside the text box
+            inC.set(k, (inC.get(k) || 0) + 1);
+            if (!inRep.has(k)) inRep.set(k, [data[i], data[i + 1], data[i + 2]]);
+          } else {                                     // padding = background
+            padC.set(k, (padC.get(k) || 0) + 1);
+            if (!padRep.has(k)) padRep.set(k, [data[i], data[i + 1], data[i + 2]]);
+          }
+        }
       }
+      // Background = modal colour of the padding (fall back to the box's modal if no padding).
+      let bg = null, bgN = -1;
+      for (const [k, n] of padC) { if (n > bgN) { bgN = n; bg = padRep.get(k); } }
+      if (!bg) { for (const [k, n] of inC) { if (n > bgN) { bgN = n; bg = inRep.get(k); } } }
+
+      // Text = the most common colour inside the box that is clearly different from the background.
       const far = (c) => !bg || (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) > 70);
       let text = null, textN = 0;
-      for (const [k, n] of all) { const c = allRep.get(k); if (far(c) && n > textN) { textN = n; text = c; } }
+      for (const [k, n] of inC) { const c = inRep.get(k); if (far(c) && n > textN) { textN = n; text = c; } }
 
       return { bg, text };
     } catch (e) {
