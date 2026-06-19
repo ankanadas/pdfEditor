@@ -27,7 +27,8 @@ RAW = os.path.join(ROOT, "assets", "fun-ui", "raw")
 OUT = os.path.join(ROOT, "assets", "fun-ui")
 
 THRESH = 38      # how close to the corner colour still counts as background
-MAX_SIDE = 256   # longest edge of the saved icon
+MAX_SIDE = 128   # longest edge of the saved icon (displays ~40px, so 128 covers retina)
+COLORS = 128     # palette size for the 8-bit PNG (fewer colours = smaller file)
 
 
 def is_bg(px, ref, thresh=THRESH):
@@ -86,8 +87,11 @@ def main():
     for f in files:
         name = os.path.splitext(f)[0]
         out = os.path.join(OUT, name + ".png")
-        strip(os.path.join(RAW, f)).save(out)
-        print(f"  {f}  ->  {os.path.relpath(out, ROOT)}")
+        img = strip(os.path.join(RAW, f))
+        # Compress: 8-bit palette with transparency (FASTOCTREE keeps alpha) + zlib optimise.
+        img = img.quantize(colors=COLORS, method=2)
+        img.save(out, optimize=True)
+        print(f"  {f}  ->  {os.path.relpath(out, ROOT)}  ({os.path.getsize(out) // 1024} KB)")
     print(f"Done: {len(files)} icon(s) written to {os.path.relpath(OUT, ROOT)}")
 
 
