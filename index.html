@@ -209,6 +209,8 @@
     .ctx .stamp-upload:active { transform: translateY(0); }
     body[data-mode="edit"] .ctx-edit { display: flex; }
     body[data-mode="text"] .ctx-text { display: flex; }
+    /* Keep the Add-text controls available while an editor box is open, whatever the tool. */
+    body.editing-insert .ctx-text { display: flex; }
     body[data-mode="signature"] .ctx-sign { display: flex; }
     body[data-mode="erase"] .ctx-erase { display: flex; }
     body[data-mode="stamp"] .ctx-stamp { display: flex; }
@@ -219,7 +221,7 @@
     }
     .field:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(109,94,252,.18); }
     #textInput, #signatureInput { width: 280px; }
-    #fontSize { width: 64px; }
+    #addSize { width: 64px; }
     .hint { font-size: 12.5px; color: var(--muted); }
 
     .mode-indicator {
@@ -309,6 +311,20 @@
     .editable-text-box { font-family: inherit; }
     .editable-text-box:focus { outline: none; }
 
+    /* In-place editor for "Add text" (click a spot, type, Enter = new line). It's a
+       contentEditable div so a single box can mix font size / bold / italic per run. Size and
+       B / I are applied from the top toolbar to the current selection. */
+    .insert-editor {
+      position: absolute; z-index: 300; margin: 0; padding: 0 2px;
+      border: 1px solid var(--brand); border-radius: 3px;
+      background: rgba(255, 255, 255, .97); color: #000;
+      box-shadow: 0 2px 12px rgba(109, 94, 252, .3);
+      box-sizing: border-box; min-width: 44px; overflow: hidden; outline: none;
+      white-space: pre-wrap; cursor: text; line-height: 1.2;
+    }
+    .insert-editor:empty::before { content: attr(data-placeholder); color: #9aa0aa; }
+    .insert-editor span { line-height: 1.2; }
+
     /* Draggable / resizable added text & signatures */
     .insert-overlay {
       position: absolute; color: #000; white-space: pre; cursor: move;
@@ -316,6 +332,8 @@
       z-index: 250; user-select: none;
     }
     .insert-overlay:hover { border-color: #6d5efc; background: rgba(109, 94, 252, .06); }
+    /* The selected added-text box (toolbar Size resizes it) */
+    .insert-overlay.selected { border-color: var(--brand); box-shadow: 0 0 0 2px rgba(109, 94, 252, .25); }
     .insert-handle {
       position: absolute; right: -7px; bottom: -7px; width: 13px; height: 13px;
       background: #6d5efc; border: 2px solid #fff; border-radius: 50%;
@@ -567,16 +585,15 @@
         </div>
         <div class="ctx ctx-text">
           <span class="ab-label">Add text</span>
-          <input type="text" id="textInput" class="field" placeholder="Type your text here…" disabled />
           <select id="addFont" class="field" title="Font">
             <option value="sans">Sans</option>
             <option value="serif">Serif</option>
             <option value="mono">Mono</option>
           </select>
-          <input type="number" id="fontSize" class="field" value="14" min="6" max="96" title="Font size" />
-          <button class="ab-toggle" id="addBold" type="button" title="Bold"><b>B</b></button>
-          <button class="ab-toggle" id="addItalic" type="button" title="Italic"><i>I</i></button>
-          <span class="ab-hint">→ then click on the page to place it</span>
+          <input type="number" id="addSize" class="field" min="4" max="200" step="1" value="14" title="Font size (applies to the selected text)" />
+          <button class="ab-toggle" id="addBold" type="button" title="Bold (applies to the selected text)"><b>B</b></button>
+          <button class="ab-toggle" id="addItalic" type="button" title="Italic (applies to the selected text)"><i>I</i></button>
+          <span class="ab-hint">→ click the page &amp; type · Enter = new line · select text, then set size / B / I here</span>
         </div>
         <div class="ctx ctx-erase">
           <span class="ab-label">Erase</span>

@@ -219,6 +219,193 @@ class SyntheticTests(unittest.TestCase):
         self.assertFalse(any(0x25A0 <= ord(c) <= 0x25FF or ord(c) == 0xFFFD for c in txt),
                          f"a missing-glyph box rendered: {txt!r}")
 
+    def test_added_text_is_multiline(self):
+        # "Add text" with line breaks must render as multiple lines (Enter -> new line).
+        doc = fitz.open()
+        doc.new_page(width=400, height=220)
+        edit = {"pageIndex": 0, "redact": False, "style": "text",
+                "x": 40, "baseline": 60, "fontSize": 14,
+                "fontFamily": "sans", "bold": False, "italic": False,
+                "newText": "Line one\nLine two\nLine three"}
+        res = fitz.open(stream=post_edit(doc.tobytes(), [edit]), filetype="pdf")
+        txt = page_text(res)
+        for line in ("Line one", "Line two", "Line three"):
+            self.assertIn(line, txt, f"missing inserted line: {line!r}")
+        rows = set()
+        for block in res[0].get_text("dict").get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    if "Line" in span.get("text", ""):
+                        rows.add(round(span["origin"][1], 1))
+        self.assertGreaterEqual(len(rows), 3,
+                                f"expected 3 separate line rows, got {sorted(rows)}")
+
+    def test_added_text_rotation(self):
+        # Rotated "Add text" (90° clockwise) must render rotated about its origin: a horizontal
+        # word becomes taller than wide and extends downward from the (x, baseline) point.
+        doc = fitz.open()
+        doc.new_page(width=300, height=300)
+        edit = {"pageIndex": 0, "redact": False, "style": "text",
+                "x": 100, "baseline": 100, "fontSize": 20, "fontFamily": "sans",
+                "newText": "Hello", "rotation": 90}
+        res = fitz.open(stream=post_edit(doc.tobytes(), [edit]), filetype="pdf")
+        bb = None
+        for block in res[0].get_text("dict").get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    if "Hello" in span.get("text", ""):
+                        bb = span["bbox"]
+        self.assertIsNotNone(bb, "rotated text not found")
+        self.assertGreater(bb[3] - bb[1], bb[2] - bb[0], "rotated text should be taller than wide")
+        self.assertGreater(bb[3], 110, "90° clockwise text should extend downward from the origin")
+
+    def test_added_text_mixed_run_sizes(self):
+        # A single "Add text" box can hold runs of different font sizes (edit['runs']): each run
+        # must save at its own size, not collapse to one size for the whole box.
+        doc = fitz.open()
+        doc.new_page(width=400, height=200)
+        edit = {"pageIndex": 0, "redact": False, "style": "text",
+                "x": 40, "baseline": 80, "fontSize": 28, "fontFamily": "sans",
+                "bold": False, "italic": False,
+                "newText": "Bigsmall",
+                "runs": [[{"text": "Big", "size": 28}, {"text": "small", "size": 10}]]}
+        res = fitz.open(stream=post_edit(doc.tobytes(), [edit]), filetype="pdf")
+        big = spans_with(res, "Big")
+        small = spans_with(res, "small")
+        self.assertTrue(big, "large run 'Big' not found in output")
+        self.assertTrue(small, "small run 'small' not found in output")
+        self.assertAlmostEqual(big[0]["size"], 28, delta=1.5,
+                               msg=f"large run saved at {big[0]['size']}, expected ~28")
+        self.assertAlmostEqual(small[0]["size"], 10, delta=1.5,
+                               msg=f"small run saved at {small[0]['size']}, expected ~10")
+        self.assertGreater(big[0]["size"], small[0]["size"] + 5,
+                           "the two runs should keep clearly different sizes")
+        # The smaller run starts to the right of the larger one (runs chain left-to-right).
+        self.assertGreater(small[0]["origin"][0], big[0]["origin"][0],
+                           "small run should follow the big run on the same line")
+
+    def test_added_text_mixed_bold_italic(self):
+        # One "Add text" box can mix regular / bold / italic runs (like size). Each run must save
+        # in the matching font variant, not collapse to one style.
+        doc = fitz.open()
+        doc.new_page(width=480, height=200)
+        edit = {"pageIndex": 0, "redact": False, "style": "text",
+                "x": 40, "baseline": 80, "fontSize": 18, "fontFamily": "sans",
+                "bold": False, "italic": False,
+                "newText": "NormBoldItal",
+                "runs": [[{"text": "Norm", "size": 18, "bold": False, "italic": False},
+                          {"text": "Bold", "size": 18, "bold": True, "italic": False},
+                          {"text": "Ital", "size": 18, "bold": False, "italic": True}]]}
+        res = fitz.open(stream=post_edit(doc.tobytes(), [edit]), filetype="pdf")
+        norm = spans_with(res, "Norm")
+        bold = spans_with(res, "Bold")
+        ital = spans_with(res, "Ital")
+        self.assertTrue(norm and bold and ital, "expected separate Norm / Bold / Ital runs")
+        # Bold and italic runs use a different font variant than the regular run.
+        self.assertNotEqual(bold[0]["font"], norm[0]["font"],
+                            f"bold run reused the regular font {norm[0]['font']!r}")
+        self.assertNotEqual(ital[0]["font"], norm[0]["font"],
+                            f"italic run reused the regular font {norm[0]['font']!r}")
+        # PyMuPDF span flags: bit 2**1 = italic, bit 2**4 = bold (when the font advertises it).
+        self.assertTrue(ital[0]["flags"] & 2, "italic run should carry the italic flag")
+
+
+# --------------------------------------------------------------------------- #
+# Mixed font sizes in an "Add text" box — the save pipeline must honour each
+# run's own size (regression guard: a stale/old backend used the box's largest
+# size for the whole box, so a small run came out inflated).
+# --------------------------------------------------------------------------- #
+def add_text_edit(runs, **overrides):
+    """Build an inserted "Add text" edit from runs = [[{text,size[,bold,italic]}], ...]."""
+    text = "\n".join("".join(r["text"] for r in line) for line in runs)
+    sizes = [r["size"] for line in runs for r in line] or [14]
+    edit = {"pageIndex": 0, "redact": False, "style": "text",
+            "x": 40, "baseline": 90, "fontSize": max(sizes), "fontFamily": "sans",
+            "bold": False, "italic": False, "newText": text, "runs": runs}
+    edit.update(overrides)
+    return edit
+
+
+def saved_spans(runs, width=460, height=260, **overrides):
+    """Save a one-box mixed-style edit and return all drawn spans on page 0."""
+    doc = fitz.open(); doc.new_page(width=width, height=height)
+    edit = add_text_edit(runs, **overrides)
+    res = fitz.open(stream=post_edit(doc.tobytes(), [edit]), filetype="pdf")
+    out = []
+    for b in res[0].get_text("dict").get("blocks", []):
+        for l in b.get("lines", []):
+            out.extend(l.get("spans", []))
+    return out
+
+
+class MixedSizeSaveTests(unittest.TestCase):
+
+    def test_small_then_large_run_keep_their_sizes(self):
+        # The exact reported case: a small run followed by a large run. The small one must NOT be
+        # inflated to the box's largest size.
+        spans = saved_spans([[{"text": "small ", "size": 12}, {"text": "BIG", "size": 28}]])
+        small = next(s for s in spans if "small" in s["text"])
+        big = next(s for s in spans if "BIG" in s["text"])
+        self.assertAlmostEqual(small["size"], 12, delta=1.0, msg=f"small run = {small['size']}")
+        self.assertAlmostEqual(big["size"], 28, delta=1.0, msg=f"big run = {big['size']}")
+        self.assertLess(small["size"] + 8, big["size"], "runs collapsed to one size")
+
+    def test_run_sizes_ignore_box_fontSize(self):
+        # Even if the box's representative fontSize is bogus/large, each run saves at its OWN size.
+        # This directly guards the regression where the whole box used edit.fontSize.
+        spans = saved_spans([[{"text": "aa", "size": 12}, {"text": "bb", "size": 18}]], fontSize=99)
+        sizes = sorted(round(s["size"]) for s in spans)
+        self.assertIn(12, sizes, f"12 missing: {sizes}")
+        self.assertIn(18, sizes, f"18 missing: {sizes}")
+        self.assertFalse(any(abs(s - 99) < 3 for s in sizes), f"box fontSize leaked into a run: {sizes}")
+
+    def test_three_ascending_runs(self):
+        spans = saved_spans([[{"text": "aa", "size": 10},
+                              {"text": "bb", "size": 16},
+                              {"text": "cc", "size": 24}]])
+        by = {t: next(s["size"] for s in spans if t in s["text"]) for t in ("aa", "bb", "cc")}
+        self.assertAlmostEqual(by["aa"], 10, delta=1.0)
+        self.assertAlmostEqual(by["bb"], 16, delta=1.0)
+        self.assertAlmostEqual(by["cc"], 24, delta=1.0)
+        self.assertLess(by["aa"], by["bb"])
+        self.assertLess(by["bb"], by["cc"])
+
+    def test_mixed_size_multiline_no_overlap(self):
+        # A small line followed by a big line: both sizes preserved AND the big line sits fully
+        # below the small one (line spacing uses the larger of adjacent lines).
+        spans = saved_spans([[{"text": "small", "size": 10}],
+                             [{"text": "BIG", "size": 30}]], height=320)
+        small = next(s for s in spans if "small" in s["text"])
+        big = next(s for s in spans if "BIG" in s["text"])
+        self.assertAlmostEqual(small["size"], 10, delta=1.0)
+        self.assertAlmostEqual(big["size"], 30, delta=1.0)
+        # bbox = (x0, y0_top, x1, y1_bottom); y grows downward.
+        self.assertGreaterEqual(big["bbox"][1], small["bbox"][3] - 2,
+                                "big line overlaps the small line above it")
+
+    def test_mixed_size_with_bold_and_italic_runs(self):
+        # Size and weight/slant vary together across runs in one box.
+        spans = saved_spans([[{"text": "Reg", "size": 14, "bold": False, "italic": False},
+                              {"text": "Bld", "size": 26, "bold": True, "italic": False},
+                              {"text": "Itl", "size": 20, "bold": False, "italic": True}]])
+        reg = next(s for s in spans if "Reg" in s["text"])
+        bld = next(s for s in spans if "Bld" in s["text"])
+        itl = next(s for s in spans if "Itl" in s["text"])
+        self.assertAlmostEqual(reg["size"], 14, delta=1.0)
+        self.assertAlmostEqual(bld["size"], 26, delta=1.0)
+        self.assertAlmostEqual(itl["size"], 20, delta=1.0)
+        self.assertNotEqual(bld["font"], reg["font"], "bold run reused the regular font")
+        self.assertTrue(itl["flags"] & 2, "italic run should carry the italic flag")
+
+    def test_mixed_sizes_round_trip_text_selectable(self):
+        # After saving, every run's text is still real, selectable text (not an image).
+        runs = [[{"text": "Hello ", "size": 12}, {"text": "World", "size": 24}]]
+        doc = fitz.open(); doc.new_page(width=460, height=200)
+        res = fitz.open(stream=post_edit(doc.tobytes(), [add_text_edit(runs)]), filetype="pdf")
+        txt = page_text(res)
+        self.assertIn("Hello", txt)
+        self.assertIn("World", txt)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

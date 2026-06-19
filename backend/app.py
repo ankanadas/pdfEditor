@@ -198,7 +198,7 @@ def _install_embedded_font(doc, page, xref, cache):
     return cache[xref]
 
 
-def _resolve_fonts(doc, page, edit, text, cache, charset_cache):
+def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=None):
     """Build the list of font options to draw `text` with, plus the size. Each option is
     (insert_kwargs, fitz.Font, charset, style_ok): the document's OWN embedded fonts (matched span's
     font first, then the page's other embedded fonts) each with the set of characters it actually
@@ -214,8 +214,10 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache):
     if span and span.get('size'):
         size = float(span['size'])               # exact original size (fixes "too big")
     want_serif = bool(edit.get('serif')) or edit.get('fontFamily') == 'serif'
-    want_bold = bool(edit.get('bold'))
-    want_italic = bool(edit.get('italic'))
+    # style_override lets a per-run segment request its own weight/slant (mixed bold/italic in
+    # one "Add text" box); otherwise the box-level flags apply.
+    want_bold = bool(style_override[0]) if style_override else bool(edit.get('bold'))
+    want_italic = bool(style_override[1]) if style_override else bool(edit.get('italic'))
     options = []
     if span:
         xref_base = {f[0]: (f[3] or '') for f in page.get_fonts(full=True)}   # xref -> basefont
@@ -253,10 +255,45 @@ def _pick_font(ch, options):
     return options[-1][0], options[-1][1]
 
 
-def _insert_text_runs(page, x, baseline, text, size, options, avail):
+def _clean_text(s):
+    """Drop stray characters a browser's editable box introduces (nbsp, zero-width, soft hyphen,
+    control chars) so they don't save as a missing-glyph box. Keeps tabs; spaces are preserved."""
+    s = s or ''
+    s = re.sub(r'[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]', ' ', s)
+    s = re.sub(r'[\u200b\u200c\u200d\u2060\ufeff\u00ad]', '', s)
+    s = re.sub(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]', '', s)  # keeps \t
+    return s
+
+
+def _runs_to_segments(runs, base_size, base_bold, base_italic):
+    """Turn the frontend per-run style model (lines -> [{text, size, bold, italic}]) into cleaned
+    [[(text, size, bold, italic), ...], ...]. Returns None when there are no runs, so the caller
+    uses the plain single-style path."""
+    if not runs:
+        return None
+    out = []
+    for line in runs:
+        parts = []
+        for r in (line or []):
+            t = _clean_text(r.get('text', '')) if isinstance(r, dict) else ''
+            if not t:
+                continue
+            try:
+                sz = float(r.get('size') or base_size)
+            except (TypeError, ValueError):
+                sz = base_size
+            b = bool(r.get('bold')) if 'bold' in r else base_bold
+            it = bool(r.get('italic')) if 'italic' in r else base_italic
+            parts.append((t, max(4.0, min(400.0, sz)), b, it))
+        out.append(parts)
+    return out if any(parts for parts in out) else None
+
+
+def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None):
     """Draw `text` at (x, baseline), switching font per run so every character uses a font that
     contains it. Groups consecutive same-font characters, shrinks to fit `avail` width, then
-    inserts each run, advancing x by its measured width."""
+    inserts each run, advancing x by its measured width. `morph` (a (fixpoint, Matrix) pair)
+    rotates the drawn text about a pivot — used for rotated "Add text" boxes."""
     runs, cur, cur_opt = [], [], None
     for ch in text:
         if ch == ' ' and cur_opt is not None:
@@ -276,10 +313,12 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail):
         size = max(4.0, size * avail / total)
 
     cx = x
+    extra = {'morph': morph} if morph else {}
     for opt, s in runs:
         kwargs, font = opt
-        page.insert_text(fitz.Point(cx, baseline), s, fontsize=size, color=(0, 0, 0), **kwargs)
+        page.insert_text(fitz.Point(cx, baseline), s, fontsize=size, color=(0, 0, 0), **kwargs, **extra)
         cx += font.text_length(s, fontsize=size)
+    return cx - x          # total advance width (lets a caller chain segments on one line)
 
 
 @app.route('/health', methods=['GET'])
@@ -423,26 +462,70 @@ def edit_pdf():
                 x = float(edit.get('x', 0))
                 baseline = float(edit.get('baseline', 0))
                 style = edit.get('style', 'text')
-                new_text = (edit.get('newText', '') or '').replace('\r', '').replace('\n', ' ')
-                # Normalise characters a browser's editable box can introduce (non-breaking
-                # spaces, zero-width chars, soft hyphens) so they don't render as a missing-
-                # glyph box (□) in the PDF's subset font.
-                new_text = re.sub(r'[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]', ' ', new_text)
-                new_text = re.sub(r'[\u200b\u200c\u200d\u2060\ufeff\u00ad]', '', new_text)
-                new_text = re.sub(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]', '', new_text)
-                if not new_text:
+                # Normalise stray characters a browser's editable box can introduce (nbsp,
+                # zero-width, soft hyphen) so they don't render as a missing-glyph box. Keep
+                # line breaks for ADDED text (it can be multi-line); replace edits are one line.
+                raw = (edit.get('newText', '') or '').replace('\r\n', '\n').replace('\r', '\n')
+                raw = re.sub(r'[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]', ' ', raw)
+                raw = re.sub(r'[\u200b\u200c\u200d\u2060\ufeff\u00ad]', '', raw)
+                raw = re.sub(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]', '', raw)  # keeps \t and \n
+                is_insert = not edit.get('redact', True)
+                text_lines = raw.split('\n') if is_insert else [raw.replace('\n', ' ')]
+                if not any(ln.strip() for ln in text_lines):
                     continue
 
                 if style == 'signature' and SIGN_FONT_FILE:
                     size = float(edit.get('fontSize', 12))
-                    page.insert_text(fitz.Point(x, baseline), new_text, fontsize=size, color=(0, 0, 0),
-                                     fontname=SIGN_FONT_NAME, fontfile=SIGN_FONT_FILE)
+                    page.insert_text(fitz.Point(x, baseline), ' '.join(text_lines), fontsize=size,
+                                     color=(0, 0, 0), fontname=SIGN_FONT_NAME, fontfile=SIGN_FONT_FILE)
                 else:
                     # Draw per-character with the document's own fonts (matched span first, then
                     # the page's other embedded fonts, then a full fallback), so a line keeps its
-                    # look even when it mixes fonts — and shrink to fit the right margin.
-                    options, size = _resolve_fonts(doc, page, edit, new_text, font_cache, charset_cache)
-                    _insert_text_runs(page, x, baseline, new_text, size, options, pw - x - 4)
+                    # look even when it mixes fonts. Added text may be multiple lines: draw each
+                    # at baseline + i*lineHeight.
+                    options, size = _resolve_fonts(doc, page, edit, '\n'.join(text_lines), font_cache, charset_cache)
+                    # Rotated "Add text": rotate the whole block about its origin (x, baseline).
+                    # CSS rotates clockwise; fitz.Matrix(-deg) matches that in the page's y-down space.
+                    rotation = float(edit.get('rotation', 0) or 0)
+                    morph = (fitz.Point(x, baseline), fitz.Matrix(-rotation)) if rotation else None
+                    # Added text may carry per-run style (edit['runs'] = lines -> [{text,size,bold,
+                    # italic}]). Insert each segment at its own size + weight/slant, chaining x by the
+                    # drawn width; line height follows that line's largest run. Font options are
+                    # resolved per distinct (bold, italic) so each segment gets the right variant.
+                    seg_lines = _runs_to_segments(
+                        edit.get('runs'), size, bool(edit.get('bold')), bool(edit.get('italic'))
+                    ) if is_insert else None
+                    if seg_lines is not None:
+                        style_opts = {}
+
+                        def opts_for(b, it):
+                            key = (b, it)
+                            if key not in style_opts:
+                                style_opts[key], _ = _resolve_fonts(
+                                    doc, page, edit, '\n'.join(text_lines),
+                                    font_cache, charset_cache, style_override=(b, it))
+                            return style_opts[key]
+
+                        y = baseline
+                        prev_max = None
+                        for parts in seg_lines:
+                            this_max = max([sz for _, sz, _, _ in parts], default=size)
+                            # Advance to this line using the LARGER of the two adjacent lines, so a
+                            # big line after a small one (or vice-versa) never overlaps.
+                            if prev_max is not None:
+                                y += max(prev_max, this_max) * 1.2
+                            cx = x
+                            for seg_text, seg_size, seg_bold, seg_italic in parts:
+                                if seg_text:
+                                    cx += _insert_text_runs(page, cx, y, seg_text, seg_size,
+                                                            opts_for(seg_bold, seg_italic),
+                                                            pw - cx - 4, morph)
+                            prev_max = this_max
+                    else:
+                        line_h = size * 1.2
+                        for i, ln in enumerate(text_lines):
+                            if ln.strip():
+                                _insert_text_runs(page, x, baseline + i * line_h, ln, size, options, pw - x - 4, morph)
                 # Note: never log the document's text content (keeps the app traceless).
                 print(f"  page {page_num}: [{style}] text written at ({x:.1f}, {baseline:.1f})")
 

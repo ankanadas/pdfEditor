@@ -40,6 +40,8 @@ class PDFEditorApp {
     this.eventListenersInitialized = false; // Prevent duplicate event listeners
     this.selectedThumb = null;  // Pages panel: currently selected thumbnail index (for "insert after")
     this._pageOpBusy = false;   // Guard so page reorder/delete/insert don't overlap
+    this.selectedInsert = null; // The added-text box currently selected
+    this._lastInsertSize = 14;  // Remembered font size for the next "Add text" box
     
     this.initializeEventListeners();
     this.setupControllerEvents();
@@ -133,9 +135,29 @@ class PDFEditorApp {
     // Track which page is in view (for the page indicator) as the stage scrolls.
     document.getElementById('stage')?.addEventListener('scroll', () => this.updateCurrentPageFromScroll());
 
-    // Add-text bold/italic toggles
-    document.getElementById('addBold')?.addEventListener('click', (e) => e.currentTarget.classList.toggle('on'));
-    document.getElementById('addItalic')?.addEventListener('click', (e) => e.currentTarget.classList.toggle('on'));
+    // Add-text size / bold / italic. When an editor box is open these restyle its current
+    // selection (or the next typed text); otherwise they set the defaults for the next box.
+    const addBold = document.getElementById('addBold');
+    const addItalic = document.getElementById('addItalic');
+    const addSize = document.getElementById('addSize');
+    // Keep the editor focused (and its selection live) when clicking B / I.
+    [addBold, addItalic].forEach(btn => btn?.addEventListener('mousedown', (e) => {
+      if (this._activeInsertEditor) e.preventDefault();
+    }));
+    addBold?.addEventListener('click', () => {
+      if (this._activeInsertEditor) this._activeInsertEditor.applyStyle('bold', !this._activeInsertEditor.style().bold);
+      else addBold.classList.toggle('on');
+    });
+    addItalic?.addEventListener('click', () => {
+      if (this._activeInsertEditor) this._activeInsertEditor.applyStyle('italic', !this._activeInsertEditor.style().italic);
+      else addItalic.classList.toggle('on');
+    });
+    addSize?.addEventListener('input', () => {
+      const v = parseInt(addSize.value, 10);
+      if (!v) return;
+      if (this._activeInsertEditor) this._activeInsertEditor.applyStyle('size', v);
+      else this._lastInsertSize = Math.max(4, Math.min(200, v));
+    });
 
     // Signature dialog (Draw / Type / Image)
     document.getElementById('signPadClear')?.addEventListener('click', () => this.signPadClear());
@@ -761,7 +783,7 @@ class PDFEditorApp {
 
     if (mode === 'text') {
       textBtn.classList.add('active');
-      document.getElementById('textInput').focus();
+      this.showStatus('Click anywhere on the page, then type. Press Enter for a new line.', 'info');
     } else if (mode === 'edit') {
       editBtn.classList.add('active');
     } else if (mode === 'erase') {
@@ -817,22 +839,364 @@ class PDFEditorApp {
     const clickYPt = ((event.clientY - rect.top) * toIntrinsic) / this.scale;
 
     if (this.mode === 'text') {
-      const text = document.getElementById('textInput').value.trim();
-      if (!text) { this.showStatus('Type the text to add first', 'error'); return; }
-      const fontSize = parseInt(document.getElementById('fontSize').value, 10) || 14;
-      const opts = {
+      // Seed the new box from the toolbar's size / B / I (its current "defaults").
+      const fontSize = parseInt(document.getElementById('addSize')?.value, 10) || this._lastInsertSize || 14;
+      // Drop an empty, editable text box where the user clicked and let them type in place.
+      // Enter makes a new line; clicking away (or Esc) finishes it.
+      const edit = {
+        pageIndex: pv.pageNum, redact: false, style: 'text',
+        x: xPt, baseline: clickYPt + fontSize * 0.8, fontSize, newText: '',
         fontFamily: document.getElementById('addFont')?.value || 'sans',
         bold: document.getElementById('addBold')?.classList.contains('on'),
         italic: document.getElementById('addItalic')?.classList.contains('on'),
       };
-      this.placeInsert(xPt, clickYPt, text, fontSize, 'text', opts, pv.pageNum);
-      this.showStatus(`Added "${text}" — click Save PDF to keep it`, 'success');
-      document.getElementById('textInput').value = '';
+      this.openInsertEditor(edit, pv, true);
     } else if (this.mode === 'stamp') {
       if (!this.activeStamp) { this.showStatus('Pick a stamp (Approved, Reject, …) first', 'error'); return; }
       this.placeStamp(xPt, clickYPt, pv);
     }
     // Signatures are added via the Sign dialog (drawn/typed/image), not by clicking.
+  }
+
+  /**
+   * Open an in-place multi-line text editor (a positioned contentEditable div) for an "Add text"
+   * box. `isNew` = a fresh box from clicking the page (committed only if non-empty); otherwise it
+   * re-edits an existing overlay (double-click). Enter inserts a new line; Esc cancels; clicking
+   * away commits. A single box can mix font size, bold and italic per run: the top toolbar's size
+   * box / B / I restyle the current selection, or — with a collapsed caret — set the style for text
+   * typed next. Existing text is never changed. Runs are stored on edit.runs (lines ->
+   * [{text,size,bold,italic}]); edit.newText/fontSize are kept in sync.
+   */
+  openInsertEditor(edit, pv, isNew) {
+    const ds = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
+    const unit = this.scale * ds;
+    const baseFontPx = edit.fontSize * unit;
+    const escapeHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const spanHTML = (t, st) =>
+      `<span data-sz="${st.size}" data-bold="${st.bold ? 1 : 0}" data-italic="${st.italic ? 1 : 0}"` +
+      ` style="font-size:${st.size * unit}px;font-weight:${st.bold ? 'bold' : 'normal'};` +
+      `font-style:${st.italic ? 'italic' : 'normal'}">${escapeHtml(t)}</span>`;
+    const styledSpan = (st) => {
+      const span = document.createElement('span');
+      span.setAttribute('data-sz', st.size);
+      span.setAttribute('data-bold', st.bold ? '1' : '0');
+      span.setAttribute('data-italic', st.italic ? '1' : '0');
+      span.style.fontSize = (st.size * unit) + 'px';
+      span.style.fontWeight = st.bold ? 'bold' : 'normal';
+      span.style.fontStyle = st.italic ? 'italic' : 'normal';
+      return span;
+    };
+
+    // This box is now the active one.
+    this.selectedInsert = edit;
+    this._insertSavedRange = null;
+
+    // Hide the existing static overlay (if any) while its editor is open.
+    const overlay = isNew ? null : this.insertOverlays.find(o => o.__edit === edit);
+    if (overlay) overlay.style.display = 'none';
+
+    const div = document.createElement('div');
+    div.className = 'insert-editor';
+    div.contentEditable = 'true';
+    div.spellcheck = false;
+    div.setAttribute('data-placeholder', 'Type here… (Enter for a new line)');
+    div.style.left = (edit.x * unit) + 'px';
+    div.style.top = (edit.baseline * unit - baseFontPx * 0.9) + 'px';
+    div.style.fontSize = baseFontPx + 'px';                 // base style for un-spanned (typed) text
+    div.style.fontWeight = edit.bold ? 'bold' : 'normal';
+    div.style.fontStyle = edit.italic ? 'italic' : 'normal';
+    div.style.fontFamily = edit.fontFamily === 'serif' ? '"Times New Roman",Times,serif'
+      : edit.fontFamily === 'mono' ? '"Courier New",Courier,monospace'
+      : 'Arial,Helvetica,sans-serif';
+    const boxDefaults = { size: Math.round(edit.fontSize) || 12, bold: !!edit.bold, italic: !!edit.italic };
+    // Seed content: from saved runs if present, else one span per line at the box defaults.
+    if (edit.runs && edit.runs.length) {
+      div.innerHTML = edit.runs
+        .map(line => line.map(r => spanHTML(r.text, { size: r.size, bold: !!r.bold, italic: !!r.italic })).join(''))
+        .join('<br>');
+    } else if (edit.newText) {
+      div.innerHTML = String(edit.newText).split('\n')
+        .map(line => spanHTML(line, boxDefaults)).join('<br>');
+    }
+
+    const maxW = pv.canvas.clientWidth - edit.x * unit - 4;
+    const grow = () => {
+      div.style.width = 'auto';
+      div.style.height = 'auto';
+      div.style.width = Math.min(div.scrollWidth + 6, Math.max(44, maxW)) + 'px';
+      div.style.height = (div.scrollHeight + 4) + 'px';
+    };
+
+    // The style {size,bold,italic} at a range/caret: nearest ancestor that sets each attribute,
+    // independently, falling back to the box defaults.
+    const caretStyle = (range) => {
+      let node = null, offset = 0;
+      if (range) { node = range.endContainer; offset = range.endOffset; }
+      else { const sel = window.getSelection(); if (sel && sel.rangeCount) { node = sel.focusNode; offset = sel.focusOffset; } }
+      // If the position is at an element boundary (e.g. a whole-content selection ends on the
+      // editor div), descend into the run just before the caret so we read its real style — not
+      // the box default. Skip <br>.
+      if (node && node.nodeType === Node.ELEMENT_NODE) {
+        let child = node.childNodes[Math.max(0, offset - 1)] || node.childNodes[offset];
+        while (child && child.nodeType === Node.ELEMENT_NODE && child.nodeName !== 'BR' && child.lastChild) {
+          child = child.lastChild;
+        }
+        if (child) node = child;
+      }
+      if (node && node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+      const st = { ...boxDefaults };
+      let fS = false, fB = false, fI = false;
+      while (node && node !== div && node.getAttribute) {
+        if (!fS && node.hasAttribute('data-sz')) { st.size = Math.round(parseFloat(node.getAttribute('data-sz'))); fS = true; }
+        if (!fB && node.hasAttribute('data-bold')) { st.bold = node.getAttribute('data-bold') === '1'; fB = true; }
+        if (!fI && node.hasAttribute('data-italic')) { st.italic = node.getAttribute('data-italic') === '1'; fI = true; }
+        node = node.parentNode;
+      }
+      return st;
+    };
+
+    // The range to act on: the live selection if it's inside this editor, else the last one we
+    // saved before focus moved to the toolbar (so the toolbar controls still target the text).
+    const workingRange = () => {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount) {
+        const r = sel.getRangeAt(0);
+        if (div.contains(r.commonAncestorContainer)) return r;
+      }
+      const sv = this._insertSavedRange;
+      return (sv && div.contains(sv.commonAncestorContainer)) ? sv : null;
+    };
+    const saveRange = () => {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount) {
+        const r = sel.getRangeAt(0);
+        if (div.contains(r.commonAncestorContainer)) this._insertSavedRange = r.cloneRange();
+      }
+    };
+    // Reflect bold/italic at the caret in the toolbar. The SIZE box is intentionally NOT synced
+    // from the caret — it's a "pen size" that stays where the user set it (so it doesn't jump back
+    // to a run's size when you click into the text). It's seeded once when the editor opens.
+    const syncToolbar = () => {
+      const st = caretStyle(workingRange());
+      document.getElementById('addBold')?.classList.toggle('on', st.bold);
+      document.getElementById('addItalic')?.classList.toggle('on', st.italic);
+    };
+
+    // A pending "pen" style: when size/B/I is changed with nothing selected, we don't touch any
+    // existing text — instead the next characters typed get this style (see the beforeinput
+    // handler). It survives the toolbar's number input stealing focus, which a caret-holder span
+    // could not. Stays set until the user restyles a selection or the box is committed.
+    let pendingStyle = null;
+
+    // Apply one style property to the selection (restyle just that text, keeping the other two
+    // properties), or — with a collapsed caret — arm it as the pen for text typed next. `kind` is
+    // 'size' | 'bold' | 'italic'.
+    const applyStyle = (kind, value) => {
+      if (kind === 'size') { value = Math.max(4, Math.min(200, Math.round(value))); this._lastInsertSize = value; }
+      const range = workingRange();
+      const sel = window.getSelection();
+      const liveInEditor = sel && sel.rangeCount && div.contains(sel.getRangeAt(0).commonAncestorContainer);
+      if (!range || range.collapsed) {
+        // No selection: arm the pen for the next typed characters (existing text is untouched).
+        const base = pendingStyle || (range ? caretStyle(range) : { ...boxDefaults });
+        pendingStyle = { ...base }; pendingStyle[kind] = value;
+        if (!range) {                  // truly empty box: also make it the box default
+          edit.fontSize = pendingStyle.size; edit.bold = pendingStyle.bold; edit.italic = pendingStyle.italic;
+          div.style.fontSize = (pendingStyle.size * unit) + 'px';
+          div.style.fontWeight = pendingStyle.bold ? 'bold' : 'normal';
+          div.style.fontStyle = pendingStyle.italic ? 'italic' : 'normal';
+          boxDefaults.size = pendingStyle.size; boxDefaults.bold = pendingStyle.bold; boxDefaults.italic = pendingStyle.italic;
+        }
+        syncToolbar(); return;
+      }
+      // A real selection: restyle just that text and drop the pen.
+      pendingStyle = null;
+      const attr = kind === 'size' ? 'data-sz' : kind === 'bold' ? 'data-bold' : 'data-italic';
+      const prop = kind === 'size' ? 'fontSize' : kind === 'bold' ? 'fontWeight' : 'fontStyle';
+      const cssVal = kind === 'size' ? (value * unit) + 'px'
+        : kind === 'bold' ? (value ? 'bold' : 'normal') : (value ? 'italic' : 'normal');
+      const attrVal = kind === 'size' ? String(value) : (value ? '1' : '0');
+      const frag = range.extractContents();
+      const span = document.createElement('span');
+      span.setAttribute(attr, attrVal);
+      span.style[prop] = cssVal;
+      span.appendChild(frag);
+      span.querySelectorAll('[' + attr + ']').forEach(sp => { sp.setAttribute(attr, attrVal); sp.style[prop] = cssVal; });
+      range.insertNode(span);
+      const r2 = document.createRange();
+      r2.selectNodeContents(span);
+      if (liveInEditor) { sel.removeAllRanges(); sel.addRange(r2); }
+      this._insertSavedRange = r2.cloneRange();
+      grow(); syncToolbar();
+    };
+
+    // Enter -> a <br> (keeps the model to text nodes + spans + <br>, so serialization is simple).
+    // At the end of content we also drop a style-preserving caret holder so the new line continues
+    // at the current style and is focusable.
+    const insertLineBreak = () => {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      if (!div.contains(range.commonAncestorContainer)) return;
+      const st = pendingStyle ? { ...pendingStyle } : caretStyle(range);
+      range.deleteContents();
+      const br = document.createElement('br');
+      range.insertNode(br);
+      range.setStartAfter(br); range.collapse(true);
+      if (!br.nextSibling) {
+        const span = styledSpan(st);
+        span.appendChild(document.createTextNode('\u200b'));
+        br.parentNode.appendChild(span);
+        range.setStart(span.firstChild, 1); range.collapse(true);
+      }
+      sel.removeAllRanges(); sel.addRange(range);
+    };
+
+    // Expose the editor to the top toolbar (size box / B / I act on it while it's open) and reveal
+    // the Add-text toolbar group regardless of the current tool.
+    this._activeInsertEditor = { applyStyle, style: () => caretStyle(workingRange()) };
+    document.body.classList.add('editing-insert');
+
+    pv.wrapper.appendChild(div);
+    grow();
+    div.focus();
+    if (!isNew) {
+      // Re-opening: drop the caret at the very end of the text (inside the last run) so appended
+      // text continues that run's style and the toolbar reflects it — not the box's largest size.
+      let last = div.lastChild;
+      while (last && last.nodeType !== Node.TEXT_NODE && last.lastChild) last = last.lastChild;
+      const r = document.createRange();
+      if (last && last.nodeType === Node.TEXT_NODE) r.setStart(last, last.nodeValue.length);
+      else { r.selectNodeContents(div); r.collapse(false); }
+      r.collapse(true);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    }
+    saveRange();
+    // Seed the (sticky) size box once: keep whatever size the user last set rather than reverting
+    // to this box's largest run.
+    const sizeEl0 = document.getElementById('addSize');
+    if (sizeEl0) sizeEl0.value = this._lastInsertSize || boxDefaults.size;
+    syncToolbar();
+
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('mousedown', onDocDown, true);
+      document.body.classList.remove('editing-insert');
+      this._activeInsertEditor = null;
+      this._insertSavedRange = null;
+      const result = commit ? this.serializeEditor(div, boxDefaults) : null;
+      div.remove();
+      let changed = false;
+      if (commit) {
+        if (result.text.trim()) {
+          edit.newText = result.text;
+          edit.runs = result.runs;
+          edit.fontSize = result.maxSize;          // representative size (geometry + default)
+          if (isNew) this.edits.push(edit);
+          changed = true;
+        } else if (!isNew) {
+          this.edits = this.edits.filter(x => x !== edit);   // emptied existing -> delete
+          this.selectedInsert = null;
+          changed = true;
+        } else {
+          this.selectedInsert = null;                        // isNew && empty -> discard
+        }
+      } else if (isNew) {
+        this.selectedInsert = null;                          // cancelled a brand-new box
+      }
+      if (changed) this.commitHistory();
+      this.renderCurrentPage();
+    };
+
+    // Commit when the user mouses down anywhere that isn't this editor or the Add-text toolbar
+    // (so adjusting size/B/I keeps the box open). Esc cancels.
+    const onDocDown = (e) => {
+      if (done || div.contains(e.target)) return;
+      if (e.target.closest && e.target.closest('.ctx-text')) return;
+      finish(true);
+    };
+    document.addEventListener('mousedown', onDocDown, true);
+
+    // When a pen style is armed (size/B/I set with no selection), insert typed characters in a
+    // span of that style so the new text — not the existing text — picks up the change. This is
+    // what makes "set size, then type" work even though the toolbar input stole focus.
+    div.addEventListener('beforeinput', (e) => {
+      if (!pendingStyle || e.inputType !== 'insertText' || e.data == null) return;
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const r = sel.getRangeAt(0);
+      if (!div.contains(r.commonAncestorContainer)) return;
+      e.preventDefault();
+      r.deleteContents();
+      const span = styledSpan(pendingStyle);
+      span.textContent = e.data;
+      r.insertNode(span);
+      const r2 = document.createRange();
+      r2.setStartAfter(span); r2.collapse(true);
+      sel.removeAllRanges(); sel.addRange(r2);
+      this._insertSavedRange = r2.cloneRange();
+      grow();
+    });
+    div.addEventListener('input', () => { saveRange(); grow(); });
+    div.addEventListener('keyup', () => { saveRange(); syncToolbar(); });
+    div.addEventListener('mouseup', () => { saveRange(); syncToolbar(); });
+    div.addEventListener('keydown', (e) => {
+      e.stopPropagation();                 // don't trigger global shortcuts (undo/redo) while typing
+      if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); insertLineBreak(); grow(); }
+    });
+  }
+
+  /**
+   * Read a contentEditable "Add text" editor back into a runs model. Walks text nodes, styling
+   * spans (data-sz / data-bold / data-italic, each inherited independently) and <br> line breaks,
+   * cleaning stray zero-width / control chars. `defaults` = {size,bold,italic} for un-styled text.
+   * Returns { runs: [[{text,size,bold,italic}], ...], text: "lines\njoined", maxSize }.
+   */
+  serializeEditor(root, defaults) {
+    const base = { size: Math.round(defaults.size) || 12, bold: !!defaults.bold, italic: !!defaults.italic };
+    const lines = [[]];
+    const pushText = (t, st) => {
+      if (!t) return;
+      const line = lines[lines.length - 1];
+      const last = line[line.length - 1];
+      if (last && last.size === st.size && last.bold === st.bold && last.italic === st.italic) last.text += t;
+      else line.push({ text: t, size: st.size, bold: st.bold, italic: st.italic });
+    };
+    const styleFrom = (child, inherited) => {
+      const st = { ...inherited };
+      if (child.getAttribute) {
+        const sz = child.getAttribute('data-sz'); if (sz) st.size = Math.round(parseFloat(sz));
+        const b = child.getAttribute('data-bold'); if (b !== null) st.bold = b === '1';
+        const i = child.getAttribute('data-italic'); if (i !== null) st.italic = i === '1';
+      }
+      return st;
+    };
+    const walk = (node, inherited) => {
+      node.childNodes.forEach((child) => {
+        if (child.nodeType === Node.TEXT_NODE) {
+          pushText(this.cleanEditableText(child.nodeValue), inherited);
+        } else if (child.nodeName === 'BR') {
+          lines.push([]);
+        } else {
+          const st = styleFrom(child, inherited);
+          // A block-level wrapper (browsers sometimes inject <div>/<p>) starts a new visual line.
+          const isBlock = child.nodeName === 'DIV' || child.nodeName === 'P';
+          if (isBlock && (lines.length > 1 || lines[lines.length - 1].length)) lines.push([]);
+          walk(child, st);
+        }
+      });
+    };
+    walk(root, base);
+    let runs = lines.map(line => line.filter(r => r.text.length));
+    while (runs.length && runs[0].length === 0) runs.shift();
+    while (runs.length && runs[runs.length - 1].length === 0) runs.pop();
+    const text = runs.map(line => line.map(r => r.text).join('')).join('\n');
+    let maxSize = base.size;
+    runs.forEach(line => line.forEach(r => { if (r.size > maxSize) maxSize = r.size; }));
+    return { runs, text, maxSize };
   }
 
   /** Mark a stamp chip (preset or custom) as the selected stamp. */
@@ -1367,21 +1731,44 @@ class PDFEditorApp {
 
       const div = document.createElement('div');
       div.className = 'insert-overlay';
-      div.textContent = edit.newText;
+      div.__edit = edit;                 // lets openInsertEditor find/hide this overlay on re-edit
+      if (edit === this.selectedInsert) div.classList.add('selected');
+      // Added text may carry per-run font size / bold / italic — render each run in its own span.
+      if (edit.style !== 'signature' && edit.runs && edit.runs.length) {
+        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        div.innerHTML = edit.runs.map(line =>
+          line.map(r => `<span style="font-size:${r.size * unit}px;font-weight:${r.bold ? 'bold' : 'normal'};` +
+            `font-style:${r.italic ? 'italic' : 'normal'}">${esc(r.text)}</span>`).join('')
+        ).join('<br>');
+      } else {
+        div.textContent = edit.newText;
+      }
       div.style.left = (edit.x * unit) + 'px';
-      div.style.top = (edit.baseline * unit - ascent) + 'px';
       div.style.fontSize = fontPx + 'px';
-      div.style.lineHeight = fontPx + 'px';
       if (edit.style === 'signature') {
+        div.style.top = (edit.baseline * unit - ascent) + 'px';
+        div.style.lineHeight = fontPx + 'px';
         div.style.fontStyle = 'italic';
         div.style.fontWeight = 'normal';
         div.style.fontFamily = '"Snell Roundhand","Apple Chancery","Brush Script MT",cursive';
       } else {
+        // Added text: render multi-line (line breaks preserved) and double-click to re-edit.
+        div.style.top = (edit.baseline * unit - fontPx * 0.9) + 'px';
+        // Unitless line-height lets each line follow its own tallest run (mixed sizes).
+        div.style.lineHeight = (edit.runs && edit.runs.length) ? '1.2' : (fontPx * 1.2) + 'px';
+        div.style.whiteSpace = 'pre-wrap';
         div.style.fontWeight = edit.bold ? 'bold' : 'normal';
         div.style.fontStyle = edit.italic ? 'italic' : 'normal';
         div.style.fontFamily = edit.fontFamily === 'serif' ? '"Times New Roman",Times,serif'
           : edit.fontFamily === 'mono' ? '"Courier New",Courier,monospace'
           : 'Arial,Helvetica,sans-serif';
+        div.title = 'Double-click to edit · drag to move · rotate with the top handle';
+        div.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); this.openInsertEditor(edit, pv, false); });
+        // Rotation pivots on the text origin (left edge at the baseline) so the saved PDF matches.
+        if (edit.rotation) {
+          div.style.transformOrigin = '0px ' + (fontPx * 0.9) + 'px';
+          div.style.transform = `rotate(${edit.rotation}deg)`;
+        }
       }
 
       const del = document.createElement('div');
@@ -1391,27 +1778,77 @@ class PDFEditorApp {
       handle.className = 'insert-handle';
       div.appendChild(del);
       div.appendChild(handle);
+      // Added text can be rotated to any angle (signatures use the image overlay's own handle).
+      let rotate = null;
+      if (edit.style !== 'signature') {
+        rotate = document.createElement('div');
+        rotate.className = 'insert-rotate';
+        rotate.title = 'Drag to rotate (hold Shift to snap to 15°)';
+        div.appendChild(rotate);
+      }
 
-      this.wireInsertOverlay(div, del, handle, edit, unit);
+      this.wireInsertOverlay(div, del, handle, rotate, edit, unit);
       wrap.appendChild(div);
       this.insertOverlays.push(div);
     });
   }
 
-  /** Attach move / resize / delete behaviour to one insert overlay. */
-  wireInsertOverlay(div, del, handle, edit, unit) {
+  /** Select an added-text box (shows the selected outline; double-click it to edit/resize). */
+  selectInsert(edit) {
+    this.selectedInsert = edit;
+    this.insertOverlays.forEach(o => o.classList.toggle('selected', !!edit && o.__edit === edit));
+  }
+
+  /** Attach move / resize / rotate / delete behaviour to one insert overlay. */
+  wireInsertOverlay(div, del, handle, rotate, edit, unit) {
     const commitFromDiv = () => {
       const fontPx = parseFloat(div.style.fontSize);
-      const ascent = fontPx * 0.8;
-      edit.fontSize = fontPx / unit;
+      const topOffset = edit.style === 'signature' ? fontPx * 0.8 : fontPx * 0.9;
+      // With mixed run sizes, the representative size is the largest run.
+      edit.fontSize = (edit.runs && edit.runs.length)
+        ? Math.max(...edit.runs.flat().map(r => r.size))
+        : fontPx / unit;
       edit.x = parseFloat(div.style.left) / unit;
-      edit.baseline = (parseFloat(div.style.top) + ascent) / unit;
+      edit.baseline = (parseFloat(div.style.top) + topOffset) / unit;
       this.commitHistory();
     };
 
+    // Rotate: drag the top handle around the text origin (left edge at the baseline). That pivot
+    // is fixed by the transform-origin, so it stays put under rotation. Shift snaps to 15°.
+    if (rotate) {
+      rotate.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const parent = div.parentElement;
+        if (!parent) return;        // overlay was just re-rendered (e.g. committing an open editor)
+        const wrapRect = parent.getBoundingClientRect();
+        const fontPx = parseFloat(div.style.fontSize);
+        const pivotX = wrapRect.left + parseFloat(div.style.left);
+        const pivotY = wrapRect.top + parseFloat(div.style.top) + fontPx * 0.9;
+        div.style.transformOrigin = '0px ' + (fontPx * 0.9) + 'px';
+        // Rotate by the change in pointer angle since grab (1:1 drag, no jump). The handle sits
+        // away from the origin pivot, so an absolute angle would start offset; a delta doesn't.
+        const startRot = edit.rotation || 0;
+        const startAngle = Math.atan2(e.clientY - pivotY, e.clientX - pivotX);
+        const move = (ev) => {
+          let deg = startRot + (Math.atan2(ev.clientY - pivotY, ev.clientX - pivotX) - startAngle) * 180 / Math.PI;
+          if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+          deg = Math.round(deg);
+          edit.rotation = deg;
+          div.style.transform = `rotate(${deg}deg)`;
+        };
+        const up = () => {
+          window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+          this.commitHistory();
+          this.showStatus(`Rotated to ${edit.rotation || 0}°`, 'success');
+        };
+        window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+      });
+    }
+
     // Move (drag the body)
     div.addEventListener('mousedown', (e) => {
-      if (e.target === del || e.target === handle) return;
+      if (e.target === del || e.target === handle || e.target === rotate) return;
+      if (edit.style !== 'signature') this.selectInsert(edit);   // clicking a text box selects it
       e.preventDefault(); e.stopPropagation();
       const sx = e.clientX, sy = e.clientY;
       const ox = parseFloat(div.style.left), oy = parseFloat(div.style.top);
@@ -1428,19 +1865,30 @@ class PDFEditorApp {
       window.addEventListener('mouseup', up);
     });
 
-    // Resize (drag the corner handle = change font size)
+    // Resize (drag the corner handle = scale the font size). For a mixed-size box every run
+    // scales by the same factor so their relative sizes are preserved.
     handle.addEventListener('mousedown', (e) => {
       e.preventDefault(); e.stopPropagation();
       const sy = e.clientY;
       const startFont = parseFloat(div.style.fontSize);
+      const hasRuns = !!(edit.runs && edit.runs.length);
+      const spans = hasRuns ? Array.from(div.querySelectorAll('span')) : [];
+      const spanStart = spans.map(s => parseFloat(s.style.fontSize) || startFont);
+      let factor = 1;
       const move = (ev) => {
         const f = Math.max(8, startFont + (ev.clientY - sy));
+        factor = f / startFont;
         div.style.fontSize = f + 'px';
-        div.style.lineHeight = f + 'px';
+        div.style.lineHeight = hasRuns ? '1.2' : f + 'px';
+        spans.forEach((s, i) => { s.style.fontSize = (spanStart[i] * factor) + 'px'; });
       };
       const up = () => {
         window.removeEventListener('mousemove', move);
         window.removeEventListener('mouseup', up);
+        if (hasRuns && factor !== 1) {
+          edit.runs = edit.runs.map(line =>
+            line.map(r => ({ text: r.text, size: Math.max(4, Math.round(r.size * factor)), bold: !!r.bold, italic: !!r.italic })));
+        }
         commitFromDiv();
       };
       window.addEventListener('mousemove', move);
@@ -2006,20 +2454,55 @@ class PDFEditorApp {
           cx.fillRect((e.x - 2) * S, (e.top - 1) * S,
             ((e.right - e.x) + 4) * S, ((e.bottom - e.top) + 2) * S);
         }
-        const text = (e.newText || '').replace(/[\r\n]+/g, ' ');
-        if (text) {
+        // Added text may carry per-run font sizes (e.runs) and explicit line breaks;
+        // replace edits are always a single line at one size.
+        const fhasRuns = e.redact === false && Array.isArray(e.runs) && e.runs.length;
+        const flines = (e.redact === false)
+          ? (e.newText || '').split(/\r\n?|\n/)
+          : [(e.newText || '').replace(/[\r\n]+/g, ' ')];
+        if (fhasRuns || flines.some(l => l)) {
           cx.fillStyle = '#000000';
           cx.textBaseline = 'alphabetic';
-          const fs = (e.fontSize || 12) * S;
           let fam;
           if (e.style === 'signature') fam = '"Snell Roundhand","Apple Chancery","Brush Script MT",cursive';
           else if (e.fontFamily === 'serif' || (e.fontFamily == null && e.serif)) fam = '"Times New Roman",Times,serif';
           else if (e.fontFamily === 'mono') fam = '"Courier New",Courier,monospace';
           else fam = 'Arial,Helvetica,sans-serif';
-          const weight = e.bold ? 'bold ' : '';
-          const slant = (e.italic || e.style === 'signature') ? 'italic ' : '';
-          cx.font = `${slant}${weight}${fs}px ${fam}`;
-          cx.fillText(text, e.x * S, e.baseline * S);
+          const baseSize = e.fontSize || 12;
+          // Line model: explicit runs when present, else one run per line at the base size.
+          const lineModel = fhasRuns ? e.runs : flines.map(l => [{ text: l, size: baseSize }]);
+          const rot = e.rotation || 0;
+          const drawLine = (parts, x0, y0) => {        // chain runs left-to-right at their own style
+            let cxpos = x0;
+            parts.forEach(r => {
+              if (!r.text) return;
+              const weight = (fhasRuns ? r.bold : e.bold) ? 'bold ' : '';
+              const slant = ((fhasRuns ? r.italic : e.italic) || e.style === 'signature') ? 'italic ' : '';
+              cx.font = `${slant}${weight}${(r.size || baseSize) * S}px ${fam}`;
+              cx.fillText(r.text, cxpos, y0);
+              cxpos += cx.measureText(r.text).width;
+            });
+          };
+          // Advance each line by the larger of the two adjacent lines (no overlap when sizes mix).
+          const lineMax = (parts) => Math.max(baseSize, ...parts.map(r => r.size || baseSize));
+          const advanceLines = (x0, y0) => {
+            let y = y0, prevMax = null;
+            lineModel.forEach((parts) => {
+              const thisMax = lineMax(parts);
+              if (prevMax !== null) y += Math.max(prevMax, thisMax) * 1.2 * S;
+              prevMax = thisMax;
+              drawLine(parts, x0, y);
+            });
+          };
+          if (rot) {
+            cx.save();
+            cx.translate(e.x * S, e.baseline * S);
+            cx.rotate(rot * Math.PI / 180);     // canvas y-down: +rad is clockwise (matches CSS)
+            advanceLines(0, 0);
+            cx.restore();
+          } else {
+            advanceLines(e.x * S, e.baseline * S);
+          }
         }
       }
 
@@ -2106,7 +2589,20 @@ class PDFEditorApp {
 
       let size = edit.fontSize || 12;
       const font = pickFont(edit);
-      const text = this.sanitizeForStandardFont((edit.newText || '').replace(/[\r\n]+/g, ' '));
+      const ehasRuns = edit.redact === false && Array.isArray(edit.runs) && edit.runs.length;
+      // The standard font variant for a run: its own bold/italic when runs are present, else the
+      // box-level `font`. Family (sans/serif/mono) is box-level.
+      const fontFor = (r) => ehasRuns
+        ? pickFont({ style: edit.style, fontFamily: edit.fontFamily, serif: edit.serif, bold: r.bold, italic: r.italic })
+        : font;
+      // Line model: [[{text,size,bold,italic}], ...]. Explicit runs carry per-run style; otherwise
+      // one run per line at `size`. Replace edits are always a single line. Text is sanitised for
+      // the standard font (pdf-lib can only encode WinAnsi).
+      const lineModel = ehasRuns
+        ? edit.runs.map(line => line.map(r => ({ text: this.sanitizeForStandardFont(r.text), size: r.size || size, bold: !!r.bold, italic: !!r.italic })))
+        : ((edit.redact === false)
+          ? (edit.newText || '').split(/\r\n?|\n/).map(l => [{ text: this.sanitizeForStandardFont(l), size }])
+          : [[{ text: this.sanitizeForStandardFont((edit.newText || '').replace(/[\r\n]+/g, ' ')), size }]]);
 
       // Replace: cover the original line first. pdf-lib can't delete the underlying glyphs,
       // so we paint over them — but with the line's OWN background colour (sampled from the
@@ -2125,23 +2621,47 @@ class PDFEditorApp {
         });
       }
 
-      if (!text) continue;
-      // The substituted standard font is often wider than the PDF's original font, which can
-      // push an edited line off the right edge. Shrink the size just enough to fit the space
-      // from the text's left edge to the page margin so edited lines never get cut off.
+      if (!lineModel.some(parts => parts.some(r => r.text))) continue;
+      const lineWidth = (parts) => parts.reduce((w, r) => {
+        try { return w + fontFor(r).widthOfTextAtSize(r.text, r.size); } catch (e) { return w; }
+      }, 0);
+      // The substituted standard font is often wider than the PDF's original, which can push an
+      // edited line off the right edge. If the widest line overflows the space to the right
+      // margin, scale every run down by the same factor (proportions kept, nothing cut off).
       const avail = page.getWidth() - edit.x - 4;
       if (avail > 8) {
         let w = 0;
-        try { w = font.widthOfTextAtSize(text, size); } catch (e) { /* unencodable: handled below */ }
-        if (w > avail) size = Math.max(4, size * (avail / w));
+        for (const parts of lineModel) w = Math.max(w, lineWidth(parts));
+        if (w > avail) {
+          const scale = Math.max(0.05, avail / w);
+          lineModel.forEach(parts => parts.forEach(r => { r.size = Math.max(4, r.size * scale); }));
+        }
       }
-      try {
-        page.drawText(text, { x: edit.x, y: ph - edit.baseline, size, font, color: black });
-      } catch (e) {
-        // Last-resort: strip anything the standard font still can't encode.
-        const safe = text.replace(/[^\x20-\x7E]/g, '?');
-        page.drawText(safe, { x: edit.x, y: ph - edit.baseline, size, font, color: black });
-      }
+      // Added text can be rotated to any angle about its origin (x, baseline). pdf-lib rotates
+      // glyphs counter-clockwise, so use -rotation to match the CSS (clockwise) preview: drop each
+      // line by its own height (rotated about the origin), then chain its runs along the baseline.
+      const rot = edit.rotation || 0;
+      const rad = rot * Math.PI / 180;
+      const baseX = edit.x, baseY = ph - edit.baseline;
+      let drop = 0, prevMax = null;
+      lineModel.forEach((parts) => {
+        const thisMax = Math.max(4, ...parts.map(r => r.size));
+        // Use the larger of adjacent lines so a big line after a small one doesn't overlap.
+        if (prevMax !== null) drop += Math.max(prevMax, thisMax) * 1.2;
+        prevMax = thisMax;
+        const lx = baseX - drop * Math.sin(rad);
+        const ly = baseY - drop * Math.cos(rad);
+        let adv = 0;
+        parts.forEach(r => {
+          if (!r.text) return;
+          const rf = fontFor(r);
+          const opts = { x: lx + adv * Math.cos(rad), y: ly - adv * Math.sin(rad), size: r.size, font: rf, color: black };
+          if (rot) opts.rotate = degrees(-rot);
+          try { page.drawText(r.text, opts); }
+          catch (e) { page.drawText(r.text.replace(/[^\x20-\x7E]/g, '?'), opts); }
+          try { adv += rf.widthOfTextAtSize(r.text, r.size); } catch (e) { adv += r.text.length * r.size * 0.5; }
+        });
+      });
     }
 
     return pdfDoc.save();
