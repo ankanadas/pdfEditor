@@ -143,12 +143,28 @@ def _font_xrefs_for(page, basefont):
     return [x[1] for x in matches]
 
 
-def _doc_charset_for(doc, basefont, cache):
-    """Set of characters actually drawn with `basefont` anywhere in the document. An embedded
-    font is usually SUBSET — it only contains glyphs for the characters the document uses — so
-    this is a reliable test of what it can render. (Font.has_glyph is not: a subset can keep a
-    cmap entry for a character whose outline was stripped, so it reports a glyph that prints as
-    nothing — which is why a typed 'J' silently disappeared when the letter had no 'J'.)"""
+def _embedded_xrefs(page, basefont):
+    """Embedded-font xrefs on the page, with those matching `basefont` first (the closest visual
+    match to the edited span) followed by any other embedded fonts. This lets an edited line keep
+    a *document* font even when the span we matched (often a bullet) uses a font that can't render
+    the new letters — we then reuse the body font instead of dropping to a generic one."""
+    primary = _font_xrefs_for(page, basefont)
+    seen = set(primary)
+    others = []
+    for f in page.get_fonts(full=True):     # (xref, ext, type, basefont, refname, encoding)
+        if f[0] not in seen and (f[1] or '') not in ('', 'n/a'):   # has an embedded font file
+            others.append((0 if f[2] == 'TrueType' else 1, f[0]))
+            seen.add(f[0])
+    others.sort()
+    return primary + [x[1] for x in others]
+
+
+def _font_charset(doc, basefont, cache):
+    """Set of characters actually DRAWN with `basefont` anywhere in the document. This is the only
+    reliable test of what a subset embedded font can render: a glyph that was drawn must have an
+    outline. font.valid_codepoints() and has_glyph() are NOT reliable — real-world subsets keep the
+    full cmap (so they claim ~3600 code points, incl. a 'J' the letter never used) while stripping
+    the actual outlines, so a freshly typed 'J' would be assigned to them and render as nothing."""
     target = (basefont or '').split('+')[-1].lower()
     if target in cache:
         return cache[target]
@@ -163,9 +179,9 @@ def _doc_charset_for(doc, basefont, cache):
     return chars
 
 
-def _reuse_embedded_font(doc, page, xref, text, cache):
-    """Install the PDF's OWN embedded font (by xref) and return (fontname, fitz.Font) if it can
-    render every character of `text`; else None. Cached per page so each font is embedded once."""
+def _install_embedded_font(doc, page, xref, cache):
+    """Embed the PDF's OWN font (by xref) into the page once and return (fontname, fitz.Font),
+    or None if it can't be extracted. Cached per page so each font is embedded only once."""
     if xref not in cache:
         entry = None
         try:
@@ -179,40 +195,91 @@ def _reuse_embedded_font(doc, page, xref, text, cache):
         except Exception:
             entry = None
         cache[xref] = entry
-    entry = cache[xref]
-    if entry and all(ch == ' ' or entry[1].has_glyph(ord(ch)) for ch in text):
-        return entry
-    return None
+    return cache[xref]
 
 
-def _resolve_text_font(doc, page, edit, text, cache, charset_cache=None):
-    """Choose font + size for re-inserting `text`. Prefers the original embedded font at the
-    original size (exact match); otherwise an Arial/Times variant. Returns (kwargs, Font, size)."""
+def _resolve_fonts(doc, page, edit, text, cache, charset_cache):
+    """Build the list of font options to draw `text` with, plus the size. Each option is
+    (insert_kwargs, fitz.Font, charset, style_ok): the document's OWN embedded fonts (matched span's
+    font first, then the page's other embedded fonts) each with the set of characters it actually
+    drew and whether its weight/slant matches the line, and a full Arial/Times last as a catch-all
+    (charset None). Drawing per-character from this keeps the document's look and never drops a glyph
+    — even on a line that mixes fonts (a bullet in one font, the body in another).
+
+    The desired weight/slant come from the LINE-level flags the frontend computed (the line's
+    dominant style), NOT the matched span — which is often the bullet and may be a different weight;
+    using it would force the whole edited line bold/italic."""
     span = edit.get('_span')
     size = float(edit.get('fontSize', 12) or 12)
-    serif = bool(edit.get('serif')) or edit.get('fontFamily') == 'serif'
-    bold = bool(edit.get('bold'))
-    italic = bool(edit.get('italic'))
+    if span and span.get('size'):
+        size = float(span['size'])               # exact original size (fixes "too big")
+    want_serif = bool(edit.get('serif')) or edit.get('fontFamily') == 'serif'
+    want_bold = bool(edit.get('bold'))
+    want_italic = bool(edit.get('italic'))
+    options = []
     if span:
-        if span.get('size'):
-            size = float(span['size'])           # exact original size (fixes "too big")
-        flags = int(span.get('flags', 0))        # PyMuPDF: 2=italic, 4=serif, 16=bold
-        serif = serif or bool(flags & 4)
-        bold = bold or bool(flags & 16)
-        italic = italic or bool(flags & 2)
-        # Only reuse the original (often subset) embedded font if it actually contains every
-        # character we need — otherwise a freshly typed character that never appears in the
-        # document (e.g. a 'J' in a letter that had none) would silently drop. In that case we
-        # fall back to a full Arial/Times so every character renders.
-        avail = _doc_charset_for(doc, span.get('font', ''), charset_cache if charset_cache is not None else {})
-        if all(ord(ch) == 32 or ch in avail for ch in text):
-            for xref in _font_xrefs_for(page, span.get('font', '')):
-                reused = _reuse_embedded_font(doc, page, xref, text, cache)
-                if reused:
-                    return dict(fontname=reused[0]), reused[1], size
-    kw = _edit_font_kwargs(serif, bold, italic)
-    f = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
-    return kw, f, size
+        xref_base = {f[0]: (f[3] or '') for f in page.get_fonts(full=True)}   # xref -> basefont
+        for xref in _embedded_xrefs(page, span.get('font', '')):
+            ent = _install_embedded_font(doc, page, xref, cache)
+            if ent:
+                base = xref_base.get(xref, '')
+                charset = _font_charset(doc, base, charset_cache)
+                nm = base.lower()
+                is_bold = ('bold' in nm) or ('black' in nm) or ('heavy' in nm) or ('semibold' in nm)
+                is_italic = ('italic' in nm) or ('oblique' in nm)
+                style_ok = (is_bold == want_bold) and (is_italic == want_italic)
+                options.append((dict(fontname=ent[0]), ent[1], charset, style_ok))
+    kw = _edit_font_kwargs(want_serif, want_bold, want_italic)   # full fallback (covers Latin)
+    fb = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
+    options.append((kw, fb, None, True))          # charset None == catch-all
+    return options, size
+
+
+def _pick_font(ch, options):
+    """Pick (kwargs, Font) for one character, preferring: (1) an embedded font that actually drew it
+    AND matches the line's weight/slant, then (2) any embedded font that drew it (keeps a document
+    font), then (3) the full fallback. Spaces go with the first option (any font advances a space)."""
+    if ch == ' ':
+        return options[0][0], options[0][1]
+    for kwargs, font, charset, style_ok in options:    # 1: drawn-with + right weight/slant
+        if charset is not None and style_ok and ch in charset:
+            return kwargs, font
+    for kwargs, font, charset, style_ok in options:    # 2: drawn-with (any embedded weight)
+        if charset is not None and ch in charset:
+            return kwargs, font
+    for kwargs, font, charset, style_ok in options:    # 3: full fallback
+        if charset is None:
+            return kwargs, font
+    return options[-1][0], options[-1][1]
+
+
+def _insert_text_runs(page, x, baseline, text, size, options, avail):
+    """Draw `text` at (x, baseline), switching font per run so every character uses a font that
+    contains it. Groups consecutive same-font characters, shrinks to fit `avail` width, then
+    inserts each run, advancing x by its measured width."""
+    runs, cur, cur_opt = [], [], None
+    for ch in text:
+        if ch == ' ' and cur_opt is not None:
+            cur.append(ch)                 # keep a space within the current run (don't fragment)
+            continue
+        opt = _pick_font(ch, options)
+        if cur_opt is None or opt[0].get('fontname') != cur_opt[0].get('fontname'):
+            if cur:
+                runs.append((cur_opt, ''.join(cur)))
+            cur, cur_opt = [], opt
+        cur.append(ch)
+    if cur:
+        runs.append((cur_opt, ''.join(cur)))
+
+    total = sum(opt[1].text_length(s, fontsize=size) for opt, s in runs)
+    if total > avail > 8:
+        size = max(4.0, size * avail / total)
+
+    cx = x
+    for opt, s in runs:
+        kwargs, font = opt
+        page.insert_text(fitz.Point(cx, baseline), s, fontsize=size, color=(0, 0, 0), **kwargs)
+        cx += font.text_length(s, fontsize=size)
 
 
 @app.route('/health', methods=['GET'])
@@ -294,7 +361,7 @@ def edit_pdf():
         for edit in edits:
             edits_by_page.setdefault(int(edit.get('pageIndex', 0)), []).append(edit)
 
-        # Cache of "characters this embedded font actually contains", shared across pages.
+        # Cache of "characters this embedded font actually drew", shared across pages.
         charset_cache = {}
 
         for page_num, page_edits in edits_by_page.items():
@@ -367,21 +434,15 @@ def edit_pdf():
                     continue
 
                 if style == 'signature' and SIGN_FONT_FILE:
-                    kwargs = dict(fontname=SIGN_FONT_NAME, fontfile=SIGN_FONT_FILE)
                     size = float(edit.get('fontSize', 12))
+                    page.insert_text(fitz.Point(x, baseline), new_text, fontsize=size, color=(0, 0, 0),
+                                     fontname=SIGN_FONT_NAME, fontfile=SIGN_FONT_FILE)
                 else:
-                    kwargs, font, size = _resolve_text_font(doc, page, edit, new_text, font_cache, charset_cache)
-                    # Shrink to fit if the text would run past the right margin (e.g. user added
-                    # words, or the fallback font is wider) so an edited line is never cut off.
-                    avail = pw - x - 4
-                    try:
-                        w = font.text_length(new_text, fontsize=size)
-                    except Exception:
-                        w = 0
-                    if w > avail > 8:
-                        size = max(4.0, size * avail / w)
-
-                page.insert_text(fitz.Point(x, baseline), new_text, fontsize=size, color=(0, 0, 0), **kwargs)
+                    # Draw per-character with the document's own fonts (matched span first, then
+                    # the page's other embedded fonts, then a full fallback), so a line keeps its
+                    # look even when it mixes fonts — and shrink to fit the right margin.
+                    options, size = _resolve_fonts(doc, page, edit, new_text, font_cache, charset_cache)
+                    _insert_text_runs(page, x, baseline, new_text, size, options, pw - x - 4)
                 # Note: never log the document's text content (keeps the app traceless).
                 print(f"  page {page_num}: [{style}] text written at ({x:.1f}, {baseline:.1f})")
 

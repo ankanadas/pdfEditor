@@ -629,8 +629,12 @@ class PDFEditorApp {
       // "GPA: …"). Keep each column as its own segment/box so editing one doesn't reflow the
       // others and right-aligned items stay in place.
       const columnBreak = sameRow && !isSpace && gap > item.height * 1.8;
+      // A leading bullet glyph (its own fragment) stays a SEPARATE segment, so editing the text
+      // never moves, resizes, or re-renders the bullet and the text keeps its original indent.
+      const bulletBreak = sameRow && !isSpace && currentLine &&
+        /^[•◦▪●‣⁃∙·‧]\s*$/.test(currentLine.text);
 
-      if (!sameRow || columnBreak) {
+      if (!sameRow || columnBreak || bulletBreak) {
         if (isSpace) return;            // never start a segment on a stray space
         startSegment(item);
         return;
