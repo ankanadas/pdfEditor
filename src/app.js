@@ -443,7 +443,10 @@ class PDFEditorApp {
       wrapper.appendChild(canvas);
       container.appendChild(wrapper);
 
-      const pv = { pageNum: i, page, viewport, canvas, ctx: canvas.getContext('2d'), wrapper };
+      // willReadFrequently keeps the canvas CPU-backed so getImageData (used to sample a line's
+      // real background/text colour in edit mode) returns correct pixels instead of empty/black
+      // readbacks on a GPU-accelerated canvas.
+      const pv = { pageNum: i, page, viewport, canvas, ctx: canvas.getContext('2d', { willReadFrequently: true }), wrapper };
       canvas.addEventListener('click', (e) => this.handleCanvasClick(e, pv));
       canvas.addEventListener('mousedown', (e) => this.onEraseStart(e, pv));
       this.pageViews.push(pv);
@@ -509,17 +512,35 @@ class PDFEditorApp {
     // we white it out. Saving then covers replaced text with the cell's OWN colour instead
     // of white, so coloured/shaded backgrounds survive an edit. (Reads first, writes after,
     // to avoid interleaving getImageData with fillRect.)
-    lines.forEach((line) => { line.bgColor = this.sampleLineBg(pv, line); });
+    lines.forEach((line) => {
+      const c = this.sampleLineColors(pv, line);
+      line.bgColor = c.bg;          // real background colour (used for the editable text contrast)
+      line.textColor = c.text;      // real text colour (e.g. white) for the editable box
+    });
 
-    // Cover the original text on the canvas so the editable boxes are the only visible text.
-    // Use each line's own background colour (not white) so a shaded/coloured cell keeps its
-    // look while editing — matching what the saved file will show.
+    // Hide the original text by copying a CLEAN background strip from just outside each line over
+    // the line's box (canvas->canvas drawImage: real page pixels — gradients/dark fills included,
+    // GPU-safe, needs no getImageData). This blends the edit box into the page, so editing never
+    // shows a white block even when pixel readback for colour sampling isn't available.
     pv.ctx.save();
     pv.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
+    const cw = pv.canvas.width, ch = pv.canvas.height;
     lines.forEach((line) => {
-      const c = line.bgColor;
-      pv.ctx.fillStyle = c ? `rgb(${c[0]},${c[1]},${c[2]})` : '#ffffff';
-      pv.ctx.fillRect(line.left - 2, line.top - 2, (line.right - line.left) + 6, (line.bottom - line.top) + 4);
+      const lx = Math.max(0, Math.floor(line.left) - 2);
+      const ly = Math.max(0, Math.floor(line.top) - 2);
+      const lw = Math.min(cw - lx, Math.ceil(line.right - line.left) + 6);
+      const lh = Math.min(ch - ly, Math.ceil(line.bottom - line.top) + 4);
+      const band = Math.max(2, Math.round((line.bottom - line.top) * 0.18));
+      let sy = ly - band - 2;                                            // clean strip ABOVE the line...
+      if (sy < 0) sy = Math.min(ch - band, Math.ceil(line.bottom) + 2);  // ...else just BELOW it
+      try {
+        if (sy < 0 || lw <= 0 || lh <= 0) throw new Error('no source strip');
+        pv.ctx.drawImage(pv.canvas, lx, sy, lw, band, lx, ly, lw, lh);   // stretch bg strip over the text
+      } catch (e) {
+        const c = line.bgColor;
+        pv.ctx.fillStyle = c ? `rgb(${c[0]},${c[1]},${c[2]})` : '#ffffff';
+        pv.ctx.fillRect(lx, ly, lw, lh);
+      }
     });
     pv.ctx.restore();
 
@@ -549,10 +570,26 @@ class PDFEditorApp {
       div.style.height = (lineBoxPx + 2) + 'px';
       div.style.fontSize = fontSizePx + 'px';
       div.style.lineHeight = lineBoxPx + 'px';
-      div.style.fontFamily = line.serif ? '"Times New Roman", Times, serif' : 'Arial, Helvetica, sans-serif';
+      // Live font match: reuse the PDF's OWN embedded font. While rendering this page PDF.js
+      // registers each embedded font as a web font under its loadedName (e.g. "g_d0_f1"), which
+      // is what line.fontName holds — so we can style the editable box with it directly. We keep
+      // a matching system family (Times/Arial) as the fallback, so glyphs the (subset) font lacks
+      // — and Type 3 fonts PDF.js can't expose — still render instead of showing missing boxes.
+      const fallbackFamily = line.serif ? '"Times New Roman", Times, serif' : 'Arial, Helvetica, sans-serif';
+      div.style.fontFamily = line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily;
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
-      div.style.color = '#000';
+      // Show the editable text in the line's REAL colour so the box blends into the page (e.g.
+      // white text on a dark headline). If text-colour detection failed, fall back to a readable
+      // contrast vs the background. (The saved file uses the exact original colour regardless.)
+      const tc = line.textColor;
+      if (tc) {
+        div.style.color = `rgb(${tc[0]},${tc[1]},${tc[2]})`;
+      } else {
+        const bg = line.bgColor;
+        const lum = bg ? (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) : 255;
+        div.style.color = lum < 140 ? '#fff' : '#000';
+      }
       div.style.padding = '0';
       div.style.margin = '0';
       div.style.border = '1px solid transparent';
@@ -567,7 +604,12 @@ class PDFEditorApp {
       div.addEventListener('focus', () => {
         div.style.border = '1px solid #4A90E2';
         div.style.boxShadow = '0 0 0 2px rgba(74,144,226,0.25)';
-        div.style.background = '#ffffff';
+        // Match the line's own background (e.g. dark) instead of forcing white, so editing a
+        // white-on-dark headline stays seamless. Falls back to transparent (the canvas cover
+        // already shows the real page background underneath).
+        div.style.background = line.bgColor
+          ? `rgb(${line.bgColor[0]},${line.bgColor[1]},${line.bgColor[2]})`
+          : 'transparent';
         div.style.zIndex = '200';
         this.activeEditBox = div;
       });
@@ -594,32 +636,74 @@ class PDFEditorApp {
   }
 
   /**
-   * Find the dominant (background) colour under a text line by reading the rendered canvas.
-   * Glyphs and grid lines are a minority of the pixels in a line's band, so the most common
-   * colour is the cell's background. Returns [r,g,b] (0-255) or null if it can't be read.
-   * Used so an edited line is covered with its own background colour rather than white.
+   * Read a text line from the rendered canvas and return BOTH its background colour and its text
+   * colour: { bg:[r,g,b]|null, text:[r,g,b]|null }. The background is sampled from the PADDING
+   * just OUTSIDE the line's box (that area is page background, never glyphs) so it stays correct
+   * even for a big bold headline whose own box is wall-to-wall glyphs; the text colour is the
+   * dominant colour INSIDE the box that differs from the background. This lets an edit cover the
+   * line with its REAL background (e.g. dark) and show the editable text in its REAL colour (e.g.
+   * white) — so editing white-on-dark text is seamless instead of a white box.
    */
-  sampleLineBg(pv, line) {
+  /**
+   * Read a region of a (possibly GPU-accelerated) canvas reliably: copy it into a throwaway
+   * CPU-backed canvas first, then getImageData there. Reading straight from the render canvas can
+   * return empty/stale pixels on some browsers, which is what made colour sampling fail.
+   */
+  _readRegion(srcCanvas, x, y, w, h) {
+    const tmp = document.createElement('canvas');
+    tmp.width = Math.max(1, w); tmp.height = Math.max(1, h);
+    const tctx = tmp.getContext('2d', { willReadFrequently: true });
+    tctx.drawImage(srcCanvas, x, y, w, h, 0, 0, w, h);
+    return tctx.getImageData(0, 0, w, h).data;
+  }
+
+  sampleLineColors(pv, line) {
     try {
       const cw = pv.canvas.width, ch = pv.canvas.height;
-      const x = Math.max(0, Math.min(cw - 1, Math.floor(line.left)));
-      const y = Math.max(0, Math.min(ch - 1, Math.floor(line.top)));
-      const w = Math.max(1, Math.min(cw - x, Math.ceil(line.right - line.left)));
-      const h = Math.max(1, Math.min(ch - y, Math.ceil(line.bottom - line.top)));
-      const data = pv.ctx.getImageData(x, y, w, h).data;   // device pixels (ignores transform)
-      const counts = new Map();
-      let bestN = 0, bestColor = null;
-      for (let i = 0; i < data.length; i += 4) {
-        if (data[i + 3] < 128) continue;                   // skip transparent
-        // Quantise to 16 levels per channel so near-identical pixels share a bucket.
-        const key = ((data[i] & 0xF0) << 16) | ((data[i + 1] & 0xF0) << 8) | (data[i + 2] & 0xF0);
-        const n = (counts.get(key) || 0) + 1;
-        counts.set(key, n);
-        if (n > bestN) { bestN = n; bestColor = [data[i], data[i + 1], data[i + 2]]; }
+      const lh = Math.max(1, line.bottom - line.top);
+      const padX = Math.max(6, Math.round(lh * 0.5));   // sample a margin to the sides...
+      const padY = Math.max(4, Math.round(lh * 0.35));  // ...and just above / below the text
+      const ex0 = Math.max(0, Math.floor(line.left) - padX);
+      const ey0 = Math.max(0, Math.floor(line.top) - padY);
+      const ex1 = Math.min(cw, Math.ceil(line.right) + padX);
+      const ey1 = Math.min(ch, Math.ceil(line.bottom) + padY);
+      const w = Math.max(1, ex1 - ex0), h = Math.max(1, ey1 - ey0);
+      const data = this._readRegion(pv.canvas, ex0, ey0, w, h);   // robust readback (CPU canvas)
+      // The original text box, in this region's local coordinates.
+      const ix0 = Math.floor(line.left) - ex0, iy0 = Math.floor(line.top) - ey0;
+      const ix1 = Math.ceil(line.right) - ex0, iy1 = Math.ceil(line.bottom) - ey0;
+      const key = (i) => ((data[i] & 0xF0) << 16) | ((data[i + 1] & 0xF0) << 8) | (data[i + 2] & 0xF0);
+
+      const padC = new Map(), padRep = new Map(), inC = new Map(), inRep = new Map();
+      for (let py = 0; py < h; py++) {
+        const inRow = py >= iy0 && py < iy1;
+        for (let px = 0; px < w; px++) {
+          const i = (py * w + px) * 4;
+          if (data[i + 3] < 128) continue;
+          const k = key(i);
+          if (inRow && px >= ix0 && px < ix1) {        // inside the text box
+            inC.set(k, (inC.get(k) || 0) + 1);
+            if (!inRep.has(k)) inRep.set(k, [data[i], data[i + 1], data[i + 2]]);
+          } else {                                     // padding = background
+            padC.set(k, (padC.get(k) || 0) + 1);
+            if (!padRep.has(k)) padRep.set(k, [data[i], data[i + 1], data[i + 2]]);
+          }
+        }
       }
-      return bestColor;
+      // Background = modal colour of the padding (fall back to the box's modal if no padding).
+      let bg = null, bgN = -1;
+      for (const [k, n] of padC) { if (n > bgN) { bgN = n; bg = padRep.get(k); } }
+      if (!bg) { for (const [k, n] of inC) { if (n > bgN) { bgN = n; bg = inRep.get(k); } } }
+
+      // Text = the most common colour inside the box that is clearly different from the background.
+      const far = (c) => !bg || (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) > 70);
+      let text = null, textN = 0;
+      for (const [k, n] of inC) { const c = inRep.get(k); if (far(c) && n > textN) { textN = n; text = c; } }
+
+      return { bg, text };
     } catch (e) {
-      return null;   // e.g. a tainted canvas — fall back to white covering
+      console.warn('[QPE] sampleLineColors getImageData failed (canvas tainted?) — falling back', e);
+      return { bg: null, text: null };   // e.g. a tainted canvas — caller falls back
     }
   }
 
