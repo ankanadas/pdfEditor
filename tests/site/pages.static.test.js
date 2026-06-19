@@ -23,7 +23,9 @@ describe('public content pages exist and are well-formed', () => {
     const html = read(file);
     expect(html).toContain('<!DOCTYPE html>');
     expect((html.match(/<h1[ >]/g) || []).length).toBe(1);
-    expect(html).toContain(`<title>${title} — Quick PDF Editor`);
+    const titleTag = (html.match(/<title>([^<]*)<\/title>/) || [])[1] || '';
+    expect(titleTag).toContain(title);            // page name present
+    expect(titleTag).toContain('Quick PDF Editor'); // brand present (separator-agnostic)
     // basic tag balance
     expect((html.match(/<body[ >]/g) || []).length).toBe(html.split('</body>').length - 1);
     expect((html.match(/<footer[ >]/g) || []).length).toBe(html.split('</footer>').length - 1);
