@@ -443,7 +443,10 @@ class PDFEditorApp {
       wrapper.appendChild(canvas);
       container.appendChild(wrapper);
 
-      const pv = { pageNum: i, page, viewport, canvas, ctx: canvas.getContext('2d'), wrapper };
+      // willReadFrequently keeps the canvas CPU-backed so getImageData (used to sample a line's
+      // real background/text colour in edit mode) returns correct pixels instead of empty/black
+      // readbacks on a GPU-accelerated canvas.
+      const pv = { pageNum: i, page, viewport, canvas, ctx: canvas.getContext('2d', { willReadFrequently: true }), wrapper };
       canvas.addEventListener('click', (e) => this.handleCanvasClick(e, pv));
       canvas.addEventListener('mousedown', (e) => this.onEraseStart(e, pv));
       this.pageViews.push(pv);
@@ -511,19 +514,33 @@ class PDFEditorApp {
     // to avoid interleaving getImageData with fillRect.)
     lines.forEach((line) => {
       const c = this.sampleLineColors(pv, line);
-      line.bgColor = c.bg;          // covers the line with its real background (e.g. dark)
-      line.textColor = c.text;      // shows the editable text in its real colour (e.g. white)
+      line.bgColor = c.bg;          // real background colour (used for the editable text contrast)
+      line.textColor = c.text;      // real text colour (e.g. white) for the editable box
     });
 
-    // Cover the original text on the canvas so the editable boxes are the only visible text.
-    // Use each line's own background colour (not white) so a shaded/coloured cell keeps its
-    // look while editing — matching what the saved file will show.
+    // Hide the original text by copying a CLEAN background strip from just outside each line over
+    // the line's box (canvas->canvas drawImage: real page pixels — gradients/dark fills included,
+    // GPU-safe, needs no getImageData). This blends the edit box into the page, so editing never
+    // shows a white block even when pixel readback for colour sampling isn't available.
     pv.ctx.save();
     pv.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
+    const cw = pv.canvas.width, ch = pv.canvas.height;
     lines.forEach((line) => {
-      const c = line.bgColor;
-      pv.ctx.fillStyle = c ? `rgb(${c[0]},${c[1]},${c[2]})` : '#ffffff';
-      pv.ctx.fillRect(line.left - 2, line.top - 2, (line.right - line.left) + 6, (line.bottom - line.top) + 4);
+      const lx = Math.max(0, Math.floor(line.left) - 2);
+      const ly = Math.max(0, Math.floor(line.top) - 2);
+      const lw = Math.min(cw - lx, Math.ceil(line.right - line.left) + 6);
+      const lh = Math.min(ch - ly, Math.ceil(line.bottom - line.top) + 4);
+      const band = Math.max(2, Math.round((line.bottom - line.top) * 0.18));
+      let sy = ly - band - 2;                                            // clean strip ABOVE the line...
+      if (sy < 0) sy = Math.min(ch - band, Math.ceil(line.bottom) + 2);  // ...else just BELOW it
+      try {
+        if (sy < 0 || lw <= 0 || lh <= 0) throw new Error('no source strip');
+        pv.ctx.drawImage(pv.canvas, lx, sy, lw, band, lx, ly, lw, lh);   // stretch bg strip over the text
+      } catch (e) {
+        const c = line.bgColor;
+        pv.ctx.fillStyle = c ? `rgb(${c[0]},${c[1]},${c[2]})` : '#ffffff';
+        pv.ctx.fillRect(lx, ly, lw, lh);
+      }
     });
     pv.ctx.restore();
 
@@ -587,7 +604,12 @@ class PDFEditorApp {
       div.addEventListener('focus', () => {
         div.style.border = '1px solid #4A90E2';
         div.style.boxShadow = '0 0 0 2px rgba(74,144,226,0.25)';
-        div.style.background = '#ffffff';
+        // Match the line's own background (e.g. dark) instead of forcing white, so editing a
+        // white-on-dark headline stays seamless. Falls back to transparent (the canvas cover
+        // already shows the real page background underneath).
+        div.style.background = line.bgColor
+          ? `rgb(${line.bgColor[0]},${line.bgColor[1]},${line.bgColor[2]})`
+          : 'transparent';
         div.style.zIndex = '200';
         this.activeEditBox = div;
       });
@@ -622,6 +644,19 @@ class PDFEditorApp {
    * line with its REAL background (e.g. dark) and show the editable text in its REAL colour (e.g.
    * white) — so editing white-on-dark text is seamless instead of a white box.
    */
+  /**
+   * Read a region of a (possibly GPU-accelerated) canvas reliably: copy it into a throwaway
+   * CPU-backed canvas first, then getImageData there. Reading straight from the render canvas can
+   * return empty/stale pixels on some browsers, which is what made colour sampling fail.
+   */
+  _readRegion(srcCanvas, x, y, w, h) {
+    const tmp = document.createElement('canvas');
+    tmp.width = Math.max(1, w); tmp.height = Math.max(1, h);
+    const tctx = tmp.getContext('2d', { willReadFrequently: true });
+    tctx.drawImage(srcCanvas, x, y, w, h, 0, 0, w, h);
+    return tctx.getImageData(0, 0, w, h).data;
+  }
+
   sampleLineColors(pv, line) {
     try {
       const cw = pv.canvas.width, ch = pv.canvas.height;
@@ -633,7 +668,7 @@ class PDFEditorApp {
       const ex1 = Math.min(cw, Math.ceil(line.right) + padX);
       const ey1 = Math.min(ch, Math.ceil(line.bottom) + padY);
       const w = Math.max(1, ex1 - ex0), h = Math.max(1, ey1 - ey0);
-      const data = pv.ctx.getImageData(ex0, ey0, w, h).data;   // device pixels (ignores transform)
+      const data = this._readRegion(pv.canvas, ex0, ey0, w, h);   // robust readback (CPU canvas)
       // The original text box, in this region's local coordinates.
       const ix0 = Math.floor(line.left) - ex0, iy0 = Math.floor(line.top) - ey0;
       const ix1 = Math.ceil(line.right) - ex0, iy1 = Math.ceil(line.bottom) - ey0;
@@ -667,6 +702,7 @@ class PDFEditorApp {
 
       return { bg, text };
     } catch (e) {
+      console.warn('[QPE] sampleLineColors getImageData failed (canvas tainted?) — falling back', e);
       return { bg: null, text: null };   // e.g. a tainted canvas — caller falls back
     }
   }
