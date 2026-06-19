@@ -340,16 +340,40 @@
     .dropzone .big { font-size: 17px; font-weight: 700; }
     .dropzone .or { color: var(--muted); font-size: 13px; margin: 8px 0; }
 
-    /* Help drawer */
-    #instructions {
-      display: none; position: fixed; right: 18px; bottom: 18px; width: 340px; z-index: 500;
-      background: #fff; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 16px 50px rgba(20,22,40,.22);
-      padding: 16px 18px; font-size: 13.5px; color: #374151;
+    /* ---------- First-run guided tour (spotlight over the real tool icons) ---------- */
+    .tour2 { position: fixed; inset: 0; z-index: 1200; display: none; }
+    .tour2.open { display: block; }
+    /* The spotlight: a transparent box whose huge box-shadow dims everything around it. */
+    .tour2-spot {
+      position: absolute; border-radius: 12px; pointer-events: none;
+      box-shadow: 0 0 0 9999px rgba(20, 22, 40, .58);
+      outline: 3px solid var(--brand); outline-offset: 3px;
+      transition: left .22s ease, top .22s ease, width .22s ease, height .22s ease;
     }
-    #instructions.open { display: block; }
-    #instructions h3 { margin: 0 0 10px; font-size: 15px; }
-    #instructions ul { margin: 0; padding-left: 18px; }
-    #instructions li { margin: 7px 0; }
+    .tour2-pop {
+      position: absolute; width: 300px; max-width: 86vw; background: #fff; border-radius: 14px;
+      padding: 16px 18px 14px; box-shadow: 0 18px 50px rgba(20, 22, 40, .32);
+      transition: left .2s ease, top .2s ease; pointer-events: auto;
+    }
+    /* Arrow that points from the popover back to the highlighted icon. */
+    .tour2-pop::before {
+      content: ''; position: absolute; top: var(--arrow, 22px); width: 0; height: 0; border: 8px solid transparent;
+    }
+    .tour2-pop.point-left::before { left: -16px; border-right-color: #fff; }
+    .tour2-pop.point-right::before { right: -16px; border-left-color: #fff; }
+    .tour2-step { font-size: 12px; font-weight: 700; color: var(--brand); letter-spacing: .3px; margin-bottom: 6px; }
+    .tour2-title { font-weight: 800; font-size: 16.5px; color: var(--ink); margin: 0 0 6px; }
+    .tour2-desc { font-size: 13.5px; line-height: 1.55; color: #4b5563; margin: 0 0 14px; }
+    .tour2-actions { display: flex; align-items: center; gap: 8px; }
+    .tour2-actions .spacer { flex: 1; }
+    /* Solid purple button with white text, exactly like the Next button. */
+    .tour2-skip {
+      cursor: pointer; background: var(--brand); border: 1px solid var(--brand); color: #fff;
+      font-size: 13px; font-weight: 700; padding: 7px 14px; border-radius: 9px; transition: all .15s ease;
+    }
+    .tour2-skip:hover { background: var(--brand-dark); border-color: var(--brand-dark); }
+    .tour2-actions .btn { padding: 7px 14px; font-weight: 700; font-size: 13px; }
+    .tour2-back[hidden] { display: none; }
 
     /* Editable line boxes (positioned/styled inline by app.js) */
     .editable-text-box { font-family: inherit; }
@@ -935,17 +959,21 @@
   </footer>
 
   <!-- Help drawer -->
-  <div id="instructions">
-    <h3>How to use</h3>
-    <ul>
-      <li><strong>Open</strong> a PDF (button or drag &amp; drop).</li>
-      <li><strong>Edit</strong>: click any line and type to change it in place.</li>
-      <li><strong>Text</strong>: type, then click the page to drop new text.</li>
-      <li><strong>Sign</strong>: draw, type, or upload a signature in the popup, then drag it into place.</li>
-      <li><strong>Erase</strong>: drag a box over anything (e.g. an old signature) to remove it.</li>
-      <li><strong>Clear</strong> removes added text/signatures you haven't saved yet.</li>
-      <li><strong>Save</strong> downloads the edited PDF.</li>
-    </ul>
+  <!-- First-run guided tour: a spotlight walks through each tool icon (left + right rails).
+       Shown once per browser (localStorage), replayable via the Help button. -->
+  <div id="tourOverlay" class="tour2" role="dialog" aria-modal="true" aria-labelledby="tour2Title">
+    <div class="tour2-spot" id="tour2Spot"></div>
+    <div class="tour2-pop" id="tour2Pop">
+      <div class="tour2-step" id="tour2Step"></div>
+      <h3 class="tour2-title" id="tour2Title"></h3>
+      <p class="tour2-desc" id="tour2Desc"></p>
+      <div class="tour2-actions">
+        <button class="tour2-skip" id="tour2Skip" type="button">Skip tour</button>
+        <span class="spacer"></span>
+        <button class="btn tour2-back" id="tour2Back" type="button" hidden>Back</button>
+        <button class="btn primary" id="tour2Next" type="button">Next</button>
+      </div>
+    </div>
   </div>
 
   <!-- Confirm dialog (e.g. opening a new PDF discards unsaved edits) -->
@@ -1134,10 +1162,116 @@
         }
       });
 
-      // Help drawer toggle.
-      var helpBtn = document.getElementById('helpBtn');
-      var help = document.getElementById('instructions');
-      helpBtn.addEventListener('click', function () { help.classList.toggle('open'); });
+      // ---- First-run guided tour ----------------------------------------------------------
+      // A spotlight highlights each tool icon (left sidebar + right rail) with a short
+      // description. First-time visitors are detected with a localStorage flag (no account,
+      // no tracking): absent => show once; the flag is set on finish/skip so it never
+      // auto-shows again. The Help (?) button replays it at any time.
+      var TOUR_KEY = 'qpe_tour_v2';
+      function tourHasSeen() { try { return !!localStorage.getItem(TOUR_KEY); } catch (_) { return false; } }
+      function tourMarkSeen() { try { localStorage.setItem(TOUR_KEY, '1'); } catch (_) { /* private mode */ } }
+      function tourTrack(event, extra) {
+        try {
+          if (Array.isArray(window.dataLayer)) window.dataLayer.push(Object.assign({ event: event }, extra || {}));
+          if (typeof window.gtag === 'function') window.gtag('event', event, extra || {});
+        } catch (_) { /* analytics must never break the page */ }
+      }
+
+      // Each step points the spotlight at a real tool icon and explains it.
+      var TARGETS = [
+        { sel: '#editModeBtn',       title: 'Edit text',     desc: 'Click any existing line in the PDF and type to change it right in place.' },
+        { sel: '#textModeBtn',       title: 'Add text',      desc: 'Type your text, then click anywhere on the page to drop it exactly where you want.' },
+        { sel: '#signatureModeBtn',  title: 'Sign',          desc: 'Draw, type or upload a signature, then drag it into position.' },
+        { sel: '#eraseModeBtn',      title: 'Erase',         desc: 'Drag a box over old content, like a stale signature, to white it out.' },
+        { sel: '#stampModeBtn',      title: 'Stamp',         desc: 'Drop a mark such as Approved, Rejected, Final, Draft or Copy.' },
+        { sel: '#clearSignatureBtn', title: 'Discard',       desc: 'Remove all your unsaved changes at once. You can always Undo afterwards.' },
+        { sel: '#pagesPanelBtn',     title: 'Reorder pages', desc: 'Open the page manager to drag, delete or insert blank pages.' },
+        { sel: '#mergeBtn',          title: 'Merge PDFs',    desc: 'Combine several PDFs into a single document, in any order you like.' }
+      ];
+
+      var ov = document.getElementById('tourOverlay');
+      var spot = document.getElementById('tour2Spot');
+      var pop = document.getElementById('tour2Pop');
+      var stepEl = document.getElementById('tour2Step');
+      var titleEl = document.getElementById('tour2Title');
+      var descEl = document.getElementById('tour2Desc');
+      var backBtn = document.getElementById('tour2Back');
+      var nextBtn = document.getElementById('tour2Next');
+      var skipBtn = document.getElementById('tour2Skip');
+      var steps = [], ti = 0;
+
+      // Only keep targets that are actually on screen (e.g. skip a hidden rail).
+      function visibleTargets() {
+        var out = [];
+        for (var k = 0; k < TARGETS.length; k++) {
+          var el = document.querySelector(TARGETS[k].sel);
+          if (!el) continue;
+          var r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) out.push({ el: el, t: TARGETS[k] });
+        }
+        return out;
+      }
+
+      function placeTour() {
+        if (!steps.length) return;
+        var r = steps[ti].el.getBoundingClientRect(), pad = 6;
+        spot.style.left = (r.left - pad) + 'px';
+        spot.style.top = (r.top - pad) + 'px';
+        spot.style.width = (r.width + pad * 2) + 'px';
+        spot.style.height = (r.height + pad * 2) + 'px';
+
+        var popW = Math.min(300, window.innerWidth * 0.86), gap = 18;
+        var onLeft = (r.left + r.width / 2) < window.innerWidth / 2;   // icon sits on the left half
+        var px = onLeft ? (r.right + gap) : (r.left - gap - popW);
+        px = Math.max(12, Math.min(px, window.innerWidth - popW - 12));
+        var popH = pop.offsetHeight || 150;
+        var py = Math.max(12, Math.min(r.top + r.height / 2 - 34, window.innerHeight - popH - 12));
+        pop.style.left = px + 'px';
+        pop.style.top = py + 'px';
+        pop.classList.toggle('point-left', onLeft);                    // arrow points back at the icon
+        pop.classList.toggle('point-right', !onLeft);
+        pop.style.setProperty('--arrow', Math.max(14, (r.top + r.height / 2) - py - 8) + 'px');
+      }
+
+      function renderTour() {
+        var cur = steps[ti], last = ti === steps.length - 1;
+        stepEl.textContent = 'Step ' + (ti + 1) + ' of ' + steps.length;
+        titleEl.textContent = cur.t.title;
+        descEl.textContent = cur.t.desc;
+        backBtn.hidden = ti === 0;
+        nextBtn.textContent = last ? 'Done' : 'Next';
+        placeTour();
+      }
+      function openTour() {
+        steps = visibleTargets();
+        if (!steps.length) return;                 // nothing to highlight
+        ti = 0; ov.classList.add('open'); renderTour(); nextBtn.focus();
+        tourTrack('tutorial_opened', { steps: steps.length });
+      }
+      function closeTour(done) {
+        ov.classList.remove('open'); tourMarkSeen();
+        tourTrack(done ? 'tutorial_completed' : 'tutorial_skipped', { step: ti + 1 });
+      }
+
+      if (ov) {
+        nextBtn.addEventListener('click', function () { if (ti < steps.length - 1) { ti++; renderTour(); } else closeTour(true); });
+        backBtn.addEventListener('click', function () { if (ti > 0) { ti--; renderTour(); } });
+        skipBtn.addEventListener('click', function () { closeTour(false); });
+        document.addEventListener('keydown', function (e) {
+          if (!ov.classList.contains('open')) return;
+          if (e.key === 'Escape') closeTour(false);
+          else if (e.key === 'ArrowRight') nextBtn.click();
+          else if (e.key === 'ArrowLeft' && !backBtn.hidden) backBtn.click();
+        });
+        window.addEventListener('resize', function () { if (ov.classList.contains('open')) placeTour(); });
+
+        // The Help (?) button replays the tour whenever the user wants it.
+        var helpBtn = document.getElementById('helpBtn');
+        if (helpBtn) helpBtn.addEventListener('click', openTour);
+
+        // Show automatically on a first visit only (let the layout settle first).
+        if (!tourHasSeen()) setTimeout(openTour, 500);
+      }
     });
   </script>
 </body>

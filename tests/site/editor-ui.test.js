@@ -36,6 +36,42 @@ describe('Merge modal UI is present in the editor', () => {
   });
 });
 
+describe('First-run guided tour highlights the tool icons and is gated on localStorage', () => {
+  const html = () => read('index.html');
+
+  it('has the spotlight overlay with a popover (step, title, desc, nav buttons)', () => {
+    const h = html();
+    for (const id of ['tourOverlay', 'tour2Spot', 'tour2Pop', 'tour2Step', 'tour2Title',
+      'tour2Desc', 'tour2Back', 'tour2Next', 'tour2Skip']) {
+      expect(h).toContain(`id="${id}"`);
+    }
+    expect(h).toContain('class="tour2-spot"');       // the highlight ring
+  });
+
+  it('targets every left-rail and right-rail tool icon', () => {
+    const h = html();
+    for (const sel of ['#editModeBtn', '#textModeBtn', '#signatureModeBtn', '#eraseModeBtn',
+      '#stampModeBtn', '#clearSignatureBtn', '#pagesPanelBtn', '#mergeBtn']) {
+      expect(h).toContain(`sel: '${sel}'`);
+    }
+  });
+
+  it('detects a first-time visitor via localStorage and auto-shows only then', () => {
+    const h = html();
+    expect(h).toContain("'qpe_tour_v2'");            // the first-visit flag
+    expect(h).toContain('localStorage.getItem');     // read the flag
+    expect(h).toContain('localStorage.setItem');     // mark it seen on finish/skip
+    expect(h).toContain('if (!tourHasSeen()) setTimeout(openTour'); // auto-show once
+  });
+
+  it('replays from the Help button and no longer uses the old help drawer', () => {
+    const h = html();
+    expect(h).toContain("getElementById('helpBtn')");
+    expect(h).toContain('openTour');
+    expect(h).not.toContain('id="instructions"');    // old drawer retired
+  });
+});
+
 describe('Reorder modal matches the Merge modal', () => {
   const html = () => read('index.html');
 
