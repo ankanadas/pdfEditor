@@ -122,6 +122,39 @@ _BUILTIN = {
     (True, False, True): "tiit",   (True, True, True): "tibi",
 }
 
+# The 14 standard PDF fonts, by family + (bold, italic) -> PyMuPDF builtin name. Used to re-emit a
+# NON-embedded standard font under its OWN name (so a 'Helvetica-Bold' heading saves back as
+# 'Helvetica-Bold', not a substituted Arial) for the WinAnsi characters it can draw.
+_BASE14_BY_FAMILY = {
+    'sans':  {(False, False): 'helv', (True, False): 'hebo', (False, True): 'heit', (True, True): 'hebi'},
+    'serif': {(False, False): 'tiro', (True, False): 'tibo', (False, True): 'tiit', (True, True): 'tibi'},
+    'mono':  {(False, False): 'cour', (True, False): 'cobo', (False, True): 'coit', (True, True): 'cobi'},
+}
+
+
+def _standard_family(basefont):
+    """Family ('sans'|'serif'|'mono') if `basefont` is one of the 14 standard PDF TEXT fonts
+    (Helvetica/Arial, Times, Courier), else None. Symbol/ZapfDingbats are intentionally excluded —
+    they are symbol fonts, not a home for typed Latin text."""
+    nm = (basefont or '').split('+')[-1].lower()
+    if nm.startswith('helvetica') or nm.startswith('arial'):
+        return 'sans'
+    if nm.startswith('times') or 'times new roman' in nm:
+        return 'serif'
+    if nm.startswith('courier'):
+        return 'mono'
+    return None
+
+
+def _base14_draws(ch):
+    """True if PyMuPDF's builtin Base-14 fonts render `ch` correctly. Verified by probe: the safe
+    set is the Latin-1 printable range (0x20-0x7E and 0xA0-0xFF). The cp1252 'specials' zone
+    (smart quotes, en/em dash, bullet, €) misrenders to '·' through the builtin path, so those
+    characters are left to a real Unicode TTF instead. Decides which characters a re-emitted
+    standard font can keep."""
+    o = ord(ch)
+    return 0x20 <= o <= 0x7E or 0xA0 <= o <= 0xFF
+
 # Script/italic fonts used for typed signatures.
 _SIGN_FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/SnellRoundhand.ttc",
@@ -199,6 +232,50 @@ def _span_color(span):
     return ((c >> 16 & 255) / 255.0, (c >> 8 & 255) / 255.0, (c & 255) / 255.0)
 
 
+def _span_style(span):
+    """(serif, bold, italic) inferred from a PyMuPDF span's flags + font name. This is the
+    authoritative weight/slant for that span — the frontend can only guess from the pdf.js font NAME
+    (a loadedName like 'g_d0_f1' that hides the weight), so a bold heading on a standard,
+    non-embedded font (e.g. 'Helvetica-Bold') would otherwise come back regular. PyMuPDF span flag
+    bits: 1=superscript, 2=italic, 4=serifed, 8=monospaced, 16=bold; the font name is a second
+    signal for fonts whose flags don't set the bits."""
+    if not span:
+        return (False, False, False)
+    flags = int(span.get('flags', 0) or 0)
+    nm = (span.get('font', '') or '').lower()
+    serif = bool(flags & 4) or any(k in nm for k in
+                                   ('times', 'serif', 'georgia', 'garamond', 'roman', 'minion', 'charter'))
+    bold = bool(flags & 16) or any(k in nm for k in ('bold', 'black', 'heavy', 'semibold'))
+    italic = bool(flags & 2) or ('italic' in nm) or ('oblique' in nm)
+    return (serif, bold, italic)
+
+
+def _line_uniform_style(page, bbox):
+    """(serif, bold, italic) where each is True only when EVERY non-blank text span overlapping the
+    edited line's bbox has that attribute — i.e. the line is uniformly styled. This recovers a weight
+    the frontend's name-based guess missed (a bold heading whose font is the standard, non-embedded
+    'Helvetica-Bold') WITHOUT forcing a genuinely mixed line (a bold label + a regular body) bold.
+    Must be read BEFORE redaction removes the spans."""
+    try:
+        rect = fitz.Rect(bbox)
+    except Exception:
+        return (False, False, False)
+    spans = []
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if not span.get("text", "").strip():
+                    continue
+                if fitz.Rect(span["bbox"]).intersects(rect):
+                    spans.append(span)
+    if not spans:
+        return (False, False, False)
+    serif = all(_span_style(s)[0] for s in spans)
+    bold = all(_span_style(s)[1] for s in spans)
+    italic = all(_span_style(s)[2] for s in spans)
+    return (serif, bold, italic)
+
+
 def _font_xrefs_for(page, basefont):
     """All embedded-font xrefs whose basefont matches `basefont`, comparing with the 6-letter
     subset prefix stripped (PyMuPDF reports a span's font as 'Calibri' but get_fonts lists it as
@@ -212,6 +289,16 @@ def _font_xrefs_for(page, basefont):
             matches.append((simple, f[0]))
     matches.sort()
     return [x[1] for x in matches]
+
+
+def _font_is_embedded(page, basefont):
+    """Whether `basefont` is embedded on the page (carries a font-file stream) rather than a
+    name-only standard reference. PyMuPDF reports a non-embedded standard font with ext 'n/a'."""
+    target = (basefont or '').split('+')[-1].lower()
+    for f in page.get_fonts(full=True):     # (xref, ext, type, basefont, refname, encoding)
+        if (f[3] or '').split('+')[-1].lower() == target and (f[1] or '') not in ('', 'n/a'):
+            return True
+    return False
 
 
 def _embedded_xrefs(page, basefont):
@@ -277,9 +364,12 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
     (charset None). Drawing per-character from this keeps the document's look and never drops a glyph
     — even on a line that mixes fonts (a bullet in one font, the body in another).
 
-    The desired weight/slant come from the LINE-level flags the frontend computed (the line's
-    dominant style), NOT the matched span — which is often the bullet and may be a different weight;
-    using it would force the whole edited line bold/italic."""
+    The desired weight/slant start from the LINE-level flags the frontend computed (its dominant
+    style), then — for a replace edit — are unioned with the original line's UNIFORM style
+    (`edit['_lineStyle']`, captured from PyMuPDF before redaction). The frontend can only guess weight
+    from the pdf.js font name and misses it for standard fonts (a bold Helvetica heading came back
+    regular); the uniform-style signal catches that while leaving a genuinely mixed line (bold label
+    + regular body) to the frontend's dominant flag. Union only adds — never un-bolds a correct line."""
     span = edit.get('_span')
     size = float(edit.get('fontSize', 12) or 12)
     if span and span.get('size'):
@@ -289,6 +379,12 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
     # one "Add text" box); otherwise the box-level flags apply.
     want_bold = bool(style_override[0]) if style_override else bool(edit.get('bold'))
     want_italic = bool(style_override[1]) if style_override else bool(edit.get('italic'))
+    if not style_override:                        # replace edit: recover a uniformly-styled line
+        ls = edit.get('_lineStyle')
+        if ls:
+            want_serif = want_serif or bool(ls[0])
+            want_bold = want_bold or bool(ls[1])
+            want_italic = want_italic or bool(ls[2])
     options = []
     if span:
         xref_base = {f[0]: (f[3] or '') for f in page.get_fonts(full=True)}   # xref -> basefont
@@ -302,6 +398,22 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
                 is_italic = ('italic' in nm) or ('oblique' in nm)
                 style_ok = (is_bold == want_bold) and (is_italic == want_italic)
                 options.append((dict(fontname=ent[0]), ent[1], charset, style_ok))
+    # Level 2: when the original font is a NON-embedded standard font (Helvetica/Times/Courier),
+    # re-emit it under its OWN name for the WinAnsi characters it can draw — so a bold Helvetica
+    # heading saves back as Helvetica-Bold, not a substitute Arial. Placed FIRST so it beats both a
+    # borrowed page font and the TTF catch-all; characters outside WinAnsi still fall through to
+    # those. Skipped when the font is embedded (level 1 reuses the real outlines instead).
+    if span and not _font_is_embedded(page, span.get('font', '')):
+        fam = _standard_family(span.get('font', ''))
+        if fam:
+            builtin = _BASE14_BY_FAMILY[fam][(bool(want_bold), bool(want_italic))]
+            try:
+                b14 = fitz.Font(fontname=builtin)
+                b14_charset = {ch for ch in set(text) if _base14_draws(ch)}
+                if b14_charset:
+                    options.insert(0, (dict(fontname=builtin), b14, b14_charset, True))
+            except Exception:
+                pass
     kw = _edit_font_kwargs(want_serif, want_bold, want_italic)   # full fallback (covers Latin)
     fb = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
     options.append((kw, fb, None, True))          # charset None == catch-all
@@ -491,6 +603,12 @@ def edit_pdf():
                     continue
                 edit['_span'] = _find_original_span(
                     page, float(edit.get('x', 0)), float(edit.get('baseline', 0)))
+                # The line's uniform weight/slant (authoritative PyMuPDF flags) recovers a bold/italic
+                # the frontend's name-based guess missed; mixed lines stay on the frontend's flag.
+                x = float(edit.get('x', 0))
+                edit['_lineStyle'] = _line_uniform_style(page, (
+                    x, float(edit.get('top', 0)),
+                    float(edit.get('right', x)), float(edit.get('bottom', 0))))
 
             # 1) Redact the original text of REPLACE edits, then re-insert the new text.
             #    Insert-only edits (added text / signatures) set redact=False.
