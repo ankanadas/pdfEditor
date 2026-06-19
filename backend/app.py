@@ -192,6 +192,13 @@ def _find_original_span(page, x, baseline):
     return best if best_d < 25 else None
 
 
+def _span_color(span):
+    """A span's fill colour as an (r, g, b) tuple in 0..1, so a replacement keeps the original
+    text colour (e.g. white text on a dark page). PyMuPDF stores it as an sRGB int; default black."""
+    c = int((span or {}).get('color', 0) or 0)
+    return ((c >> 16 & 255) / 255.0, (c >> 8 & 255) / 255.0, (c & 255) / 255.0)
+
+
 def _font_xrefs_for(page, basefont):
     """All embedded-font xrefs whose basefont matches `basefont`, comparing with the 6-letter
     subset prefix stripped (PyMuPDF reports a span's font as 'Calibri' but get_fonts lists it as
@@ -353,7 +360,7 @@ def _runs_to_segments(runs, base_size, base_bold, base_italic):
     return out if any(parts for parts in out) else None
 
 
-def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None):
+def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None, color=(0, 0, 0)):
     """Draw `text` at (x, baseline), switching font per run so every character uses a font that
     contains it. Groups consecutive same-font characters, shrinks to fit `avail` width, then
     inserts each run, advancing x by its measured width. `morph` (a (fixpoint, Matrix) pair)
@@ -380,7 +387,7 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None)
     extra = {'morph': morph} if morph else {}
     for opt, s in runs:
         kwargs, font = opt
-        page.insert_text(fitz.Point(cx, baseline), s, fontsize=size, color=(0, 0, 0), **kwargs, **extra)
+        page.insert_text(fitz.Point(cx, baseline), s, fontsize=size, color=color, **kwargs, **extra)
         cx += font.text_length(s, fontsize=size)
     return cx - x          # total advance width (lets a caller chain segments on one line)
 
@@ -551,6 +558,9 @@ def edit_pdf():
                     # look even when it mixes fonts. Added text may be multiple lines: draw each
                     # at baseline + i*lineHeight.
                     options, size = _resolve_fonts(doc, page, edit, '\n'.join(text_lines), font_cache, charset_cache)
+                    # Re-insert in the ORIGINAL text colour (e.g. white on a dark page); the span we
+                    # captured before redaction carries it. Added text / signatures stay black.
+                    text_color = _span_color(edit.get('_span')) if edit.get('redact', True) else (0, 0, 0)
                     # Rotated "Add text": rotate the whole block about its origin (x, baseline).
                     # CSS rotates clockwise; fitz.Matrix(-deg) matches that in the page's y-down space.
                     rotation = float(edit.get('rotation', 0) or 0)
@@ -586,13 +596,13 @@ def edit_pdf():
                                 if seg_text:
                                     cx += _insert_text_runs(page, cx, y, seg_text, seg_size,
                                                             opts_for(seg_bold, seg_italic),
-                                                            pw - cx - 4, morph)
+                                                            pw - cx - 4, morph, color=text_color)
                             prev_max = this_max
                     else:
                         line_h = size * 1.2
                         for i, ln in enumerate(text_lines):
                             if ln.strip():
-                                _insert_text_runs(page, x, baseline + i * line_h, ln, size, options, pw - x - 4, morph)
+                                _insert_text_runs(page, x, baseline + i * line_h, ln, size, options, pw - x - 4, morph, color=text_color)
                 # Note: never log the document's text content (keeps the app traceless).
                 print(f"  page {page_num}: [{style}] text written at ({x:.1f}, {baseline:.1f})")
 

@@ -558,7 +558,11 @@ class PDFEditorApp {
       div.style.fontFamily = line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily;
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
-      div.style.color = '#000';
+      // Readable preview text colour: light text on a dark line, dark on a light one (the saved
+      // file uses the exact original colour; this just keeps the editing box legible on dark pages).
+      const bg = line.bgColor;
+      const lum = bg ? (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) : 255;
+      div.style.color = lum < 140 ? '#fff' : '#000';
       div.style.padding = '0';
       div.style.margin = '0';
       div.style.border = '1px solid transparent';

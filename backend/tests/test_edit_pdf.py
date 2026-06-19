@@ -168,6 +168,23 @@ class SyntheticTests(unittest.TestCase):
         self.assertTrue(abs(r - 51) < 30 and abs(g - 102) < 30 and abs(b - 229) < 30,
                         f"background not preserved, sampled {(r, g, b)} (expected ~blue)")
 
+    def test_text_colour_preserved_on_replace(self):
+        # White text on a dark page must STAY white after a replace — the old code re-inserted
+        # every edit in black, which made the white "RYZE AI" headline vanish on its dark page.
+        doc = fitz.open()
+        pg = doc.new_page(width=320, height=120)
+        pg.draw_rect(pg.rect, color=(0.06, 0.05, 0.04), fill=(0.06, 0.05, 0.04))
+        pg.insert_text(fitz.Point(30, 60), "RYZE", fontsize=28, color=(1, 1, 1))
+        edit = {"pageIndex": 0, "x": 30, "right": 120, "top": 38, "bottom": 64,
+                "baseline": 60, "fontSize": 28, "newText": "RYZE2"}
+        res = fitz.open(stream=post_edit(doc.tobytes(), [edit]), filetype="pdf")
+        span = find_span(res, "RYZE2")
+        self.assertIsNotNone(span, "replaced text not found")
+        c = span.get("color", 0)
+        r, g, b = (c >> 16 & 255, c >> 8 & 255, c & 255)
+        self.assertTrue(r > 220 and g > 220 and b > 220,
+                        f"text colour not preserved, span colour {(r, g, b)} (expected ~white)")
+
     def test_erase_still_whitens(self):
         # The erase tool (kind='erase') must still paint white.
         doc = fitz.open()
