@@ -1,0 +1,26 @@
+Quick PDF Editor
+Copyright (C) 2026 Ankana Das
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. The full license text is in the LICENSE file.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+
+COMMERCIAL LICENSING
+====================
+The AGPL-3.0 requires that anyone who conveys this software, or runs a modified
+version of it to provide a service over a network, must make their complete
+corresponding source code available to users under the same AGPL-3.0 terms.
+
+If you want to use this code under different terms -- for example, in a
+closed-source or commercial product, without the AGPL's source-disclosure
+obligations -- you must first obtain a separate commercial license from the
+copyright holder. Copying or reuse outside the AGPL-3.0 terms is not permitted
+without that written permission.
+
+For commercial licensing enquiries, contact: support@quickpdfeditor.com
