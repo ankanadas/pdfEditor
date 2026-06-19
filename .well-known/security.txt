@@ -1,0 +1,6 @@
+# Security policy for quickpdfeditor.com (RFC 9116)
+# If you believe you have found a security vulnerability, please email us.
+Contact: mailto:support@quickpdfeditor.com
+Expires: 2027-06-16T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://quickpdfeditor.com/.well-known/security.txt

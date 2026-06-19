@@ -3,16 +3,60 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Free PDF Editor — Edit &amp; Sign PDFs in Your Browser, No Signup</title>
-  <meta name="description" content="Free PDF editor — edit text and sign PDFs right in your browser. No sign-up, no charges, and your file never leaves your device." />
+  <title>Free PDF Editor — Edit, Sign &amp; Fill PDFs Online | Quick PDF Editor</title>
+  <meta name="description" content="Free online PDF editor — edit text, sign, stamp and reorder pages right in your browser. No sign-up, no subscriptions, no ads, and your files are never stored." />
+  <meta name="keywords" content="free pdf editor, edit pdf online, sign pdf, fill pdf form, pdf editor no sign up, online pdf editor" />
+  <meta name="author" content="Quick PDF Editor" />
+  <meta name="theme-color" content="#6d5efc" />
   <link rel="canonical" href="https://quickpdfeditor.com/" />
+  <meta name="robots" content="index, follow" />
   <meta name="google-site-verification" content="y1V-GZtScvUVhoCN5ZD2h_mxjS4QseHyGwXCaAQwx9c" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
   <!-- Open Graph / social preview -->
   <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Quick PDF Editor" />
   <meta property="og:url" content="https://quickpdfeditor.com/" />
-  <meta property="og:title" content="Free PDF Editor — Edit &amp; Sign PDFs in Your Browser" />
-  <meta property="og:description" content="Edit text and sign PDFs free, right in your browser. No sign-up, no charges, your file never leaves your device." />
+  <meta property="og:title" content="Free PDF Editor — Edit, Sign &amp; Fill PDFs in Your Browser" />
+  <meta property="og:description" content="Edit text, sign, stamp and reorder PDF pages free, right in your browser. No sign-up, no subscriptions, and your files are never stored." />
+  <meta property="og:image" content="https://quickpdfeditor.com/og-image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Quick PDF Editor — free online PDF editor" />
   <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Free PDF Editor — Edit &amp; Sign PDFs in Your Browser" />
+  <meta name="twitter:description" content="Edit text, sign, stamp and reorder PDF pages free in your browser. No sign-up, no subscriptions, files never stored." />
+  <meta name="twitter:image" content="https://quickpdfeditor.com/og-image.png" />
+  <!-- Structured data: describes the app to search engines -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "Quick PDF Editor",
+    "alternateName": "Free PDF Editor",
+    "url": "https://quickpdfeditor.com/",
+    "description": "A free, browser-based PDF editor. Edit text, sign, stamp, erase and reorder pages with no account, no subscriptions, and no permanent file storage.",
+    "applicationCategory": "BusinessApplication",
+    "operatingSystem": "Any (web browser)",
+    "browserRequirements": "Requires a modern web browser with JavaScript enabled.",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "featureList": [
+      "Edit existing PDF text in place",
+      "Add new text with font, size, bold and italic",
+      "Sign by drawing, typing or uploading a signature",
+      "Erase existing content",
+      "Stamp pages (Approved, Rejected, Final, Draft, Copy)",
+      "Reorder, delete and insert pages"
+    ],
+    "isAccessibleForFree": true,
+    "publisher": {
+      "@type": "Organization",
+      "name": "Quick PDF Editor",
+      "url": "https://quickpdfeditor.com/",
+      "email": "support@quickpdfeditor.com"
+    }
+  }
+  </script>
   <!-- High-fidelity edit backend (PyMuPDF). On localhost we talk to a local backend so dev
        changes are testable; the deployed site uses the hosted backend on Render. If the
        backend is unreachable, the editor falls back to fully client-side saving. -->
@@ -27,7 +71,7 @@
       --brand: #6d5efc;
       --brand-dark: #5848e0;
       --ink: #1f2330;
-      --muted: #6b7280;
+      --muted: #5b6270;
       --line: #e7e8ef;
       --bg: #f4f5fa;
       --stage: #eceef5;
@@ -64,7 +108,7 @@
       color: #fff; display: grid; place-items: center; font-size: 16px;
     }
     .tagline {
-      color: var(--brand); font-weight: 700; font-size: 13.5px; letter-spacing: .2px;
+      color: var(--brand-dark); font-weight: 700; font-size: 13.5px; letter-spacing: .2px;
       padding-left: 14px; margin-left: 14px; border-left: 1px solid var(--line); white-space: nowrap;
     }
     .appbar .spacer { flex: 1; }
@@ -76,7 +120,7 @@
       padding: 5px 10px; border-radius: 999px; font-weight: 600;
     }
     .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: #9aa0ab; }
-    .pill { color: #6b7280; background: #f4f5fa; border-color: var(--line); }
+    .pill { color: var(--muted); background: #f4f5fa; border-color: var(--line); }
     .pill.privacy { color: #15803d; background: #e9f9ef; border-color: #cdeed8; }
     .pill.ok { color: #15803d; background: #e9f9ef; border-color: #cdeed8; }
     .pill.ok .dot { background: #16a34a; }
@@ -490,9 +534,45 @@
     .pages-foot #insertPos { flex: 1; min-width: 0; }
     .pages-foot #insertBlankBtn { justify-content: center; }
     .pages-empty { grid-column: 1 / -1; text-align: center; color: var(--muted); font-size: 13px; padding: 30px 0; }
+
+    /* ---------- Skip link (keyboard / screen-reader users) ---------- */
+    .skip-link {
+      position: absolute; left: -9999px; top: 0; z-index: 200;
+      background: var(--brand-dark); color: #fff; padding: 10px 16px;
+      border-radius: 0 0 8px 0; font-weight: 700; text-decoration: none;
+    }
+    .skip-link:focus { left: 0; }
+
+    /* ---------- Homepage trust badges (shown on the landing hero) ---------- */
+    .trust-badges {
+      display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 10px;
+      margin: 0 0 22px;
+    }
+    .trust-badges .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12.5px; font-weight: 600; color: #15803d;
+      background: #e9f9ef; border: 1px solid #cdeed8;
+      padding: 6px 12px; border-radius: 999px; white-space: nowrap;
+    }
+    .trust-badges .badge svg { width: 14px; height: 14px; flex: 0 0 auto; }
+
+    /* ---------- Slim site footer (visible on the editor, fits the app shell) ---------- */
+    .appfoot {
+      flex: 0 0 auto; background: #fff; border-top: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px;
+      padding: 9px 18px; font-size: 12.5px;
+    }
+    .appfoot nav { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+    .appfoot nav a { color: var(--ink); text-decoration: none; font-weight: 600; }
+    .appfoot nav a:hover { color: var(--brand-dark); text-decoration: underline; }
+    .appfoot .foot-spacer { flex: 1; }
+    .appfoot .foot-note { color: var(--muted); }
+    @media (max-width: 720px) { .appfoot .foot-note { display: none; } }
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to editor</a>
+
   <!-- hidden native input; triggered by the Upload / Open buttons and drag-drop -->
   <input type="file" id="fileInput" accept=".pdf" hidden />
 
@@ -540,7 +620,7 @@
     </aside>
 
     <!-- Main: toolbar + stage -->
-    <div class="main">
+    <div class="main" id="main-content" role="main" tabindex="-1">
       <div class="toolbar">
         <label class="btn" for="fileInput" title="Open a PDF">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
@@ -585,12 +665,12 @@
         </div>
         <div class="ctx ctx-text">
           <span class="ab-label">Add text</span>
-          <select id="addFont" class="field" title="Font">
+          <select id="addFont" class="field" title="Font" aria-label="Font family for added text">
             <option value="sans">Sans</option>
             <option value="serif">Serif</option>
             <option value="mono">Mono</option>
           </select>
-          <input type="number" id="addSize" class="field" min="4" max="200" step="1" value="14" title="Font size (applies to the selected text)" />
+          <input type="number" id="addSize" class="field" min="4" max="200" step="1" value="14" title="Font size (applies to the selected text)" aria-label="Font size in points" />
           <button class="ab-toggle" id="addBold" type="button" title="Bold (applies to the selected text)"><b>B</b></button>
           <button class="ab-toggle" id="addItalic" type="button" title="Italic (applies to the selected text)"><i>I</i></button>
           <span class="ab-hint">→ click the page &amp; type · Enter = new line · select text, then set size / B / I here</span>
@@ -623,7 +703,14 @@
         <!-- Upload / drop zone (hidden once a PDF is loaded) -->
         <div class="landing">
           <h1>Edit. Sign. Done.</h1>
-          <p class="sub">A simple, private PDF editor — your file never leaves your machine.</p>
+          <p class="sub">A simple, private PDF editor — no account, no subscriptions, and your files are never stored.</p>
+          <div class="trust-badges" aria-label="Why you can trust Quick PDF Editor">
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>No account required</span>
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Free to use</span>
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>No subscriptions</span>
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>No permanent file storage</span>
+            <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Secure HTTPS connection</span>
+          </div>
           <label class="dropzone" id="dropzone" for="fileInput">
             <div class="art">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6"/><path d="M12 18v-6"/><path d="m9 15 3-3 3 3"/></svg>
@@ -640,6 +727,19 @@
       </div>
     </div>
   </div>
+
+  <!-- Slim site footer: links + trust note, visible on the editor and every page -->
+  <footer class="appfoot">
+    <nav aria-label="Footer">
+      <a href="/about">About</a>
+      <a href="/privacy">Privacy Policy</a>
+      <a href="/terms">Terms of Service</a>
+      <a href="/contact">Contact</a>
+    </nav>
+    <span class="foot-spacer"></span>
+    <span class="foot-note">Secure HTTPS · No account · No subscriptions · Files are not stored</span>
+    <span class="foot-note">© 2026 Quick PDF Editor</span>
+  </footer>
 
   <!-- Help drawer -->
   <div id="instructions">
@@ -699,7 +799,7 @@
       </div>
 
       <div class="sign-panel" data-panel="type" hidden>
-        <input type="text" id="signTypeInput" class="field" placeholder="Type your name" />
+        <input type="text" id="signTypeInput" class="field" placeholder="Type your name" aria-label="Type your signature" />
         <div id="signFontList" class="sign-fonts"></div>
       </div>
 
@@ -707,7 +807,7 @@
         <label class="sign-image-drop" for="signImageInput">
           <input type="file" id="signImageInput" accept="image/*" hidden />
           <span id="signImagePrompt">Click to choose a signature image (PNG with transparent background works best)</span>
-          <img id="signImagePreview" alt="" hidden />
+          <img id="signImagePreview" alt="Signature image preview" hidden />
         </label>
       </div>
 
