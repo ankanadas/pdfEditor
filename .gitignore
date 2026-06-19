@@ -9,3 +9,6 @@ coverage/
 backend/venv/
 __pycache__/
 *.pyc
+
+# Test fixtures are real PDFs with personal data — keep them LOCAL only, never commit.
+backend/tests/fixtures/*.pdf
