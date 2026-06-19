@@ -549,7 +549,13 @@ class PDFEditorApp {
       div.style.height = (lineBoxPx + 2) + 'px';
       div.style.fontSize = fontSizePx + 'px';
       div.style.lineHeight = lineBoxPx + 'px';
-      div.style.fontFamily = line.serif ? '"Times New Roman", Times, serif' : 'Arial, Helvetica, sans-serif';
+      // Live font match: reuse the PDF's OWN embedded font. While rendering this page PDF.js
+      // registers each embedded font as a web font under its loadedName (e.g. "g_d0_f1"), which
+      // is what line.fontName holds — so we can style the editable box with it directly. We keep
+      // a matching system family (Times/Arial) as the fallback, so glyphs the (subset) font lacks
+      // — and Type 3 fonts PDF.js can't expose — still render instead of showing missing boxes.
+      const fallbackFamily = line.serif ? '"Times New Roman", Times, serif' : 'Arial, Helvetica, sans-serif';
+      div.style.fontFamily = line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily;
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
       div.style.color = '#000';
