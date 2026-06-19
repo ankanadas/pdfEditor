@@ -1961,6 +1961,11 @@ class PDFEditorApp {
         // save re-applies all edits to the pristine original, so staying put stays correct.
         this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
       }
+
+      // After a successful save, refresh the page so the user starts from a clean slate and
+      // can't accidentally re-edit a just-saved file in a stale state. The short delay lets the
+      // success toast show and the download begin first.
+      setTimeout(() => window.location.reload(), 1600);
     } catch (error) {
       console.error('Save error:', error);
       this.showStatus(`Failed to save: ${error.message}`, 'error');
