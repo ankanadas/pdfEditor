@@ -579,6 +579,87 @@ def saved_spans(runs, width=460, height=260, **overrides):
     return out
 
 
+class ToolbarStyleTests(unittest.TestCase):
+    """Floating-toolbar styling that the save pipeline must honour: colour, opacity, underline,
+    manual alignment, and a font-family override. All are optional fields on an edit."""
+
+    def _doc_with(self, text, **insert):
+        doc = fitz.open()
+        pg = doc.new_page(width=400, height=200)
+        pg.insert_text((40, 80), text, fontsize=14, **insert)
+        return doc
+
+    def test_added_text_custom_colour(self):
+        src = self._doc_with("x").tobytes()
+        edit = {"pageIndex": 0, "redact": False, "style": "text", "x": 40, "baseline": 140,
+                "fontSize": 18, "newText": "REDTEXT", "color": [255, 0, 0]}
+        res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
+        s = find_span(res, "REDTEXT")
+        self.assertIsNotNone(s, "added coloured text missing")
+        r, g, b = (s["color"] >> 16) & 255, (s["color"] >> 8) & 255, s["color"] & 255
+        self.assertTrue(r > 200 and g < 70 and b < 70, f"expected red, got rgb=({r},{g},{b})")
+
+    def test_replace_text_custom_colour(self):
+        src = self._doc_with("hello world").tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "hello")
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "blue text", color=[0, 0, 255])]),
+                        filetype="pdf")
+        s = find_span(res, "blue")
+        self.assertIsNotNone(s)
+        self.assertTrue((s["color"] & 255) > 200 and ((s["color"] >> 16) & 255) < 70,
+                        f"expected blue, got {s['color']:06x}")
+
+    def test_added_text_opacity_is_partial(self):
+        src = self._doc_with("x").tobytes()
+        edit = {"pageIndex": 0, "redact": False, "style": "text", "x": 40, "baseline": 140,
+                "fontSize": 40, "newText": "FADE", "opacity": 0.5}
+        res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
+        self.assertIsNotNone(find_span(res, "FADE"), "faded text missing")
+        # Black text at 0.5 opacity on white renders ~grey: the darkest ink must NOT be near-black.
+        pix = res[0].get_pixmap(matrix=fitz.Matrix(3, 3), clip=fitz.Rect(35, 95, 160, 150))
+        mn = min(pix.samples[i] for i in range(0, len(pix.samples), pix.n))
+        self.assertTrue(mn > 40, f"opacity not applied — darkest pixel {mn} (≈0 means fully opaque)")
+
+    def test_added_text_underline_draws_a_line(self):
+        src = self._doc_with("x").tobytes()
+        edit = {"pageIndex": 0, "redact": False, "style": "text", "x": 40, "baseline": 140,
+                "fontSize": 20, "newText": "UNDER",
+                "runs": [[{"text": "UNDER", "size": 20, "underline": True}]]}
+        res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
+        lines = [it for d in res[0].get_drawings() for it in d["items"] if it[0] == "l"]
+        self.assertTrue(any(abs(it[1].y - it[2].y) < 0.6 and it[1].y > 135 for it in lines),
+                        "no horizontal underline stroke drawn under the text")
+
+    def test_replace_align_right_override(self):
+        src = self._doc_with("a fairly long original line").tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "fairly")
+        x1 = round(span["bbox"][2], 1)
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "Short", align="right", right=x1)]),
+                        filetype="pdf")
+        s = find_span(res, "Short")
+        self.assertIsNotNone(s)
+        self.assertAlmostEqual(s["bbox"][2], x1, delta=6,
+                               msg=f"right-align override lost: right edge {s['bbox'][2]:.1f} vs {x1}")
+
+    def test_replace_font_family_override_to_serif(self):
+        src = self._doc_with("sans original", fontname="helv").tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "sans")
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "now serif", fontFamily="serif")]),
+                        filetype="pdf")
+        s = find_span(res, "serif")
+        self.assertIsNotNone(s)
+        self.assertIn("Times", s["font"], f"family override didn't switch to a serif font: {s['font']}")
+
+    def test_added_text_mono_family(self):
+        src = self._doc_with("x").tobytes()
+        edit = {"pageIndex": 0, "redact": False, "style": "text", "x": 40, "baseline": 140,
+                "fontSize": 16, "newText": "mono12", "fontFamily": "mono"}
+        res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
+        s = find_span(res, "mono12")
+        self.assertIsNotNone(s)
+        self.assertIn("Cour", s["font"], f"mono family not applied: {s['font']}")
+
+
 class MixedSizeSaveTests(unittest.TestCase):
 
     def test_small_then_large_run_keep_their_sizes(self):

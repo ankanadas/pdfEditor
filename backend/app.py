@@ -232,6 +232,35 @@ def _span_color(span):
     return ((c >> 16 & 255) / 255.0, (c >> 8 & 255) / 255.0, (c & 255) / 255.0)
 
 
+def _parse_color(c):
+    """Frontend colour -> (r, g, b) floats 0..1, or None when unset. Accepts an [r,g,b] list
+    (0-255 or already 0-1) or a '#rrggbb' string. Used by the floating toolbar's colour control."""
+    if c is None:
+        return None
+    try:
+        if isinstance(c, str):
+            s = c.strip().lstrip('#')
+            if len(s) == 6:
+                return (int(s[0:2], 16) / 255.0, int(s[2:4], 16) / 255.0, int(s[4:6], 16) / 255.0)
+            return None
+        if isinstance(c, (list, tuple)) and len(c) >= 3:
+            r, g, b = float(c[0]), float(c[1]), float(c[2])
+            if max(r, g, b) > 1.0001:                    # 0-255 ints -> 0-1
+                return (r / 255.0, g / 255.0, b / 255.0)
+            return (r, g, b)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _clamp_opacity(v):
+    """Frontend opacity -> float in [0, 1]; 1.0 (fully opaque) when unset/invalid."""
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def _span_style(span):
     """(serif, bold, italic) inferred from a PyMuPDF span's flags + font name. This is the
     authoritative weight/slant for that span — the frontend can only guess from the pdf.js font NAME
@@ -422,17 +451,23 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
     # heading saves back as Helvetica-Bold, not a substitute Arial. Placed FIRST so it beats both a
     # borrowed page font and the TTF catch-all; characters outside WinAnsi still fall through to
     # those. Skipped when the font is embedded (level 1 reuses the real outlines instead).
-    if span and not _font_is_embedded(page, span.get('font', '')):
+    # An explicit toolbar "font family" override (sans/serif/mono) re-emits the text in that Base-14
+    # family — for a replace edit on ANY original font (even embedded) AND for added text (so the Add
+    # font select, incl. mono, is honoured). Placed first so it wins. Without an override, the original
+    # re-emit logic still applies to a non-embedded standard span.
+    fam_override = edit.get('fontFamily') if (edit and edit.get('fontFamily') in _BASE14_BY_FAMILY) else None
+    fam = fam_override
+    if fam is None and span and not _font_is_embedded(page, span.get('font', '')):
         fam = _standard_family(span.get('font', ''))
-        if fam:
-            builtin = _BASE14_BY_FAMILY[fam][(bool(want_bold), bool(want_italic))]
-            try:
-                b14 = fitz.Font(fontname=builtin)
-                b14_charset = {ch for ch in set(text) if _base14_draws(ch)}
-                if b14_charset:
-                    options.insert(0, (dict(fontname=builtin), b14, b14_charset, True))
-            except Exception:
-                pass
+    if fam:
+        builtin = _BASE14_BY_FAMILY[fam][(bool(want_bold), bool(want_italic))]
+        try:
+            b14 = fitz.Font(fontname=builtin)
+            b14_charset = {ch for ch in set(text) if _base14_draws(ch)}
+            if b14_charset:
+                options.insert(0, (dict(fontname=builtin), b14, b14_charset, True))
+        except Exception:
+            pass
     kw = _edit_font_kwargs(want_serif, want_bold, want_italic)   # full fallback (covers Latin)
     fb = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
     options.append((kw, fb, None, True))          # charset None == catch-all
@@ -481,9 +516,9 @@ def _clean_text(s):
 
 
 def _runs_to_segments(runs, base_size, base_bold, base_italic):
-    """Turn the frontend per-run style model (lines -> [{text, size, bold, italic}]) into cleaned
-    [[(text, size, bold, italic), ...], ...]. Returns None when there are no runs, so the caller
-    uses the plain single-style path."""
+    """Turn the frontend per-run style model (lines -> [{text, size, bold, italic, underline, color}])
+    into cleaned [[(text, size, bold, italic, underline, color), ...], ...]. `color` is (r,g,b) 0..1 or
+    None. Returns None when there are no runs, so the caller uses the plain single-style path."""
     if not runs:
         return None
     out = []
@@ -499,7 +534,9 @@ def _runs_to_segments(runs, base_size, base_bold, base_italic):
                 sz = base_size
             b = bool(r.get('bold')) if 'bold' in r else base_bold
             it = bool(r.get('italic')) if 'italic' in r else base_italic
-            parts.append((t, max(4.0, min(400.0, sz)), b, it))
+            ul = bool(r.get('underline'))
+            col = _parse_color(r.get('color'))
+            parts.append((t, max(4.0, min(400.0, sz)), b, it, ul, col))
         out.append(parts)
     return out if any(parts for parts in out) else None
 
@@ -534,13 +571,16 @@ def _detect_align(page, span):
     return 'left'
 
 
-def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None, color=(0, 0, 0), anchor=None):
+def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None, color=(0, 0, 0),
+                      anchor=None, opacity=1.0, underline=False, measure_only=False):
     """Draw `text` at (x, baseline), switching font per run so every character uses a font that
     contains it. Groups consecutive same-font characters, shrinks to fit `avail` width, then
     inserts each run, advancing x by its measured width. `morph` (a (fixpoint, Matrix) pair)
     rotates the drawn text about a pivot — used for rotated "Add text" boxes. `anchor`
     (align, box_left, box_right) re-anchors a right-/centre-aligned replacement so a shorter/longer
-    edit keeps the line's alignment instead of always starting at the left."""
+    edit keeps the line's alignment instead of always starting at the left. `opacity` (0..1) and
+    `underline` come from the floating toolbar. `measure_only` returns the drawn width without
+    drawing (used to lay out a multi-line added-text box for alignment)."""
     runs, cur, cur_opt = [], [], None
     for ch in text:
         # Keep a space within the current run only when that run's font can actually draw one (most
@@ -562,6 +602,8 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None,
     if total > avail > 8:
         size = max(4.0, size * avail / total)
         total = sum(opt[1].text_length(s, fontsize=size) for opt, s in runs)   # after shrink
+    if measure_only:
+        return total
 
     cx = x
     if anchor:
@@ -572,10 +614,23 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None,
             cx = max(box_left, (box_left + box_right) / 2 - total / 2)
     start = cx
     extra = {'morph': morph} if morph else {}
+    if opacity is not None and opacity < 1.0:
+        extra['fill_opacity'] = opacity
     for opt, s in runs:
         kwargs, font = opt
         page.insert_text(fitz.Point(cx, baseline), s, fontsize=size, color=color, **kwargs, **extra)
         cx += font.text_length(s, fontsize=size)
+    if underline and cx > start:
+        # A line just below the baseline spanning the drawn text; honour rotation + opacity via Shape.
+        uy = baseline + size * 0.12
+        sh = page.new_shape()
+        sh.draw_line(fitz.Point(start, uy), fitz.Point(cx, uy))
+        fin = dict(color=color, width=max(0.4, size * 0.055),
+                   stroke_opacity=(opacity if opacity is not None else 1.0))
+        if morph:
+            fin['morph'] = morph
+        sh.finish(**fin)
+        sh.commit()
     return cx - start          # drawn advance width (lets a caller chain segments on one line)
 
 
@@ -768,14 +823,20 @@ def edit_pdf():
                     # Re-insert in the ORIGINAL text colour (e.g. white on a dark page); the span we
                     # captured before redaction carries it. Added text / signatures stay black.
                     text_color = _span_color(edit.get('_span')) if edit.get('redact', True) else (0, 0, 0)
+                    # Floating-toolbar styling (all optional; absent == today's behaviour): an explicit
+                    # colour overrides the default, plus box-level opacity, underline and alignment.
+                    box_color = _parse_color(edit.get('color'))
+                    box_opacity = _clamp_opacity(edit.get('opacity'))
+                    box_underline = bool(edit.get('underline'))
+                    box_align = edit.get('align') if edit.get('align') in ('left', 'center', 'right') else None
                     # Rotated "Add text": rotate the whole block about its origin (x, baseline).
                     # CSS rotates clockwise; fitz.Matrix(-deg) matches that in the page's y-down space.
                     rotation = float(edit.get('rotation', 0) or 0)
                     morph = (fitz.Point(x, baseline), fitz.Matrix(-rotation)) if rotation else None
                     # Added text may carry per-run style (edit['runs'] = lines -> [{text,size,bold,
-                    # italic}]). Insert each segment at its own size + weight/slant, chaining x by the
-                    # drawn width; line height follows that line's largest run. Font options are
-                    # resolved per distinct (bold, italic) so each segment gets the right variant.
+                    # italic,underline,color}]). Insert each segment at its own size + weight/slant,
+                    # chaining x by the drawn width; line height follows that line's largest run. Font
+                    # options are resolved per distinct (bold, italic) so each segment gets the right variant.
                     seg_lines = _runs_to_segments(
                         edit.get('runs'), size, bool(edit.get('bold')), bool(edit.get('italic'))
                     ) if is_insert else None
@@ -790,30 +851,47 @@ def edit_pdf():
                                     font_cache, charset_cache, style_override=(b, it))
                             return style_opts[key]
 
+                        # Alignment within an added box: measure each line, then offset shorter lines.
+                        def line_width(parts):
+                            return sum(_insert_text_runs(page, 0, 0, st, ssz, opts_for(sb, si), 1e9,
+                                                         measure_only=True)
+                                       for st, ssz, sb, si, _, _ in parts if st)
+                        widths = [line_width(parts) for parts in seg_lines]
+                        maxw = max(widths, default=0.0)
+
                         y = baseline
                         prev_max = None
-                        for parts in seg_lines:
-                            this_max = max([sz for _, sz, _, _ in parts], default=size)
+                        for idx, parts in enumerate(seg_lines):
+                            this_max = max([sz for _, sz, _, _, _, _ in parts], default=size)
                             # Advance to this line using the LARGER of the two adjacent lines, so a
                             # big line after a small one (or vice-versa) never overlaps.
                             if prev_max is not None:
                                 y += max(prev_max, this_max) * 1.2
-                            cx = x
-                            for seg_text, seg_size, seg_bold, seg_italic in parts:
+                            off = (maxw - widths[idx]) if box_align == 'right' else \
+                                  (maxw - widths[idx]) / 2 if box_align == 'center' else 0.0
+                            cx = x + max(0.0, off)
+                            for seg_text, seg_size, seg_bold, seg_italic, seg_ul, seg_col in parts:
                                 if seg_text:
                                     cx += _insert_text_runs(page, cx, y, seg_text, seg_size,
                                                             opts_for(seg_bold, seg_italic),
-                                                            pw - cx - 4, morph, color=text_color)
+                                                            pw - cx - 4, morph,
+                                                            color=(seg_col or box_color or text_color),
+                                                            opacity=box_opacity,
+                                                            underline=(seg_ul or box_underline))
                             prev_max = this_max
                     else:
-                        # Replace edits re-anchor to keep right/centre alignment; added text is left.
-                        anchor = None if is_insert else (
-                            edit.get('_align', 'left'), x, float(edit.get('right', x)))
+                        # Replace edits re-anchor to keep right/centre alignment (manual override wins
+                        # over the auto-detected _align); added text is left.
+                        align = box_align or (None if is_insert else edit.get('_align', 'left'))
+                        anchor = None if is_insert else ((align or 'left'), x, float(edit.get('right', x)))
+                        line_color = box_color or text_color
+                        line_ul = bool(edit.get('underline'))
                         line_h = size * 1.2
                         for i, ln in enumerate(text_lines):
                             if ln.strip():
                                 _insert_text_runs(page, x, baseline + i * line_h, ln, size, options,
-                                                  pw - x - 4, morph, color=text_color, anchor=anchor)
+                                                  pw - x - 4, morph, color=line_color, anchor=anchor,
+                                                  opacity=box_opacity, underline=line_ul)
                 # Note: never log the document's text content (keeps the app traceless).
                 print(f"  page {page_num}: [{style}] text written at ({x:.1f}, {baseline:.1f})")
 
