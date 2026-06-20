@@ -13,6 +13,8 @@
   <meta name="google-site-verification" content="y1V-GZtScvUVhoCN5ZD2h_mxjS4QseHyGwXCaAQwx9c" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
+  <!-- Dropdown font-preview faces (open-source woff2, lazy: downloaded only when the picker opens) -->
+  <link rel="stylesheet" href="/fonts.css" />
   <!-- Open Graph / social preview -->
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Quick PDF Editor" />
@@ -457,6 +459,39 @@
     .tt-btn.tt-danger:hover { background: #ffe9e9; color: #c0271f; }
     .tt-num { width: 48px; height: 28px; padding: 2px 6px; border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; }
     .tt-sel { height: 28px; padding: 2px 6px; border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; background: #fff; }
+
+    /* ---------- Searchable font picker (floating toolbar) ---------- */
+    .tt-fontpick { position: relative; display: inline-flex; }
+    .tt-font-btn {
+      display: inline-flex; align-items: center; gap: 6px; min-width: 132px; max-width: 168px;
+      cursor: pointer; color: var(--ink); justify-content: space-between; white-space: nowrap;
+    }
+    .tt-font-btn:hover { border-color: var(--brand); }
+    .tt-font-label { overflow: hidden; text-overflow: ellipsis; }
+    .tt-font-caret { font-size: 10px; color: var(--muted); flex: 0 0 auto; }
+    .tt-font-pop {
+      position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; width: 248px;
+      background: #fff; border: 1px solid #d9d4ff; border-radius: 10px; padding: 8px;
+      box-shadow: 0 12px 32px rgba(20, 22, 40, .24);
+    }
+    .tt-font-pop[hidden] { display: none; }
+    .tt-font-search {
+      width: 100%; height: 30px; padding: 4px 9px; margin-bottom: 6px; box-sizing: border-box;
+      border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; outline: none;
+    }
+    .tt-font-search:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(109, 94, 252, .15); }
+    .tt-font-list { max-height: 280px; overflow-y: auto; scrollbar-width: thin; }
+    .tt-font-opt {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 8px; width: 100%;
+      text-align: left; border: none; background: none; cursor: pointer; color: var(--ink);
+      padding: 7px 9px; border-radius: 7px; font-size: 16px; line-height: 1.2;
+    }
+    .tt-font-opt:hover, .tt-font-opt.active { background: #f1eeff; }
+    .tt-font-opt.selected { background: #efecff; }
+    .tt-font-opt .tt-font-tag { font-size: 10px; color: var(--muted); font-family: -apple-system, 'Segoe UI', sans-serif; flex: 0 0 auto; }
+    .tt-font-group { font-size: 10.5px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--muted); padding: 8px 9px 4px; }
+    .tt-font-empty { padding: 12px 9px; font-size: 13px; color: var(--muted); text-align: center; }
+    .tt-font-empty[hidden] { display: none; }
     .tt-color-wrap { position: relative; display: inline-flex; }
     .tt-color-btn { padding: 0 4px; }
     .tt-color-sw { display: inline-block; width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(0,0,0,.25); background: #000; vertical-align: middle; }
@@ -1078,19 +1113,21 @@
     <button class="tt-btn" id="tt-underline" type="button" title="Underline" aria-label="Underline"><u>U</u></button>
     <span class="tt-sep"></span>
     <input type="number" id="tt-size" class="tt-num" min="4" max="200" step="1" title="Font size" aria-label="Font size" />
-    <select id="tt-font" class="tt-sel" title="Font family — pick a font for the selected text" aria-label="Font family">
-      <option value="" hidden>Select a Font Style</option>
-      <option value="arial">Arial</option>
-      <option value="helvetica">Helvetica</option>
-      <option value="times">Times New Roman</option>
-      <option value="georgia">Georgia</option>
-      <option value="verdana">Verdana</option>
-      <option value="courier">Courier New</option>
-      <option value="roboto">Roboto</option>
-      <option value="opensans">Open Sans</option>
-      <option value="montserrat">Montserrat</option>
-      <option value="comicsans">Comic Sans MS</option>
-    </select>
+    <!-- Searchable font picker: one dropdown listing every font (each row previewed in its own face),
+         with a "Recently used" section. #tt-font is a hidden value-holder so the toolbar sync code is
+         unchanged; the list + selection are built by app.js (_initFontPicker). -->
+    <div class="tt-fontpick" id="tt-fontpick">
+      <button type="button" id="tt-font-btn" class="tt-sel tt-font-btn" title="Font family — pick a font for the selected text" aria-label="Font family" aria-haspopup="listbox" aria-expanded="false">
+        <span id="tt-font-label" class="tt-font-label">Select a Font Style</span>
+        <span class="tt-font-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="tt-font-pop" id="tt-font-pop" hidden>
+        <input type="text" id="tt-font-search" class="tt-font-search" placeholder="Search fonts…" title="Search fonts" aria-label="Search fonts" autocomplete="off" spellcheck="false" />
+        <div class="tt-font-list" id="tt-font-list" role="listbox" aria-label="Fonts"></div>
+        <div class="tt-font-empty" id="tt-font-empty" hidden>No fonts match</div>
+      </div>
+      <input type="hidden" id="tt-font" value="" />
+    </div>
     <div class="tt-color-wrap">
       <button class="tt-btn tt-color-btn" id="tt-color-btn" type="button" title="Text color" aria-label="Text color"><span class="tt-color-sw" id="tt-color-sw"></span></button>
       <div class="tt-color-pop" id="tt-color-pop" hidden></div>

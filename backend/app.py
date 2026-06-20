@@ -209,9 +209,12 @@ _F, _T = False, True
 
 
 def _vfiles(stem):
-    """The four bundled weight/slant files for a family: stem-{Regular,Bold,Italic,BoldItalic}.ttf."""
-    return {(_F, _F): [f'{stem}-Regular.ttf'], (_T, _F): [f'{stem}-Bold.ttf'],
-            (_F, _T): [f'{stem}-Italic.ttf'], (_T, _T): [f'{stem}-BoldItalic.ttf']}
+    """The bundled weight/slant files for a family: stem-{Regular,Bold,Italic,BoldItalic}.ttf, each
+    with in-family fallbacks so a family that ships fewer weights (e.g. Pacifico = Regular only, or
+    a code font with no italic) stays in its OWN face rather than dropping to a Base-14 substitute.
+    _toolbar_font_option picks the first candidate that actually exists on disk."""
+    R, B, I, BI = f'{stem}-Regular.ttf', f'{stem}-Bold.ttf', f'{stem}-Italic.ttf', f'{stem}-BoldItalic.ttf'
+    return {(_F, _F): [R], (_T, _F): [B, R], (_F, _T): [I, R], (_T, _T): [BI, B, I, R]}
 
 
 _TOOLBAR_FONTS = {
@@ -225,6 +228,34 @@ _TOOLBAR_FONTS = {
     'roboto':     ('sans',  _vfiles('Roboto')),
     'opensans':   ('sans',  _vfiles('OpenSans')),
     'montserrat': ('sans',  _vfiles('Montserrat')),
+    # --- proprietary names -> open, metric/visual-close substitutes (originals never bundled) ---
+    'calibri':         ('sans',  _vfiles('Carlito')),          # Calibri      -> Carlito (Apache-2.0)
+    'cambria':         ('serif', _vfiles('Caladea')),          # Cambria      -> Caladea (Apache-2.0)
+    'consolas':        ('mono',  _vfiles('Cousine')),          # Consolas     -> Cousine (Apache-2.0; Liberation Mono twin)
+    'tahoma':          ('sans',  _vfiles('Arimo')),            # Tahoma       -> Arimo
+    'trebuchet':       ('sans',  _vfiles('Arimo')),            # Trebuchet MS -> Arimo
+    'garamond':        ('serif', _vfiles('EBGaramond')),       # Garamond     -> EB Garamond (OFL)
+    'baskerville':     ('serif', _vfiles('LibreBaskerville')), # Baskerville  -> Libre Baskerville (OFL)
+    'palatino':        ('serif', _vfiles('NotoSerif')),        # Palatino     -> Noto Serif (OFL)
+    'brushscript':     ('sans',  _vfiles('Pacifico')),         # Brush Script -> Pacifico (OFL)
+    # --- open-source fonts shown under their REAL names ---
+    'inter':           ('sans',  _vfiles('Inter')),
+    'lato':            ('sans',  _vfiles('Lato')),
+    'poppins':         ('sans',  _vfiles('Poppins')),
+    'nunito':          ('sans',  _vfiles('Nunito')),
+    'sourcesans':      ('sans',  _vfiles('SourceSans3')),      # Source Sans Pro -> Source Sans 3
+    'ubuntu':          ('sans',  _vfiles('Ubuntu')),
+    'ptsans':          ('sans',  _vfiles('PTSans')),
+    'merriweather':    ('serif', _vfiles('Merriweather')),
+    'librebaskerville':('serif', _vfiles('LibreBaskerville')),
+    'playfair':        ('serif', _vfiles('PlayfairDisplay')),
+    'notoserif':       ('serif', _vfiles('NotoSerif')),
+    'firacode':        ('mono',  _vfiles('FiraCode')),
+    'jetbrainsmono':   ('mono',  _vfiles('JetBrainsMono')),
+    'sourcecodepro':   ('mono',  _vfiles('SourceCodePro')),
+    'ibmplexmono':     ('mono',  _vfiles('IBMPlexMono')),
+    'pacifico':        ('sans',  _vfiles('Pacifico')),
+    'comicneue':       ('sans',  _vfiles('ComicNeue')),
     # Back-compat keys from the old 3-way picker (and the added-text default 'sans').
     'sans':       ('sans',  _vfiles('Arimo')),
     'serif':      ('serif', _vfiles('Tinos')),
