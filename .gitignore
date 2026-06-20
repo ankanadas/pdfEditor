@@ -16,3 +16,9 @@ backend/tests/fixtures/*.pdf
 
 # Test/sample PDFs are never committed (test-document.pdf is regenerable via create-test-pdf.js).
 *.pdf
+
+# Local-only agentic test harness (Playwright drivers + verifiers + generated fixtures) — never
+# commit, on any branch. The committed jest suite (tests/*.test.js, tests/site/*.test.js) is kept.
+tests/agentic/
+# Any sample/personal PDFs placed under tests/ stay local (also covered by *.pdf above).
+tests/**/*.pdf
