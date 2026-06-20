@@ -1353,9 +1353,7 @@ class PDFEditorApp {
     div.style.fontSize = baseFontPx + 'px';                 // base style for un-spanned (typed) text
     div.style.fontWeight = edit.bold ? 'bold' : 'normal';
     div.style.fontStyle = edit.italic ? 'italic' : 'normal';
-    div.style.fontFamily = edit.fontFamily === 'serif' ? '"Times New Roman",Times,serif'
-      : edit.fontFamily === 'mono' ? '"Courier New",Courier,monospace'
-      : 'Arial,Helvetica,sans-serif';
+    div.style.fontFamily = this._familyCss(edit.fontFamily);   // preview in the chosen face (any catalogue font)
     const boxDefaults = { size: Math.round(edit.fontSize) || 12, bold: !!edit.bold, italic: !!edit.italic };
     // Seed content: from saved runs if present, else one span per line at the box defaults.
     if (edit.runs && edit.runs.length) {
@@ -2285,7 +2283,7 @@ class PDFEditorApp {
     on('tt-italic', 'click', () => this.applyTextStyle('italic', !this._ttStyle().italic));
     on('tt-underline', 'click', () => this.applyTextStyle('underline', !this._ttStyle().underline));
     on('tt-size', 'input', (e) => { const v = parseInt(e.target.value, 10); if (v) this.applyTextStyle('size', v); });
-    on('tt-font', 'change', (e) => { if (e.target.value) this.applyTextStyle('family', e.target.value); });
+    this._initFontPicker();
     this._initColorPalette();
     on('tt-align-left', 'click', () => this.applyTextStyle('align', 'left'));
     on('tt-align-center', 'click', () => this.applyTextStyle('align', 'center'));
@@ -2313,45 +2311,215 @@ class PDFEditorApp {
   _hexToRgb(h) { h = (h || '').replace('#', ''); return [parseInt(h.slice(0, 2), 16) || 0, parseInt(h.slice(2, 4), 16) || 0, parseInt(h.slice(4, 6), 16) || 0]; }
   _rgbCss(c) { return Array.isArray(c) ? `rgb(${c[0]},${c[1]},${c[2]})` : (c || '#000'); }
   _rgbToHex(c) { return Array.isArray(c) ? '#' + c.map(x => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('') : '#000000'; }
-  _familyCss(f) {
-    return ({
-      arial: 'Arial, sans-serif', helvetica: 'Helvetica, Arial, sans-serif',
-      times: '"Times New Roman", Times, serif', georgia: 'Georgia, "Times New Roman", serif',
-      verdana: 'Verdana, Geneva, sans-serif', courier: '"Courier New", Courier, monospace',
-      roboto: 'Roboto, Arial, sans-serif', opensans: '"Open Sans", Arial, sans-serif',
-      montserrat: 'Montserrat, Arial, sans-serif', comicsans: '"Comic Sans MS", "Comic Neue", cursive',
-      // back-compat with the old 3-way values
-      serif: '"Times New Roman", Times, serif', mono: '"Courier New", Courier, monospace', sans: 'Arial, Helvetica, sans-serif',
-    })[f] || 'Arial, Helvetica, sans-serif';
+  /** The full font catalogue shown in the picker: { key, name, tag, css }. `css` is the on-screen
+   *  PREVIEW / editor font-family — the proprietary name first (so a user who has it installed sees
+   *  it), then the bundled open `pf-*` face (always available, what the PDF actually embeds), then a
+   *  generic. The first 10 are the originally-implemented fonts (unchanged); the rest are new. */
+  static get FONT_CATALOG() {
+    return [
+      { key: 'arial', name: 'Arial', tag: 'Sans', css: 'Arial, "pf-arimo", sans-serif' },
+      { key: 'helvetica', name: 'Helvetica', tag: 'Sans', css: 'Helvetica, "pf-arimo", Arial, sans-serif' },
+      { key: 'times', name: 'Times New Roman', tag: 'Serif', css: '"Times New Roman", "pf-tinos", Times, serif' },
+      { key: 'georgia', name: 'Georgia', tag: 'Serif', css: 'Georgia, "pf-gelasio", serif' },
+      { key: 'verdana', name: 'Verdana', tag: 'Sans', css: 'Verdana, "pf-arimo", Geneva, sans-serif' },
+      { key: 'courier', name: 'Courier New', tag: 'Mono', css: '"Courier New", "pf-cousine", Courier, monospace' },
+      { key: 'roboto', name: 'Roboto', tag: 'Sans', css: 'Roboto, "pf-roboto", Arial, sans-serif' },
+      { key: 'opensans', name: 'Open Sans', tag: 'Sans', css: '"Open Sans", "pf-open-sans", Arial, sans-serif' },
+      { key: 'montserrat', name: 'Montserrat', tag: 'Sans', css: 'Montserrat, "pf-montserrat", Arial, sans-serif' },
+      { key: 'comicsans', name: 'Comic Sans MS', tag: 'Script', css: '"Comic Sans MS", "pf-comic-neue", cursive' },
+      { key: 'calibri', name: 'Calibri', tag: 'Sans', css: 'Calibri, "pf-carlito", sans-serif' },
+      { key: 'tahoma', name: 'Tahoma', tag: 'Sans', css: 'Tahoma, "pf-arimo", sans-serif' },
+      { key: 'trebuchet', name: 'Trebuchet MS', tag: 'Sans', css: '"Trebuchet MS", "pf-arimo", sans-serif' },
+      { key: 'inter', name: 'Inter', tag: 'Sans', css: 'Inter, "pf-inter", sans-serif' },
+      { key: 'lato', name: 'Lato', tag: 'Sans', css: 'Lato, "pf-lato", sans-serif' },
+      { key: 'poppins', name: 'Poppins', tag: 'Sans', css: 'Poppins, "pf-poppins", sans-serif' },
+      { key: 'nunito', name: 'Nunito', tag: 'Sans', css: 'Nunito, "pf-nunito", sans-serif' },
+      { key: 'sourcesans', name: 'Source Sans Pro', tag: 'Sans', css: '"Source Sans Pro", "Source Sans 3", "pf-source-sans-3", sans-serif' },
+      { key: 'ubuntu', name: 'Ubuntu', tag: 'Sans', css: 'Ubuntu, "pf-ubuntu", sans-serif' },
+      { key: 'ptsans', name: 'PT Sans', tag: 'Sans', css: '"PT Sans", "pf-pt-sans", sans-serif' },
+      { key: 'garamond', name: 'Garamond', tag: 'Serif', css: 'Garamond, "pf-eb-garamond", serif' },
+      { key: 'cambria', name: 'Cambria', tag: 'Serif', css: 'Cambria, "pf-caladea", serif' },
+      { key: 'baskerville', name: 'Baskerville', tag: 'Serif', css: 'Baskerville, "pf-libre-baskerville", serif' },
+      { key: 'palatino', name: 'Palatino', tag: 'Serif', css: 'Palatino, "Palatino Linotype", "pf-noto-serif", serif' },
+      { key: 'merriweather', name: 'Merriweather', tag: 'Serif', css: 'Merriweather, "pf-merriweather", serif' },
+      { key: 'librebaskerville', name: 'Libre Baskerville', tag: 'Serif', css: '"Libre Baskerville", "pf-libre-baskerville", serif' },
+      { key: 'playfair', name: 'Playfair Display', tag: 'Serif', css: '"Playfair Display", "pf-playfair-display", serif' },
+      { key: 'notoserif', name: 'Noto Serif', tag: 'Serif', css: '"Noto Serif", "pf-noto-serif", serif' },
+      { key: 'consolas', name: 'Consolas', tag: 'Mono', css: 'Consolas, "pf-cousine", monospace' },
+      { key: 'firacode', name: 'Fira Code', tag: 'Mono', css: '"Fira Code", "pf-fira-code", monospace' },
+      { key: 'jetbrainsmono', name: 'JetBrains Mono', tag: 'Mono', css: '"JetBrains Mono", "pf-jetbrains-mono", monospace' },
+      { key: 'sourcecodepro', name: 'Source Code Pro', tag: 'Mono', css: '"Source Code Pro", "pf-source-code-pro", monospace' },
+      { key: 'ibmplexmono', name: 'IBM Plex Mono', tag: 'Mono', css: '"IBM Plex Mono", "pf-ibm-plex-mono", monospace' },
+      { key: 'brushscript', name: 'Brush Script', tag: 'Script', css: '"Brush Script MT", "pf-pacifico", cursive' },
+      { key: 'pacifico', name: 'Pacifico', tag: 'Script', css: 'Pacifico, "pf-pacifico", cursive' },
+      { key: 'comicneue', name: 'Comic Neue', tag: 'Script', css: '"Comic Neue", "pf-comic-neue", cursive' },
+    ];
   }
 
-  // The 10 font-family keys the toolbar dropdown offers.
-  static get TOOLBAR_FONT_KEYS() { return ['arial', 'helvetica', 'times', 'georgia', 'verdana', 'courier', 'roboto', 'opensans', 'montserrat', 'comicsans']; }
+  static get _FONT_BY_KEY() {
+    if (!PDFEditorApp.__fbk) PDFEditorApp.__fbk = Object.fromEntries(PDFEditorApp.FONT_CATALOG.map(f => [f.key, f]));
+    return PDFEditorApp.__fbk;
+  }
 
-  /** Normalise a stored fontFamily to a dropdown key. The 10 keys pass through; the legacy
-   *  sans/serif/mono map to their nearest dropdown entry; anything else -> '' (unknown). */
+  /** The on-screen font-family for a stored key (editor text + dropdown preview). */
+  _familyCss(f) {
+    const e = PDFEditorApp._FONT_BY_KEY[(f || '').toLowerCase()];
+    if (e) return e.css;
+    return ({ serif: '"Times New Roman", "pf-tinos", serif', mono: '"Courier New", "pf-cousine", monospace' })[f]
+      || 'Arial, "pf-arimo", sans-serif';
+  }
+
+  // Every font-family key the picker offers.
+  static get TOOLBAR_FONT_KEYS() { return PDFEditorApp.FONT_CATALOG.map(f => f.key); }
+
+  /** Normalise a stored fontFamily to a catalogue key. Catalogue keys pass through; the legacy
+   *  sans/serif/mono map to their nearest entry; anything else -> '' (unknown). */
   _normFamilyKey(fam) {
     const f = (fam || '').toLowerCase();
-    if (PDFEditorApp.TOOLBAR_FONT_KEYS.includes(f)) return f;
+    if (PDFEditorApp._FONT_BY_KEY[f]) return f;
     return ({ sans: 'arial', serif: 'times', mono: 'courier' })[f] || '';
   }
 
-  /** Best-guess dropdown key from a PDF font NAME (e.g. 'Helvetica-Bold' -> 'helvetica'). Returns ''
-   *  when the font isn't one the dropdown offers (e.g. Computer Modern), so we can show a placeholder. */
+  /** Best-guess catalogue key from a PDF font NAME, incl. the open SUBSTITUTE actually embedded
+   *  (e.g. 'Carlito' -> calibri, 'Inter' -> inter) so a saved+reopened font shows its name again.
+   *  Returns '' for a font the picker doesn't offer (e.g. Computer Modern) -> placeholder. */
   _familyKeyFromFont(name) {
     const n = (name || '').toLowerCase();
     if (!n) return '';
-    const hits = [['arial', 'arial'], ['helvetica', 'helvetica'], ['times', 'times'], ['georgia', 'georgia'],
-      ['verdana', 'verdana'], ['courier', 'courier'], ['roboto', 'roboto'], ['opensans', 'opensans'],
-      ['open sans', 'opensans'], ['montserrat', 'montserrat'], ['comic', 'comicsans']];
+    // Ordered most-specific-first; matches both the real face and its embedded open substitute.
+    const hits = [
+      ['ibm plex mono', 'ibmplexmono'], ['ibmplex', 'ibmplexmono'], ['jetbrains', 'jetbrainsmono'],
+      ['source code', 'sourcecodepro'], ['fira code', 'firacode'], ['firacode', 'firacode'],
+      ['source sans', 'sourcesans'], ['sourcesans', 'sourcesans'],
+      ['libre baskerville', 'librebaskerville'], ['librebaskerville', 'librebaskerville'], ['baskerville', 'baskerville'],
+      ['playfair', 'playfair'], ['noto serif', 'notoserif'], ['notoserif', 'notoserif'],
+      ['eb garamond', 'garamond'], ['ebgaramond', 'garamond'], ['garamond', 'garamond'],
+      ['merriweather', 'merriweather'], ['pt sans', 'ptsans'], ['ptsans', 'ptsans'],
+      ['poppins', 'poppins'], ['nunito', 'nunito'], ['ubuntu', 'ubuntu'], ['lato', 'lato'], ['inter', 'inter'],
+      ['carlito', 'calibri'], ['calibri', 'calibri'], ['caladea', 'cambria'], ['cambria', 'cambria'],
+      ['consolas', 'consolas'], ['trebuchet', 'trebuchet'], ['tahoma', 'tahoma'], ['palatino', 'palatino'],
+      ['comic neue', 'comicneue'], ['comicneue', 'comicneue'], ['comic', 'comicsans'],
+      ['pacifico', 'pacifico'], ['brush script', 'brushscript'], ['brushscript', 'brushscript'],
+      ['arimo', 'arial'], ['arial', 'arial'], ['helvetica', 'helvetica'], ['verdana', 'verdana'],
+      ['tinos', 'times'], ['times', 'times'], ['cousine', 'courier'], ['courier', 'courier'],
+      ['gelasio', 'georgia'], ['georgia', 'georgia'], ['roboto', 'roboto'],
+      ['open sans', 'opensans'], ['opensans', 'opensans'], ['montserrat', 'montserrat'],
+    ];
     for (const [needle, key] of hits) if (n.includes(needle)) return key;
     return '';
   }
 
-  /** The dropdown key to SHOW for a target: an explicit family override, else a guess from the PDF
+  /** The catalogue key to SHOW for a target: an explicit family override, else a guess from the PDF
    *  font name, else '' (-> the "Select a Font Style" placeholder). */
   _displayFontKey(fam, fontName) {
     return this._normFamilyKey(fam) || this._familyKeyFromFont(fontName) || '';
+  }
+
+  /** Resolve a text item's REAL font name (e.g. 'Inter Regular', 'Carlito Bold') from PDF.js's font
+   *  object. getTextContent only exposes a loaded id ('g_d0_f5') + a generic family, but once a page
+   *  has rendered its commonObjs hold the real name — which lets the picker re-show a saved font on
+   *  reopen. Returns '' until the font is resolved (then callers fall back to the generic guess). */
+  _realFontName(o) {
+    if (!o || !o.fontName) return '';
+    for (const pv of this.pageViews || []) {
+      try {
+        const co = pv.page && pv.page.commonObjs;
+        if (!co) continue;
+        if (typeof co.has === 'function' && !co.has(o.fontName)) continue;
+        const f = co.get(o.fontName);
+        if (f && f.name) return f.name;
+      } catch (_) { /* not resolved on this page yet */ }
+    }
+    return '';
+  }
+
+  // ----- Searchable font picker (built once; the toolbar shows/reuses it) ---------------------------
+  _recentFonts() {
+    try { return JSON.parse(localStorage.getItem('qpe_recent_fonts') || '[]').filter(k => PDFEditorApp._FONT_BY_KEY[k]); }
+    catch (_) { return []; }
+  }
+  _pushRecentFont(key) {
+    if (!PDFEditorApp._FONT_BY_KEY[key]) return;
+    const list = [key, ...this._recentFonts().filter(k => k !== key)].slice(0, 5);
+    try { localStorage.setItem('qpe_recent_fonts', JSON.stringify(list)); } catch (_) {}
+  }
+
+  _initFontPicker() {
+    const btn = document.getElementById('tt-font-btn');
+    const pop = document.getElementById('tt-font-pop');
+    const search = document.getElementById('tt-font-search');
+    const list = document.getElementById('tt-font-list');
+    const empty = document.getElementById('tt-font-empty');
+    if (!btn || !pop || !search || !list || this._fontPickerInit) return;
+    this._fontPickerInit = true;
+
+    const close = () => { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+    const open = () => {
+      pop.hidden = false; btn.setAttribute('aria-expanded', 'true');
+      search.value = ''; this._renderFontList(''); setTimeout(() => search.focus(), 20);
+    };
+    btn.addEventListener('click', (e) => { e.stopPropagation(); pop.hidden ? open() : close(); });
+    search.addEventListener('input', () => this._renderFontList(search.value));
+    // Choosing a row applies the font and remembers it.
+    list.addEventListener('click', (e) => {
+      const opt = e.target.closest('.tt-font-opt'); if (!opt) return;
+      const key = opt.dataset.key;
+      this.applyTextStyle('family', key);
+      this._pushRecentFont(key);
+      this._setFontPickerValue(key);
+      close();
+    });
+    // Keyboard: arrows move the active row, Enter selects, Esc closes.
+    search.addEventListener('keydown', (e) => {
+      const opts = Array.from(list.querySelectorAll('.tt-font-opt'));
+      let i = opts.findIndex(o => o.classList.contains('active'));
+      if (e.key === 'ArrowDown') { e.preventDefault(); i = Math.min(opts.length - 1, i + 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); i = Math.max(0, i - 1); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (opts[i < 0 ? 0 : i]) opts[i < 0 ? 0 : i].click(); return; }
+      else if (e.key === 'Escape') { close(); btn.focus(); return; }
+      else return;
+      opts.forEach(o => o.classList.remove('active'));
+      if (opts[i]) { opts[i].classList.add('active'); opts[i].scrollIntoView({ block: 'nearest' }); }
+    });
+    document.addEventListener('click', (e) => { if (!pop.hidden && !e.target.closest('#tt-fontpick')) close(); });
+    this.__fontPickerEls = { btn, pop, search, list, empty };
+  }
+
+  _renderFontList(filter) {
+    const { list, empty } = this.__fontPickerEls || {};
+    if (!list) return;
+    const q = (filter || '').trim().toLowerCase();
+    const cur = document.getElementById('tt-font')?.value || '';
+    list.innerHTML = '';
+    const optHTML = (f) => {
+      const sel = f.key === cur ? ' selected' : '';
+      return `<button type="button" class="tt-font-opt${sel}" role="option" data-key="${f.key}" ` +
+        `style="font-family:${f.css}"><span>${f.name}</span><span class="tt-font-tag">${f.tag}</span></button>`;
+    };
+    const match = (f) => !q || f.name.toLowerCase().includes(q) || f.tag.toLowerCase().includes(q);
+    let html = '';
+    if (!q) {
+      const recent = this._recentFonts().map(k => PDFEditorApp._FONT_BY_KEY[k]).filter(Boolean);
+      if (recent.length) html += `<div class="tt-font-group">Recently used</div>` + recent.map(optHTML).join('') + `<div class="tt-font-group">All fonts</div>`;
+    }
+    const shown = PDFEditorApp.FONT_CATALOG.filter(match);
+    html += shown.map(optHTML).join('');
+    list.innerHTML = html;
+    if (empty) empty.hidden = shown.length > 0;
+  }
+
+  /** Reflect the current font key on the picker button (rendered in its own face), and update the
+   *  hidden #tt-font value-holder the rest of the toolbar reads. '' -> the placeholder. */
+  _setFontPickerValue(key) {
+    const k = (key || '').toLowerCase();
+    const hidden = document.getElementById('tt-font');
+    const label = document.getElementById('tt-font-label');
+    const e = PDFEditorApp._FONT_BY_KEY[k];
+    if (hidden) hidden.value = e ? k : '';
+    if (label) {
+      label.textContent = e ? e.name : 'Select a Font Style';
+      label.style.fontFamily = e ? e.css : '';
+    }
   }
 
   /** Build the Sejda-style swatch palette popover and wire it to applyTextStyle('color', …). */
@@ -2433,7 +2601,9 @@ class PDFEditorApp {
     }
     return { bold, italic, underline: !!o.underline, size,
              color: o.color, opacity: o.opacity, align: o.align,
-             family: this._displayFontKey(o.fontFamily, o.fontFamilyName || o.fontName) };
+             // Prefer the REAL font name (from PDF.js's rendered font object) so a saved+reopened font
+             // re-selects in the picker; fall back to the generic guess before the page has resolved.
+             family: this._displayFontKey(o.fontFamily, this._realFontName(o) || o.fontFamilyName || o.fontName) };
   }
 
   _reflectTextToolbar() {
@@ -2444,9 +2614,9 @@ class PDFEditorApp {
     // Don't clobber an input the user is actively typing into (else mid-type reflect mangles it).
     const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null && el !== document.activeElement) el.value = v; };
     if (s.size) set('tt-size', s.size);
-    // Always reflect the font: a known family selects it; an unknown one ('' ) shows the
-    // "Select a Font Style" placeholder so the dropdown is never blank.
-    set('tt-font', s.family || '');
+    // Always reflect the font: a known family shows its name; an unknown one ('') shows the
+    // "Select a Font Style" placeholder so the picker is never blank.
+    this._setFontPickerValue(s.family || '');
     this._setColorSwatch(s.color ? this._rgbToHex(s.color) : '#000000');
     set('tt-opacity', Math.round((s.opacity == null ? 1 : s.opacity) * 100));
   }

@@ -10,7 +10,7 @@
     "test:backend": "backend/venv/bin/python backend/tests/run.py",
     "test:pages": "jest tests/site",
     "test:routes": "node scripts/smoke-routes.mjs",
-    "copy:static": "cp robots.txt sitemap.xml google*.html about.html privacy.html terms.html contact.html pages.css favicon.svg og-image.png _headers _redirects dist/ && mkdir -p dist/.well-known && cp .well-known/security.txt dist/.well-known/ && mkdir -p dist/assets/fun-ui && cp assets/fun-ui/*.png dist/assets/fun-ui/",
+    "copy:static": "cp robots.txt sitemap.xml google*.html about.html privacy.html terms.html contact.html pages.css fonts.css favicon.svg og-image.png _headers _redirects dist/ && mkdir -p dist/.well-known && cp .well-known/security.txt dist/.well-known/ && mkdir -p dist/assets/fun-ui && cp assets/fun-ui/*.png dist/assets/fun-ui/ && mkdir -p dist/assets/fonts && cp assets/fonts/*.woff2 dist/assets/fonts/",
     "build": "npm run test:backend && webpack --mode production && npm run copy:static",
     "dev": "webpack serve --mode development"
   },
