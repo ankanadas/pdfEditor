@@ -1071,6 +1071,10 @@ class PDFEditorApp {
     // covered by editable line boxes, so a click landing on the canvas is genuinely blank
     // space → add new text there (and reflect the Add button).
     if (this.mode === 'text' || this.mode === 'auto') {
+      // The click that closes an open Add-text editor must NOT also open a fresh one — it only
+      // commits. The next deliberate click then adds/edits based on where it lands. (onDocDown stamps
+      // the time it committed on this same mousedown.)
+      if (Date.now() - (this._lastInsertCommitAt || 0) < 350) { this._lastInsertCommitAt = 0; return; }
       // Seed the new box from the toolbar's size / B / I (its current "defaults").
       const fontSize = parseInt(document.getElementById('addSize')?.value, 10) || this._lastInsertSize || 14;
       // Drop an empty, editable text box where the user clicked and let them type in place.
@@ -1359,6 +1363,7 @@ class PDFEditorApp {
       if (done || div.contains(e.target)) return;
       // Don't commit when the click is on a styling control (top Add bar or the floating toolbar).
       if (e.target.closest && e.target.closest('.ctx-text, #textToolbar')) return;
+      this._lastInsertCommitAt = Date.now();   // suppress the chain-open on this same canvas click
       finish(true);
     };
     document.addEventListener('mousedown', onDocDown, true);
@@ -2065,7 +2070,7 @@ class PDFEditorApp {
     on('tt-underline', 'click', () => this.applyTextStyle('underline', !this._ttStyle().underline));
     on('tt-size', 'input', (e) => { const v = parseInt(e.target.value, 10); if (v) this.applyTextStyle('size', v); });
     on('tt-font', 'change', (e) => this.applyTextStyle('family', e.target.value));
-    on('tt-color', 'input', (e) => this.applyTextStyle('color', this._hexToRgb(e.target.value)));
+    this._initColorPalette();
     on('tt-align-left', 'click', () => this.applyTextStyle('align', 'left'));
     on('tt-align-center', 'click', () => this.applyTextStyle('align', 'center'));
     on('tt-align-right', 'click', () => this.applyTextStyle('align', 'right'));
@@ -2092,7 +2097,55 @@ class PDFEditorApp {
   _hexToRgb(h) { h = (h || '').replace('#', ''); return [parseInt(h.slice(0, 2), 16) || 0, parseInt(h.slice(2, 4), 16) || 0, parseInt(h.slice(4, 6), 16) || 0]; }
   _rgbCss(c) { return Array.isArray(c) ? `rgb(${c[0]},${c[1]},${c[2]})` : (c || '#000'); }
   _rgbToHex(c) { return Array.isArray(c) ? '#' + c.map(x => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('') : '#000000'; }
-  _familyCss(f) { return f === 'serif' ? '"Times New Roman",Times,serif' : f === 'mono' ? '"Courier New",Courier,monospace' : 'Arial,Helvetica,sans-serif'; }
+  _familyCss(f) {
+    return ({
+      arial: 'Arial, sans-serif', helvetica: 'Helvetica, Arial, sans-serif',
+      times: '"Times New Roman", Times, serif', georgia: 'Georgia, "Times New Roman", serif',
+      verdana: 'Verdana, Geneva, sans-serif', courier: '"Courier New", Courier, monospace',
+      roboto: 'Roboto, Arial, sans-serif', opensans: '"Open Sans", Arial, sans-serif',
+      montserrat: 'Montserrat, Arial, sans-serif', comicsans: '"Comic Sans MS", "Comic Neue", cursive',
+      // back-compat with the old 3-way values
+      serif: '"Times New Roman", Times, serif', mono: '"Courier New", Courier, monospace', sans: 'Arial, Helvetica, sans-serif',
+    })[f] || 'Arial, Helvetica, sans-serif';
+  }
+
+  /** Build the Sejda-style swatch palette popover and wire it to applyTextStyle('color', …). */
+  _initColorPalette() {
+    const btn = document.getElementById('tt-color-btn');
+    const pop = document.getElementById('tt-color-pop');
+    if (!btn || !pop) return;
+    // A compact, well-rounded palette (greys + 6 shade rows across the hues).
+    const PALETTE = [
+      '#000000', '#434343', '#666666', '#999999', '#b7b7b7', '#cccccc', '#d9d9d9', '#efefef', '#f3f3f3', '#ffffff',
+      '#980000', '#ff0000', '#ff9900', '#ffff00', '#00ff00', '#00ffff', '#4a86e8', '#0000ff', '#9900ff', '#ff00ff',
+      '#e6b8af', '#f4cccc', '#fce5cd', '#fff2cc', '#d9ead3', '#d0e0e3', '#c9daf8', '#cfe2f3', '#d9d2e9', '#ead1dc',
+      '#dd7e6b', '#ea9999', '#f9cb9c', '#ffe599', '#b6d7a8', '#a2c4c9', '#a4c2f4', '#9fc5e8', '#b4a7d6', '#d5a6bd',
+      '#cc4125', '#e06666', '#f6b26b', '#ffd966', '#93c47d', '#76a5af', '#6d9eeb', '#6fa8dc', '#8e7cc3', '#c27ba0',
+      '#a61c00', '#cc0000', '#e69138', '#f1c232', '#6aa84f', '#45818e', '#3c78d8', '#3d85c6', '#674ea7', '#a64d79',
+      '#85200c', '#990000', '#b45f06', '#bf9000', '#38761d', '#134f5c', '#1155cc', '#0b5394', '#351c75', '#741b47',
+    ];
+    PALETTE.forEach(hex => {
+      const sw = document.createElement('button');
+      sw.type = 'button'; sw.className = 'tt-sw'; sw.style.background = hex; sw.title = hex;
+      sw.addEventListener('mousedown', (e) => e.preventDefault());   // keep the editor focused
+      sw.addEventListener('click', () => { this.applyTextStyle('color', this._hexToRgb(hex)); this._setColorSwatch(hex); pop.hidden = true; });
+      pop.appendChild(sw);
+    });
+    // A "custom" native picker for anything outside the palette.
+    const custom = document.createElement('label');
+    custom.className = 'tt-sw tt-sw-custom'; custom.title = 'Custom colour';
+    custom.innerHTML = 'Custom <input type="color" id="tt-color-custom" value="#000000">';
+    custom.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
+    pop.appendChild(custom);
+    custom.querySelector('input').addEventListener('input', (e) => { this.applyTextStyle('color', this._hexToRgb(e.target.value)); this._setColorSwatch(e.target.value); });
+
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', () => { pop.hidden = !pop.hidden; });
+    // Close on a click outside the colour control.
+    document.addEventListener('mousedown', (e) => { if (!pop.hidden && !e.target.closest('.tt-color-wrap')) pop.hidden = true; }, true);
+  }
+
+  _setColorSwatch(hex) { const sw = document.getElementById('tt-color-sw'); if (sw) sw.style.background = hex; }
 
   /** Show the toolbar for a target { kind:'editor'|'overlay'|'line', el, edit?, line? }. */
   _showTextToolbar(target) {
@@ -2138,7 +2191,7 @@ class PDFEditorApp {
     const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null && el !== document.activeElement) el.value = v; };
     if (s.size) set('tt-size', s.size);
     if (s.family) set('tt-font', s.family);
-    set('tt-color', this._rgbToHex(s.color));
+    this._setColorSwatch(s.color ? this._rgbToHex(s.color) : '#000000');
     set('tt-opacity', Math.round((s.opacity == null ? 1 : s.opacity) * 100));
   }
 
