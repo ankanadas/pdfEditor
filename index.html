@@ -440,8 +440,20 @@
     .tt-btn.tt-danger:hover { background: #ffe9e9; color: #c0271f; }
     .tt-num { width: 48px; height: 28px; padding: 2px 6px; border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; }
     .tt-sel { height: 28px; padding: 2px 6px; border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; background: #fff; }
-    .tt-color { display: inline-flex; align-items: center; }
-    .tt-color input[type=color] { width: 28px; height: 28px; padding: 0; border: 1px solid #d9d4ff; border-radius: 7px; background: #fff; cursor: pointer; }
+    .tt-color-wrap { position: relative; display: inline-flex; }
+    .tt-color-btn { padding: 0 4px; }
+    .tt-color-sw { display: inline-block; width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(0,0,0,.25); background: #000; vertical-align: middle; }
+    .tt-color-pop {
+      position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+      background: #fff; border: 1px solid #d9d4ff; border-radius: 10px; padding: 8px;
+      box-shadow: 0 10px 28px rgba(20,22,40,.24); z-index: 10;
+      display: grid; grid-template-columns: repeat(10, 18px); gap: 4px;
+    }
+    .tt-color-pop[hidden] { display: none; }
+    .tt-sw { width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(0,0,0,.15); cursor: pointer; padding: 0; }
+    .tt-sw:hover { transform: scale(1.18); box-shadow: 0 0 0 2px rgba(109,94,252,.4); }
+    .tt-sw.tt-sw-custom { grid-column: 1 / -1; width: 100%; height: 24px; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; color: var(--muted); border-style: dashed; }
+    .tt-sw-custom input[type=color] { width: 22px; height: 20px; padding: 0; border: none; background: none; cursor: pointer; }
     .tt-opacity { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
     .tt-opacity input[type=range] { width: 64px; }
 
@@ -1021,11 +1033,21 @@
     <span class="tt-sep"></span>
     <input type="number" id="tt-size" class="tt-num" min="4" max="200" step="1" title="Font size" aria-label="Font size" />
     <select id="tt-font" class="tt-sel" title="Font family" aria-label="Font family">
-      <option value="sans">Sans</option>
-      <option value="serif">Serif</option>
-      <option value="mono">Mono</option>
+      <option value="arial">Arial</option>
+      <option value="helvetica">Helvetica</option>
+      <option value="times">Times New Roman</option>
+      <option value="georgia">Georgia</option>
+      <option value="verdana">Verdana</option>
+      <option value="courier">Courier New</option>
+      <option value="roboto">Roboto</option>
+      <option value="opensans">Open Sans</option>
+      <option value="montserrat">Montserrat</option>
+      <option value="comicsans">Comic Sans MS</option>
     </select>
-    <label class="tt-color" title="Text color"><input type="color" id="tt-color" value="#000000" aria-label="Text color" /></label>
+    <div class="tt-color-wrap">
+      <button class="tt-btn tt-color-btn" id="tt-color-btn" type="button" title="Text color" aria-label="Text color"><span class="tt-color-sw" id="tt-color-sw"></span></button>
+      <div class="tt-color-pop" id="tt-color-pop" hidden></div>
+    </div>
     <span class="tt-sep"></span>
     <button class="tt-btn" id="tt-align-left" type="button" title="Align left" aria-label="Align left">⯇</button>
     <button class="tt-btn" id="tt-align-center" type="button" title="Align center" aria-label="Align center">≡</button>

@@ -659,6 +659,23 @@ class ToolbarStyleTests(unittest.TestCase):
         self.assertIsNotNone(s)
         self.assertIn("Cour", s["font"], f"mono family not applied: {s['font']}")
 
+    def test_toolbar_named_fonts_embed_the_right_face(self):
+        # The toolbar font picker must render each named family with a real embeddable font (bundled
+        # open fonts for the non-Base-14 ones), so it looks right on any host — not a generic fallback.
+        cases = [("arial", "Helvetica"), ("times", "Times"), ("courier", "Cour"),
+                 ("roboto", "Roboto"), ("opensans", "OpenSans"),
+                 ("montserrat", "Montserrat"), ("comicsans", "ComicNeue")]
+        for fam, expect in cases:
+            src = self._doc_with("x").tobytes()
+            tok = "FNT" + fam
+            edit = {"pageIndex": 0, "redact": False, "style": "text", "x": 40, "baseline": 140,
+                    "fontSize": 18, "newText": tok, "fontFamily": fam,
+                    "runs": [[{"text": tok, "size": 18}]]}
+            res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
+            s = find_span(res, tok)
+            self.assertIsNotNone(s, f"{fam}: text missing")
+            self.assertIn(expect, s["font"], f"{fam}: expected {expect!r}, got {s['font']!r}")
+
 
 class MixedSizeSaveTests(unittest.TestCase):
 

@@ -184,6 +184,77 @@ def _edit_font_kwargs(serif, bold, italic):
 SIGN_FONT_FILE = _find_font(_SIGN_FONT_CANDIDATES)
 SIGN_FONT_NAME = "edsig"
 
+# ---------------------------------------------------------------------------------------------------
+#  Toolbar font picker. Each named family the floating toolbar offers resolves to a real font the
+#  backend can embed so it renders identically on any host (incl. Linux/Render): a bundled open font
+#  (backend/fonts/), a local system font when present, else the metric-compatible Base-14 builtin.
+#  `_TOOLBAR_FONTS[key] = (base14_family, variants)` where variants maps (bold, italic) -> candidate
+#  file paths (bundled basename or absolute), tried in order. variants=None means "always Base-14".
+# ---------------------------------------------------------------------------------------------------
+_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+_F, _T = False, True
+_TOOLBAR_FONTS = {
+    # Base-14 metric-compatible — render everywhere, no file needed.
+    'arial':     ('sans',  None),
+    'helvetica': ('sans',  None),
+    'times':     ('serif', None),
+    'courier':   ('mono',  None),
+    'sans':      ('sans',  None),   # back-compat with the old 3-way picker
+    'serif':     ('serif', None),
+    'mono':      ('mono',  None),
+    # Bundled open fonts (+ local system font first where it exists), Base-14 fallback.
+    'roboto':     ('sans', {(_F, _F): ['Roboto-Regular.ttf'], (_T, _F): ['Roboto-Bold.ttf'],
+                            (_F, _T): ['Roboto-Italic.ttf'], (_T, _T): ['Roboto-BoldItalic.ttf']}),
+    'opensans':   ('sans', {(_F, _F): ['OpenSans-Regular.ttf'], (_T, _F): ['OpenSans-Bold.ttf'],
+                            (_F, _T): ['OpenSans-Italic.ttf'], (_T, _T): ['OpenSans-BoldItalic.ttf']}),
+    'montserrat': ('sans', {(_F, _F): ['Montserrat-Regular.ttf'], (_T, _F): ['Montserrat-Bold.ttf'],
+                            (_F, _T): ['Montserrat-Italic.ttf'], (_T, _T): ['Montserrat-BoldItalic.ttf']}),
+    'comicsans':  ('sans', {(_F, _F): ['ComicNeue-Regular.ttf'], (_T, _F): ['ComicNeue-Bold.ttf'],
+                            (_F, _T): ['ComicNeue-Italic.ttf'], (_T, _T): ['ComicNeue-BoldItalic.ttf']}),
+    'georgia':    ('serif', {
+        (_F, _F): ['/System/Library/Fonts/Supplemental/Georgia.ttf', 'Gelasio-Regular.ttf'],
+        (_T, _F): ['/System/Library/Fonts/Supplemental/Georgia Bold.ttf', 'Gelasio-Regular.ttf'],
+        (_F, _T): ['/System/Library/Fonts/Supplemental/Georgia Italic.ttf', 'Gelasio-Italic.ttf'],
+        (_T, _T): ['/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf', 'Gelasio-Italic.ttf']}),
+    'verdana':    ('sans', {
+        (_F, _F): ['/System/Library/Fonts/Supplemental/Verdana.ttf'],
+        (_T, _F): ['/System/Library/Fonts/Supplemental/Verdana Bold.ttf'],
+        (_F, _T): ['/System/Library/Fonts/Supplemental/Verdana Italic.ttf'],
+        (_T, _T): ['/System/Library/Fonts/Supplemental/Verdana Bold Italic.ttf']}),
+}
+_toolbar_font_cache = {}
+
+
+def _toolbar_font_option(family, bold, italic, text):
+    """Build the font option for an explicit toolbar family: (insert_kwargs, fitz.Font, charset, True).
+    Prefers a real embeddable TTF (so the family renders on any host); falls back to its Base-14 builtin
+    (charset = WinAnsi set, so non-Latin glyphs still drop through to the full fallback)."""
+    entry = _TOOLBAR_FONTS.get((family or '').lower())
+    if not entry:
+        return None
+    b14_fam, variants = entry
+    key = (bool(bold), bool(italic))
+    if variants:
+        for cand in variants.get(key, []):
+            path = cand if os.path.isabs(cand) else os.path.join(_FONTS_DIR, cand)
+            if not os.path.exists(path):
+                continue
+            ce = _toolbar_font_cache.get(path)
+            if ce is None:
+                try:
+                    ce = (re.sub(r'\W', '', 'tf_' + os.path.basename(path)), fitz.Font(fontfile=path))
+                    _toolbar_font_cache[path] = ce
+                except Exception:
+                    _toolbar_font_cache[path] = ce = False
+            if ce:
+                # Real charset (these are full fonts, so has_glyph is reliable) so _pick_font prefers
+                # this font in step 1 — a None charset would only ever be used as the last-resort catch-all.
+                cs = {ch for ch in set(text) if ce[1].has_glyph(ord(ch))}
+                return (dict(fontname=ce[0], fontfile=path), ce[1], cs, True)
+    builtin = _BASE14_BY_FAMILY[b14_fam][key]
+    return (dict(fontname=builtin), fitz.Font(fontname=builtin),
+            {ch for ch in set(text) if _base14_draws(ch)}, True)
+
 
 def _insert_image_edit(page, edit):
     """Place a signature/stamp image (PNG/JPEG data-URL) at its box, honouring an optional
@@ -419,7 +490,8 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
     size = float(edit.get('fontSize', 12) or 12)
     if span and span.get('size'):
         size = float(span['size'])               # exact original size (fixes "too big")
-    want_serif = bool(edit.get('serif')) or edit.get('fontFamily') == 'serif'
+    _fam_key = (edit.get('fontFamily') or '').lower()
+    want_serif = bool(edit.get('serif')) or _TOOLBAR_FONTS.get(_fam_key, (None,))[0] == 'serif'
     # style_override lets a per-run segment request its own weight/slant (mixed bold/italic in
     # one "Add text" box); otherwise the box-level flags apply.
     want_bold = bool(style_override[0]) if style_override else bool(edit.get('bold'))
@@ -451,23 +523,25 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
     # heading saves back as Helvetica-Bold, not a substitute Arial. Placed FIRST so it beats both a
     # borrowed page font and the TTF catch-all; characters outside WinAnsi still fall through to
     # those. Skipped when the font is embedded (level 1 reuses the real outlines instead).
-    # An explicit toolbar "font family" override (sans/serif/mono) re-emits the text in that Base-14
-    # family — for a replace edit on ANY original font (even embedded) AND for added text (so the Add
-    # font select, incl. mono, is honoured). Placed first so it wins. Without an override, the original
-    # re-emit logic still applies to a non-embedded standard span.
-    fam_override = edit.get('fontFamily') if (edit and edit.get('fontFamily') in _BASE14_BY_FAMILY) else None
-    fam = fam_override
-    if fam is None and span and not _font_is_embedded(page, span.get('font', '')):
+    # An explicit toolbar "font family" override (Arial/Times/Georgia/Roboto/…) re-emits the text in
+    # that family — resolved to a bundled/system TTF or its Base-14 builtin (see _toolbar_font_option) —
+    # for a replace edit on ANY original font (even embedded) AND for added text. Placed first so it
+    # wins. Without an override, the original re-emit still applies to a non-embedded standard span.
+    if _fam_key in _TOOLBAR_FONTS:
+        opt = _toolbar_font_option(_fam_key, want_bold, want_italic, text)
+        if opt:
+            options.insert(0, opt)
+    elif span and not _font_is_embedded(page, span.get('font', '')):
         fam = _standard_family(span.get('font', ''))
-    if fam:
-        builtin = _BASE14_BY_FAMILY[fam][(bool(want_bold), bool(want_italic))]
-        try:
-            b14 = fitz.Font(fontname=builtin)
-            b14_charset = {ch for ch in set(text) if _base14_draws(ch)}
-            if b14_charset:
-                options.insert(0, (dict(fontname=builtin), b14, b14_charset, True))
-        except Exception:
-            pass
+        if fam:
+            builtin = _BASE14_BY_FAMILY[fam][(bool(want_bold), bool(want_italic))]
+            try:
+                b14 = fitz.Font(fontname=builtin)
+                b14_charset = {ch for ch in set(text) if _base14_draws(ch)}
+                if b14_charset:
+                    options.insert(0, (dict(fontname=builtin), b14, b14_charset, True))
+            except Exception:
+                pass
     kw = _edit_font_kwargs(want_serif, want_bold, want_italic)   # full fallback (covers Latin)
     fb = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
     options.append((kw, fb, None, True))          # charset None == catch-all
