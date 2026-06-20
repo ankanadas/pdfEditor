@@ -701,7 +701,8 @@ class ToolbarStyleTests(unittest.TestCase):
                         filetype="pdf")
         s = find_span(res, "serif")
         self.assertIsNotNone(s)
-        self.assertIn("Times", s["font"], f"family override didn't switch to a serif font: {s['font']}")
+        # 'serif' now embeds Tinos (the open, metric-compatible Times New Roman).
+        self.assertIn("Tinos", s["font"], f"family override didn't switch to a serif font: {s['font']}")
 
     def test_added_text_mono_family(self):
         src = self._doc_with("x").tobytes()
@@ -710,14 +711,16 @@ class ToolbarStyleTests(unittest.TestCase):
         res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
         s = find_span(res, "mono12")
         self.assertIsNotNone(s)
-        self.assertIn("Cour", s["font"], f"mono family not applied: {s['font']}")
+        # 'mono' now embeds Cousine (the open, metric-compatible Courier New).
+        self.assertIn("Cousine", s["font"], f"mono family not applied: {s['font']}")
 
     def test_toolbar_named_fonts_embed_the_right_face(self):
-        # The toolbar font picker must render each named family with a real embeddable font (bundled
-        # open fonts for the non-Base-14 ones), so it looks right on any host — not a generic fallback.
-        cases = [("arial", "Helvetica"), ("times", "Times"), ("courier", "Cour"),
-                 ("roboto", "Roboto"), ("opensans", "OpenSans"),
-                 ("montserrat", "Montserrat"), ("comicsans", "ComicNeue")]
+        # Each familiar dropdown name must embed its OPEN metric-compatible font (never the
+        # proprietary original), so it looks right on any host and is legally distributable.
+        cases = [("arial", "Arimo"), ("helvetica", "Arimo"), ("verdana", "Arimo"),
+                 ("times", "Tinos"), ("courier", "Cousine"), ("georgia", "Gelasio"),
+                 ("comicsans", "ComicNeue"), ("roboto", "Roboto"),
+                 ("opensans", "OpenSans"), ("montserrat", "Montserrat")]
         for fam, expect in cases:
             src = self._doc_with("x").tobytes()
             tok = "FNT" + fam
@@ -728,6 +731,83 @@ class ToolbarStyleTests(unittest.TestCase):
             s = find_span(res, tok)
             self.assertIsNotNone(s, f"{fam}: text missing")
             self.assertIn(expect, s["font"], f"{fam}: expected {expect!r}, got {s['font']!r}")
+
+
+# The ten dropdown labels and the open font each one embeds (the proprietary originals are never used).
+DROPDOWN_FONTS = ["arial", "helvetica", "times", "georgia", "verdana", "courier",
+                  "roboto", "opensans", "montserrat", "comicsans"]
+OPEN_FACES = ["Arimo", "Tinos", "Cousine", "Gelasio", "ComicNeue", "Roboto", "OpenSans", "Montserrat"]
+PROPRIETARY = ["Arial", "Helvetica", "TimesNewRoman", "Times New Roman", "Georgia",
+               "Verdana", "CourierNew", "Courier New", "ComicSans", "Comic Sans"]
+
+
+class FontLicensingTests(unittest.TestCase):
+    """Validation for the open-font licensing/embedding policy (spec Tests 1-4)."""
+
+    def _doc(self):
+        d = fitz.open()
+        d.new_page(width=520, height=260)
+        return d
+
+    def _styled(self, fam, tok):
+        text = tok + " Quick Brown Fox 0123 .,'!?-"
+        edit = {"pageIndex": 0, "redact": False, "style": "text", "x": 36, "baseline": 120,
+                "fontSize": 16, "newText": text, "fontFamily": fam,
+                "runs": [[{"text": text, "size": 16}]]}
+        return fitz.open(stream=post_edit(self._doc().tobytes(), [edit]), filetype="pdf")
+
+    def test_1_every_dropdown_font_renders_without_missing_glyphs(self):
+        # Create text with every dropdown font; reopen; no missing-glyph / corrupted output.
+        for fam in DROPDOWN_FONTS:
+            tok = "GLY" + fam
+            res = self._styled(fam, tok)
+            s = find_span(res, tok)
+            self.assertIsNotNone(s, f"{fam}: styled text missing after save")
+            full = res[0].get_text()
+            self.assertNotIn("�", full, f"{fam}: U+FFFD (missing glyph) in saved PDF")
+            self.assertFalse(any(0x25A0 <= ord(c) <= 0x25FF for c in full), f"{fam}: .notdef box glyphs")
+
+    def test_2_only_open_fonts_are_embedded(self):
+        # Across all dropdown fonts, every EMBEDDED font file is one of the open faces — never a
+        # proprietary one. (Base-14 names referenced but not embedded are fine.)
+        for fam in DROPDOWN_FONTS:
+            res = self._styled(fam, "EMB" + fam)
+            for xref, ext, ftype, basefont, *_ in res[0].get_fonts(full=True):
+                buf = res.extract_font(xref)[3] if hasattr(res, "extract_font") else b""
+                if not buf:                       # not embedded (a referenced Base-14 name) -> allowed
+                    continue
+                base = basefont.split("+")[-1].replace(" ", "")   # strip subset prefix + spaces
+                self.assertTrue(any(o in base for o in OPEN_FACES),
+                                f"{fam}: embedded a non-open font {basefont!r}")
+                self.assertFalse(any(p.replace(" ", "") in base for p in PROPRIETARY),
+                                 f"{fam}: embedded a proprietary font {basefont!r}")
+
+    def test_3_substitutions_embed_the_metric_compatible_face(self):
+        # Visual-equivalence mapping: the saved PDF embeds the open look-alike for each substitution.
+        for fam, face in [("arial", "Arimo"), ("times", "Tinos"), ("georgia", "Gelasio"),
+                          ("courier", "Cousine"), ("comicsans", "ComicNeue")]:
+            res = self._styled(fam, "SUB" + fam)
+            s = find_span(res, "SUB" + fam)
+            self.assertIsNotNone(s)
+            self.assertIn(face, s["font"], f"{fam}: expected {face} face, got {s['font']!r}")
+
+    def test_4_bundled_files_are_only_open_licensed_fonts(self):
+        # backend/fonts/ holds ONLY the eight open families (4 weights each) — no proprietary file.
+        files = sorted(f for f in os.listdir(appmod._FONTS_DIR) if f.lower().endswith(".ttf"))
+        expected = sorted(f"{fam}-{st}.ttf" for fam in
+                          ["Arimo", "Tinos", "Cousine", "Gelasio", "ComicNeue", "Roboto", "OpenSans", "Montserrat"]
+                          for st in ["Regular", "Bold", "Italic", "BoldItalic"])
+        self.assertEqual(files, expected, "backend/fonts/ contents drifted from the open-font set")
+        forbidden = ["arial.ttf", "helvetica.ttf", "times", "georgia.ttf", "verdana.ttf",
+                     "cour", "comicsans", "comic sans"]
+        low = [f.lower() for f in files]
+        for bad in forbidden:
+            self.assertFalse(any(bad in f for f in low), f"proprietary font file present: {bad}")
+        # the licence notice ships alongside them
+        notice = os.path.join(appmod._FONTS_DIR, "NOTICE.md")
+        self.assertTrue(os.path.exists(notice))
+        txt = open(notice).read()
+        self.assertTrue(("OFL" in txt or "Open Font License" in txt) and "Apache" in txt)
 
 
 class MixedSizeSaveTests(unittest.TestCase):

@@ -185,42 +185,44 @@ SIGN_FONT_FILE = _find_font(_SIGN_FONT_CANDIDATES)
 SIGN_FONT_NAME = "edsig"
 
 # ---------------------------------------------------------------------------------------------------
-#  Toolbar font picker. Each named family the floating toolbar offers resolves to a real font the
-#  backend can embed so it renders identically on any host (incl. Linux/Render): a bundled open font
-#  (backend/fonts/), a local system font when present, else the metric-compatible Base-14 builtin.
-#  `_TOOLBAR_FONTS[key] = (base14_family, variants)` where variants maps (bold, italic) -> candidate
-#  file paths (bundled basename or absolute), tried in order. variants=None means "always Base-14".
+#  Toolbar font picker. The dropdown keeps the FAMILIAR names (Arial, Times New Roman, …) but the PDF
+#  generator only ever embeds legally distributable OPEN fonts (bundled in backend/fonts/, OFL/Apache),
+#  each metric-compatible with the name the user picked, so the saved file looks the same and renders
+#  identically on any host (incl. Linux/Render). The proprietary originals are never bundled/embedded.
+#    Arial / Helvetica / Verdana -> Arimo   (Apache-2.0, metric-compatible with Arial)
+#    Times New Roman             -> Tinos   (Apache-2.0, metric-compatible with Times New Roman)
+#    Courier New                 -> Cousine (Apache-2.0, metric-compatible with Courier New)
+#    Georgia                     -> Gelasio (OFL, metric-compatible with Georgia)
+#    Comic Sans MS               -> Comic Neue (OFL)        Roboto/Open Sans/Montserrat -> themselves
+#  `_TOOLBAR_FONTS[key] = (generic_family, variants)` where variants maps (bold, italic) -> bundled
+#  file candidates; the Base-14 builtin for `generic_family` is the last-resort fallback if a file is
+#  somehow missing (still non-proprietary — Base-14 fonts are referenced by name, never embedded).
 # ---------------------------------------------------------------------------------------------------
 _FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
 _F, _T = False, True
+
+
+def _vfiles(stem):
+    """The four bundled weight/slant files for a family: stem-{Regular,Bold,Italic,BoldItalic}.ttf."""
+    return {(_F, _F): [f'{stem}-Regular.ttf'], (_T, _F): [f'{stem}-Bold.ttf'],
+            (_F, _T): [f'{stem}-Italic.ttf'], (_T, _T): [f'{stem}-BoldItalic.ttf']}
+
+
 _TOOLBAR_FONTS = {
-    # Base-14 metric-compatible — render everywhere, no file needed.
-    'arial':     ('sans',  None),
-    'helvetica': ('sans',  None),
-    'times':     ('serif', None),
-    'courier':   ('mono',  None),
-    'sans':      ('sans',  None),   # back-compat with the old 3-way picker
-    'serif':     ('serif', None),
-    'mono':      ('mono',  None),
-    # Bundled open fonts (+ local system font first where it exists), Base-14 fallback.
-    'roboto':     ('sans', {(_F, _F): ['Roboto-Regular.ttf'], (_T, _F): ['Roboto-Bold.ttf'],
-                            (_F, _T): ['Roboto-Italic.ttf'], (_T, _T): ['Roboto-BoldItalic.ttf']}),
-    'opensans':   ('sans', {(_F, _F): ['OpenSans-Regular.ttf'], (_T, _F): ['OpenSans-Bold.ttf'],
-                            (_F, _T): ['OpenSans-Italic.ttf'], (_T, _T): ['OpenSans-BoldItalic.ttf']}),
-    'montserrat': ('sans', {(_F, _F): ['Montserrat-Regular.ttf'], (_T, _F): ['Montserrat-Bold.ttf'],
-                            (_F, _T): ['Montserrat-Italic.ttf'], (_T, _T): ['Montserrat-BoldItalic.ttf']}),
-    'comicsans':  ('sans', {(_F, _F): ['ComicNeue-Regular.ttf'], (_T, _F): ['ComicNeue-Bold.ttf'],
-                            (_F, _T): ['ComicNeue-Italic.ttf'], (_T, _T): ['ComicNeue-BoldItalic.ttf']}),
-    'georgia':    ('serif', {
-        (_F, _F): ['/System/Library/Fonts/Supplemental/Georgia.ttf', 'Gelasio-Regular.ttf'],
-        (_T, _F): ['/System/Library/Fonts/Supplemental/Georgia Bold.ttf', 'Gelasio-Regular.ttf'],
-        (_F, _T): ['/System/Library/Fonts/Supplemental/Georgia Italic.ttf', 'Gelasio-Italic.ttf'],
-        (_T, _T): ['/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf', 'Gelasio-Italic.ttf']}),
-    'verdana':    ('sans', {
-        (_F, _F): ['/System/Library/Fonts/Supplemental/Verdana.ttf'],
-        (_T, _F): ['/System/Library/Fonts/Supplemental/Verdana Bold.ttf'],
-        (_F, _T): ['/System/Library/Fonts/Supplemental/Verdana Italic.ttf'],
-        (_T, _T): ['/System/Library/Fonts/Supplemental/Verdana Bold Italic.ttf']}),
+    'arial':      ('sans',  _vfiles('Arimo')),       # Arial           -> Arimo
+    'helvetica':  ('sans',  _vfiles('Arimo')),       # Helvetica       -> Arimo
+    'verdana':    ('sans',  _vfiles('Arimo')),       # Verdana         -> Arimo
+    'times':      ('serif', _vfiles('Tinos')),       # Times New Roman -> Tinos
+    'courier':    ('mono',  _vfiles('Cousine')),     # Courier New     -> Cousine
+    'georgia':    ('serif', _vfiles('Gelasio')),     # Georgia         -> Gelasio
+    'comicsans':  ('sans',  _vfiles('ComicNeue')),   # Comic Sans MS   -> Comic Neue
+    'roboto':     ('sans',  _vfiles('Roboto')),
+    'opensans':   ('sans',  _vfiles('OpenSans')),
+    'montserrat': ('sans',  _vfiles('Montserrat')),
+    # Back-compat keys from the old 3-way picker (and the added-text default 'sans').
+    'sans':       ('sans',  _vfiles('Arimo')),
+    'serif':      ('serif', _vfiles('Tinos')),
+    'mono':       ('mono',  _vfiles('Cousine')),
 }
 _toolbar_font_cache = {}
 
