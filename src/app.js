@@ -42,6 +42,7 @@ class PDFEditorApp {
     this.selectedThumb = null;  // Pages panel: currently selected thumbnail index (for "insert after")
     this._pageOpBusy = false;   // Guard so page reorder/delete/insert don't overlap
     this.selectedInsert = null; // The added-text box currently selected
+    this._ttTarget = null;      // Active target of the shared floating text toolbar (editor/overlay/line)
     this._lastInsertSize = 14;  // Remembered font size for the next "Add text" box
     
     this.initializeEventListeners();
@@ -159,6 +160,9 @@ class PDFEditorApp {
       if (this._activeInsertEditor) this._activeInsertEditor.applyStyle('size', v);
       else this._lastInsertSize = Math.max(4, Math.min(200, v));
     });
+
+    // Shared contextual floating text toolbar (one toolbar for Edit + Add text).
+    this._initTextToolbar();
 
     // Signature dialog (Draw / Type / Image)
     document.getElementById('signPadClear')?.addEventListener('click', () => this.signPadClear());
@@ -322,6 +326,7 @@ class PDFEditorApp {
             height: fontHeightPx,
             fontSizePx: fontHeightPx,
             fontName: item.fontName || 'Helvetica',
+            fontFamilyName: fam,             // css family + loaded name, for the toolbar's font guess
             bold: bold,
             italic: italic,
             serif: serif
@@ -503,6 +508,29 @@ class PDFEditorApp {
   }
 
   /**
+   * Classify the source strip used to hide a text line: 'clean' (uniform background close to the
+   * cell's own colour — safe to stretch), 'dirty' (a border / rule / adjacent glyph passes through,
+   * so stretching it would paint a dark "shadow" band — fill solid instead) or 'unknown' (pixel
+   * readback unavailable — keep the legacy drawImage behaviour). Coordinates are device pixels.
+   */
+  _coverStripState(ctx, x, y, w, h, bg) {
+    if (!bg) return 'unknown';                       // no sampled bg (readback failed earlier) -> legacy
+    let d;
+    try { d = ctx.getImageData(Math.round(x), Math.round(y), Math.max(1, Math.round(w)), Math.max(1, Math.round(h))).data; }
+    catch (e) { return 'unknown'; }
+    const bgL = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
+    let sum = 0, n = 0; const vals = [];
+    for (let i = 0; i < d.length; i += 4) { const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; vals.push(l); sum += l; n++; }
+    if (!n) return 'unknown';
+    const mean = sum / n;
+    let q = 0; for (const l of vals) q += (l - mean) * (l - mean);
+    const std = Math.sqrt(q / n);
+    // Not uniform (a line/glyph runs through it) OR materially darker than the cell's own background.
+    if (std > 24 || mean < bgL - 22) return 'dirty';
+    return 'clean';
+  }
+
+  /**
    * Overlay an editable box on EACH line of text. Every box sits exactly on its original
    * line (same left, baseline and size) and edits that line in place. Only the lines the
    * user actually changes are tracked, so saving leaves all other text untouched.
@@ -547,13 +575,21 @@ class PDFEditorApp {
       const band = Math.max(2, Math.round((line.bottom - line.top) * 0.18));
       let sy = ly - band - 2;                                            // clean strip ABOVE the line...
       if (sy < 0) sy = Math.min(ch - band, Math.ceil(line.bottom) + 2);  // ...else just BELOW it
-      try {
-        if (sy < 0 || lw <= 0 || lh <= 0) throw new Error('no source strip');
-        pv.ctx.drawImage(pv.canvas, lx, sy, lw, band, lx, ly, lw, lh);   // stretch bg strip over the text
-      } catch (e) {
+      // Only stretch the strip when it is genuinely CLEAN background. Next to a table border or a
+      // section rule the strip catches that dark line and, stretched over the box, shows as a dark
+      // band ("shadow") above the text. In that case cover with the line's solid background colour
+      // instead — hides the original text with no band. A smooth gradient strip stays on drawImage.
+      const fillSolid = () => {
         const c = line.bgColor;
         pv.ctx.fillStyle = c ? `rgb(${c[0]},${c[1]},${c[2]})` : '#ffffff';
         pv.ctx.fillRect(lx, ly, lw, lh);
+      };
+      try {
+        if (sy < 0 || lw <= 0 || lh <= 0) throw new Error('no source strip');
+        if (this._coverStripState(pv.ctx, lx, sy, lw, band, line.bgColor) === 'dirty') fillSolid();
+        else pv.ctx.drawImage(pv.canvas, lx, sy, lw, band, lx, ly, lw, lh);   // stretch clean bg strip
+      } catch (e) {
+        fillSolid();
       }
     });
     pv.ctx.restore();
@@ -567,6 +603,20 @@ class PDFEditorApp {
       const shownText = pending ? pending.newText : line.text;
       div.dataset.originalText = shownText;
       div.textContent = shownText;
+      // Re-apply any floating-toolbar styling stored on the tracked edit. The line objects are
+      // rebuilt from the PDF spans on every refresh, so without this the box reverts to the
+      // original span's look (e.g. a colour set via the toolbar vanishes when another text box
+      // is added/edited and the page re-renders).
+      if (pending) {
+        line.bold = !!pending.bold;
+        line.italic = !!pending.italic;
+        if (pending.fontSize) line.fontSizePx = pending.fontSize * this.scale;
+        if (pending.underline) line.underline = true;
+        if (pending.color) line.color = pending.color;
+        if (pending.opacity != null) line.opacity = pending.opacity;
+        if (pending.align) line.align = pending.align;
+        if (pending.fontFamily) line.fontFamily = pending.fontFamily;
+      }
 
       const fontSizePx = line.fontSizePx * displayScale;
       const lineBoxPx = Math.max((line.bottom - line.top) * displayScale, fontSizePx);
@@ -593,22 +643,31 @@ class PDFEditorApp {
       // Mirror PDF.js's own text rendering: a non-embedded standard font uses the system-font
       // @font-face PDF.js injected (line.fontCss -> real Helvetica); an embedded font uses its
       // loadedName web font. Either way the edit box matches the page; fall back if neither resolves.
-      div.style.fontFamily = line.fontCss
-        ? `${line.fontCss}, ${fallbackFamily}`
-        : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily);
+      // A toolbar font-family override wins over the page's own font; otherwise mirror PDF.js.
+      div.style.fontFamily = line.fontFamily
+        ? this._familyCss(line.fontFamily)
+        : (line.fontCss
+          ? `${line.fontCss}, ${fallbackFamily}`
+          : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily));
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
       // Show the editable text in the line's REAL colour so the box blends into the page (e.g.
-      // white text on a dark headline). If text-colour detection failed, fall back to a readable
-      // contrast vs the background. (The saved file uses the exact original colour regardless.)
+      // white text on a dark headline). A toolbar colour override wins; if text-colour detection
+      // failed, fall back to a readable contrast vs the background. (The saved file uses the exact
+      // colour regardless.)
       const tc = line.textColor;
-      if (tc) {
+      if (line.color) {
+        div.style.color = `rgb(${line.color[0]},${line.color[1]},${line.color[2]})`;
+      } else if (tc) {
         div.style.color = `rgb(${tc[0]},${tc[1]},${tc[2]})`;
       } else {
         const bg = line.bgColor;
         const lum = bg ? (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) : 255;
         div.style.color = lum < 140 ? '#fff' : '#000';
       }
+      if (line.underline) div.style.textDecoration = 'underline';
+      if (line.opacity != null) div.style.opacity = line.opacity;
+      if (line.align) div.style.textAlign = line.align;
       div.style.padding = '0';
       div.style.margin = '0';
       div.style.border = '1px solid transparent';
@@ -631,9 +690,12 @@ class PDFEditorApp {
           : 'transparent';
         div.style.zIndex = '200';
         this.activeEditBox = div;
+        div.__displayScale = displayScale;     // lets the toolbar recompute CSS px when size changes
         // Smart mode: focusing a line resolves this click as "edit existing text" — light
         // up the Edit button (stays in auto, so the next click is still smart).
         this._reflectActiveTool('edit');
+        // Show the shared floating toolbar anchored to this line.
+        this._showTextToolbar({ kind: 'line', el: div, line });
       });
 
       div.addEventListener('blur', () => {
@@ -747,7 +809,14 @@ class PDFEditorApp {
       italic: !!line.italic,
       serif: !!line.serif,
       bgColor: line.bgColor || null,   // [r,g,b] cell background (so a cover box matches, not white)
-      newText: newText
+      newText: newText,
+      // Floating-toolbar styling applied to this line (all optional; absent == unchanged).
+      ...(line.underline ? { underline: true } : {}),
+      ...(line.color ? { color: line.color } : {}),
+      ...(line.opacity != null && line.opacity < 1 ? { opacity: line.opacity } : {}),
+      ...(line.align ? { align: line.align } : {}),
+      ...(line.fontFamily ? { fontFamily: line.fontFamily } : {}),
+      ...(line.sizeOverridden ? { sizeOverride: true } : {}),
     };
   }
 
@@ -771,6 +840,7 @@ class PDFEditorApp {
         left: item.left, right: item.right, baseline: item.baseline,
         top: item.top, bottom: item.bottom, height: item.height,
         fontSizePx: item.fontSizePx, fontName: item.fontName,
+        fontFamilyName: item.fontFamilyName,
         pageIndex: item.pageIndex, items: [item],
       };
       lines.push(currentLine);
@@ -952,9 +1022,10 @@ class PDFEditorApp {
 
   setMode(mode) {
     console.log('setMode called:', mode, 'current mode:', this.mode);
-    
+
     const previousMode = this.mode;
     this.mode = mode;
+    if (previousMode !== mode) { this.hideTextToolbar(); this.selectedInsert = null; }
     
     const textBtn = document.getElementById('textModeBtn');
     const editBtn = document.getElementById('editModeBtn');
@@ -1057,6 +1128,10 @@ class PDFEditorApp {
     // covered by editable line boxes, so a click landing on the canvas is genuinely blank
     // space → add new text there (and reflect the Add button).
     if (this.mode === 'text' || this.mode === 'auto') {
+      // The click that closes an open Add-text editor must NOT also open a fresh one — it only
+      // commits. The next deliberate click then adds/edits based on where it lands. (onDocDown stamps
+      // the time it committed on this same mousedown.)
+      if (Date.now() - (this._lastInsertCommitAt || 0) < 350) { this._lastInsertCommitAt = 0; return; }
       // Seed the new box from the toolbar's size / B / I (its current "defaults").
       const fontSize = parseInt(document.getElementById('addSize')?.value, 10) || this._lastInsertSize || 14;
       // Drop an empty, editable text box where the user clicked and let them type in place.
@@ -1298,12 +1373,21 @@ class PDFEditorApp {
     if (sizeEl0) sizeEl0.value = this._lastInsertSize || boxDefaults.size;
     syncToolbar();
 
+    // Reflect any box-level styling already on this edit (re-opening) onto the live editor, then
+    // show the shared floating toolbar anchored to it.
+    ['underline', 'color', 'opacity', 'align', 'family'].forEach(k => {
+      const v = k === 'family' ? edit.fontFamily : edit[k];
+      if (v != null && !(k === 'opacity' && v >= 1)) this._restyleEditorDiv(div, k, v);
+    });
+    this._showTextToolbar({ kind: 'editor', el: div, edit });
+
     let done = false;
     const finish = (commit) => {
       if (done) return;
       done = true;
       document.removeEventListener('mousedown', onDocDown, true);
       document.body.classList.remove('editing-insert');
+      if (this._ttTarget && this._ttTarget.kind === 'editor') this.hideTextToolbar();
       this._activeInsertEditor = null;
       this._insertSavedRange = null;
       const result = commit ? this.serializeEditor(div, boxDefaults) : null;
@@ -1334,7 +1418,9 @@ class PDFEditorApp {
     // (so adjusting size/B/I keeps the box open). Esc cancels.
     const onDocDown = (e) => {
       if (done || div.contains(e.target)) return;
-      if (e.target.closest && e.target.closest('.ctx-text')) return;
+      // Don't commit when the click is on a styling control (top Add bar or the floating toolbar).
+      if (e.target.closest && e.target.closest('.ctx-text, #textToolbar')) return;
+      this._lastInsertCommitAt = Date.now();   // suppress the chain-open on this same canvas click
       finish(true);
     };
     document.addEventListener('mousedown', onDocDown, true);
@@ -1626,6 +1712,8 @@ class PDFEditorApp {
     del.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
       this.edits = this.edits.filter(x => x !== edit);
+      if (this.selectedInsert === edit) this.selectedInsert = null;
+      if (this._ttTarget && this._ttTarget.edit === edit) this.hideTextToolbar();
       this.commitHistory();
       this.renderCurrentPage();
     });
@@ -1980,9 +2068,13 @@ class PDFEditorApp {
         div.style.whiteSpace = 'pre-wrap';
         div.style.fontWeight = edit.bold ? 'bold' : 'normal';
         div.style.fontStyle = edit.italic ? 'italic' : 'normal';
-        div.style.fontFamily = edit.fontFamily === 'serif' ? '"Times New Roman",Times,serif'
-          : edit.fontFamily === 'mono' ? '"Courier New",Courier,monospace'
-          : 'Arial,Helvetica,sans-serif';
+        div.style.fontFamily = this._familyCss(edit.fontFamily);
+        // Whole-box styles set via the floating toolbar (color / underline / opacity / alignment)
+        // must survive the commit + static re-render, exactly as the live editor showed them.
+        if (edit.color != null) div.style.color = this._rgbCss(edit.color);
+        if (edit.underline) div.style.textDecoration = 'underline';
+        if (edit.opacity != null) div.style.opacity = edit.opacity;
+        if (edit.align) div.style.textAlign = edit.align;
         div.title = 'Double-click to edit · drag to move · rotate with the top handle';
         div.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); this.openInsertEditor(edit, pv, false); });
         // Rotation pivots on the text origin (left edge at the baseline) so the saved PDF matches.
@@ -2018,6 +2110,307 @@ class PDFEditorApp {
   selectInsert(edit) {
     this.selectedInsert = edit;
     this.insertOverlays.forEach(o => o.classList.toggle('selected', !!edit && o.__edit === edit));
+    if (edit) this._showTextToolbar({ kind: 'overlay', el: this._overlayElFor(edit), edit });
+    else if (this._ttTarget && this._ttTarget.kind === 'overlay') this.hideTextToolbar();
+  }
+
+  // ----------------------------------------------------------------------------------------------
+  //  Shared contextual floating text toolbar — ONE toolbar for edited existing text AND added text.
+  //  applyTextStyle() routes a control to whichever text is active (open Add-text editor, a selected
+  //  added-text overlay, or a focused existing-text line box). Bold/italic/size stay per-run inside
+  //  the open editor; colour/underline/opacity/align/font-family are box-level on the edit object.
+  // ----------------------------------------------------------------------------------------------
+  _initTextToolbar() {
+    const tb = document.getElementById('textToolbar');
+    if (!tb) return;
+    // Clicking a button must NOT blur/commit the active editor; inputs are allowed to take focus.
+    tb.addEventListener('mousedown', (e) => { if (!e.target.closest('input, select')) e.preventDefault(); });
+    const on = (id, ev, fn) => document.getElementById(id)?.addEventListener(ev, fn);
+    on('tt-bold', 'click', () => this.applyTextStyle('bold', !this._ttStyle().bold));
+    on('tt-italic', 'click', () => this.applyTextStyle('italic', !this._ttStyle().italic));
+    on('tt-underline', 'click', () => this.applyTextStyle('underline', !this._ttStyle().underline));
+    on('tt-size', 'input', (e) => { const v = parseInt(e.target.value, 10); if (v) this.applyTextStyle('size', v); });
+    on('tt-font', 'change', (e) => { if (e.target.value) this.applyTextStyle('family', e.target.value); });
+    this._initColorPalette();
+    on('tt-align-left', 'click', () => this.applyTextStyle('align', 'left'));
+    on('tt-align-center', 'click', () => this.applyTextStyle('align', 'center'));
+    on('tt-align-right', 'click', () => this.applyTextStyle('align', 'right'));
+    on('tt-opacity', 'input', (e) => this.applyTextStyle('opacity', Math.max(0.1, Math.min(1, (parseInt(e.target.value, 10) || 100) / 100))));
+    // tt-dup / tt-link are intentionally not rendered yet; duplicateActiveText() stays for when they return.
+    on('tt-del', 'click', () => this.deleteActiveText());
+    document.getElementById('stage')?.addEventListener('scroll', () => this._positionTextToolbar());
+    window.addEventListener('resize', () => this._positionTextToolbar());
+    document.addEventListener('selectionchange', () => { if (this._ttTarget) this._positionTextToolbar(); });
+    // Hide on a click outside both the toolbar and the active text (an open Add-text editor commits
+    // itself via its own outside-mousedown handler; line/overlay just deselect).
+    document.addEventListener('mousedown', (e) => {
+      const t = this._ttTarget;
+      if (!t || t.kind === 'editor') return;
+      if (e.target.closest && e.target.closest('#textToolbar')) return;
+      const el = t.kind === 'overlay' ? this._overlayElFor(t.edit) : t.el;
+      if (el && (e.target === el || el.contains(e.target))) return;
+      if (t.kind === 'overlay') this.selectInsert(null); else this.hideTextToolbar();
+    }, true);
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this._ttTarget && this._ttTarget.kind !== 'editor') this.hideTextToolbar(); });
+  }
+
+  _overlayElFor(edit) { return this.insertOverlays.find(o => o.__edit === edit) || null; }
+  _hexToRgb(h) { h = (h || '').replace('#', ''); return [parseInt(h.slice(0, 2), 16) || 0, parseInt(h.slice(2, 4), 16) || 0, parseInt(h.slice(4, 6), 16) || 0]; }
+  _rgbCss(c) { return Array.isArray(c) ? `rgb(${c[0]},${c[1]},${c[2]})` : (c || '#000'); }
+  _rgbToHex(c) { return Array.isArray(c) ? '#' + c.map(x => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('') : '#000000'; }
+  _familyCss(f) {
+    return ({
+      arial: 'Arial, sans-serif', helvetica: 'Helvetica, Arial, sans-serif',
+      times: '"Times New Roman", Times, serif', georgia: 'Georgia, "Times New Roman", serif',
+      verdana: 'Verdana, Geneva, sans-serif', courier: '"Courier New", Courier, monospace',
+      roboto: 'Roboto, Arial, sans-serif', opensans: '"Open Sans", Arial, sans-serif',
+      montserrat: 'Montserrat, Arial, sans-serif', comicsans: '"Comic Sans MS", "Comic Neue", cursive',
+      // back-compat with the old 3-way values
+      serif: '"Times New Roman", Times, serif', mono: '"Courier New", Courier, monospace', sans: 'Arial, Helvetica, sans-serif',
+    })[f] || 'Arial, Helvetica, sans-serif';
+  }
+
+  // The 10 font-family keys the toolbar dropdown offers.
+  static get TOOLBAR_FONT_KEYS() { return ['arial', 'helvetica', 'times', 'georgia', 'verdana', 'courier', 'roboto', 'opensans', 'montserrat', 'comicsans']; }
+
+  /** Normalise a stored fontFamily to a dropdown key. The 10 keys pass through; the legacy
+   *  sans/serif/mono map to their nearest dropdown entry; anything else -> '' (unknown). */
+  _normFamilyKey(fam) {
+    const f = (fam || '').toLowerCase();
+    if (PDFEditorApp.TOOLBAR_FONT_KEYS.includes(f)) return f;
+    return ({ sans: 'arial', serif: 'times', mono: 'courier' })[f] || '';
+  }
+
+  /** Best-guess dropdown key from a PDF font NAME (e.g. 'Helvetica-Bold' -> 'helvetica'). Returns ''
+   *  when the font isn't one the dropdown offers (e.g. Computer Modern), so we can show a placeholder. */
+  _familyKeyFromFont(name) {
+    const n = (name || '').toLowerCase();
+    if (!n) return '';
+    const hits = [['arial', 'arial'], ['helvetica', 'helvetica'], ['times', 'times'], ['georgia', 'georgia'],
+      ['verdana', 'verdana'], ['courier', 'courier'], ['roboto', 'roboto'], ['opensans', 'opensans'],
+      ['open sans', 'opensans'], ['montserrat', 'montserrat'], ['comic', 'comicsans']];
+    for (const [needle, key] of hits) if (n.includes(needle)) return key;
+    return '';
+  }
+
+  /** The dropdown key to SHOW for a target: an explicit family override, else a guess from the PDF
+   *  font name, else '' (-> the "Select a Font Style" placeholder). */
+  _displayFontKey(fam, fontName) {
+    return this._normFamilyKey(fam) || this._familyKeyFromFont(fontName) || '';
+  }
+
+  /** Build the Sejda-style swatch palette popover and wire it to applyTextStyle('color', …). */
+  _initColorPalette() {
+    const btn = document.getElementById('tt-color-btn');
+    const pop = document.getElementById('tt-color-pop');
+    if (!btn || !pop) return;
+    // A compact, well-rounded palette (greys + 6 shade rows across the hues).
+    const PALETTE = [
+      '#000000', '#434343', '#666666', '#999999', '#b7b7b7', '#cccccc', '#d9d9d9', '#efefef', '#f3f3f3', '#ffffff',
+      '#980000', '#ff0000', '#ff9900', '#ffff00', '#00ff00', '#00ffff', '#4a86e8', '#0000ff', '#9900ff', '#ff00ff',
+      '#e6b8af', '#f4cccc', '#fce5cd', '#fff2cc', '#d9ead3', '#d0e0e3', '#c9daf8', '#cfe2f3', '#d9d2e9', '#ead1dc',
+      '#dd7e6b', '#ea9999', '#f9cb9c', '#ffe599', '#b6d7a8', '#a2c4c9', '#a4c2f4', '#9fc5e8', '#b4a7d6', '#d5a6bd',
+      '#cc4125', '#e06666', '#f6b26b', '#ffd966', '#93c47d', '#76a5af', '#6d9eeb', '#6fa8dc', '#8e7cc3', '#c27ba0',
+      '#a61c00', '#cc0000', '#e69138', '#f1c232', '#6aa84f', '#45818e', '#3c78d8', '#3d85c6', '#674ea7', '#a64d79',
+      '#85200c', '#990000', '#b45f06', '#bf9000', '#38761d', '#134f5c', '#1155cc', '#0b5394', '#351c75', '#741b47',
+    ];
+    PALETTE.forEach(hex => {
+      const sw = document.createElement('button');
+      sw.type = 'button'; sw.className = 'tt-sw'; sw.style.background = hex; sw.title = hex;
+      sw.addEventListener('mousedown', (e) => e.preventDefault());   // keep the editor focused
+      sw.addEventListener('click', () => { this.applyTextStyle('color', this._hexToRgb(hex)); this._setColorSwatch(hex); pop.hidden = true; });
+      pop.appendChild(sw);
+    });
+    // A "custom" native picker for anything outside the palette.
+    const custom = document.createElement('label');
+    custom.className = 'tt-sw tt-sw-custom'; custom.title = 'Custom colour';
+    custom.innerHTML = 'Custom <input type="color" id="tt-color-custom" value="#000000" title="Custom colour" aria-label="Custom colour">';
+    custom.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
+    pop.appendChild(custom);
+    custom.querySelector('input').addEventListener('input', (e) => { this.applyTextStyle('color', this._hexToRgb(e.target.value)); this._setColorSwatch(e.target.value); });
+
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', () => { pop.hidden = !pop.hidden; });
+    // Close on a click outside the colour control.
+    document.addEventListener('mousedown', (e) => { if (!pop.hidden && !e.target.closest('.tt-color-wrap')) pop.hidden = true; }, true);
+  }
+
+  _setColorSwatch(hex) { const sw = document.getElementById('tt-color-sw'); if (sw) sw.style.background = hex; }
+
+  /** Show the toolbar for a target { kind:'editor'|'overlay'|'line', el, edit?, line? }. */
+  _showTextToolbar(target) {
+    this._ttTarget = target;
+    const tb = document.getElementById('textToolbar');
+    if (!tb) return;
+    tb.hidden = false; tb.classList.add('show');
+    const dup = document.getElementById('tt-dup');
+    if (dup) dup.disabled = (target.kind === 'line');   // duplicate/move are added-text only
+    this._reflectTextToolbar();
+    this._positionTextToolbar();
+  }
+
+  hideTextToolbar() {
+    this._ttTarget = null;
+    const tb = document.getElementById('textToolbar');
+    if (tb) { tb.classList.remove('show'); tb.hidden = true; }
+  }
+
+  /** Style of the active target, used to light up the toolbar buttons. */
+  _ttStyle() {
+    const t = this._ttTarget;
+    if (!t) return {};
+    if (t.kind === 'editor') {
+      const s = this._activeInsertEditor ? this._activeInsertEditor.style() : {};
+      const e = t.edit || {};
+      return { bold: s.bold, italic: s.italic, size: s.size, underline: !!e.underline,
+               color: e.color, opacity: e.opacity, align: e.align,
+               family: this._displayFontKey(e.fontFamily, e.fontName) };
+    }
+    const o = t.kind === 'overlay' ? t.edit : t.line;
+    if (!o) return {};
+    const size = t.kind === 'overlay' ? Math.round(o.fontSize) : Math.round((o.fontSizePx || 0) / this.scale);
+    // Added-text bold/italic live per-run, so a committed overlay reflects them from its runs
+    // (every run bold/italic) rather than the box-level flags, which stay at the box default.
+    let bold = !!o.bold, italic = !!o.italic;
+    if (t.kind === 'overlay' && o.runs && o.runs.length) {
+      const flat = o.runs.flat();
+      if (flat.length) { bold = flat.every(r => r.bold); italic = flat.every(r => r.italic); }
+    }
+    return { bold, italic, underline: !!o.underline, size,
+             color: o.color, opacity: o.opacity, align: o.align,
+             family: this._displayFontKey(o.fontFamily, o.fontFamilyName || o.fontName) };
+  }
+
+  _reflectTextToolbar() {
+    const s = this._ttStyle();
+    const tog = (id, v) => document.getElementById(id)?.classList.toggle('on', !!v);
+    tog('tt-bold', s.bold); tog('tt-italic', s.italic); tog('tt-underline', s.underline);
+    tog('tt-align-left', (s.align || 'left') === 'left'); tog('tt-align-center', s.align === 'center'); tog('tt-align-right', s.align === 'right');
+    // Don't clobber an input the user is actively typing into (else mid-type reflect mangles it).
+    const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null && el !== document.activeElement) el.value = v; };
+    if (s.size) set('tt-size', s.size);
+    // Always reflect the font: a known family selects it; an unknown one ('' ) shows the
+    // "Select a Font Style" placeholder so the dropdown is never blank.
+    set('tt-font', s.family || '');
+    this._setColorSwatch(s.color ? this._rgbToHex(s.color) : '#000000');
+    set('tt-opacity', Math.round((s.opacity == null ? 1 : s.opacity) * 100));
+  }
+
+  /** Position the toolbar above the selected text, clamped inside the stage, flipping below if it
+   *  would clip the top. Anchors to the (PDF-positioned) DOM element so it tracks zoom/scroll/resize. */
+  _positionTextToolbar() {
+    const t = this._ttTarget, tb = document.getElementById('textToolbar');
+    if (!t || !tb || tb.hidden) return;
+    const el = t.kind === 'overlay' ? this._overlayElFor(t.edit) : t.el;
+    if (!el || !el.isConnected) { this.hideTextToolbar(); return; }
+    const r = el.getBoundingClientRect();
+    const tw = tb.offsetWidth || 360, th = tb.offsetHeight || 40;
+    const stage = document.getElementById('stage');
+    const sr = stage ? stage.getBoundingClientRect() : { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
+    let left = Math.max(sr.left + 4, Math.min(r.left + r.width / 2 - tw / 2, sr.right - tw - 4));
+    let top = r.top - th - 8;
+    if (top < sr.top + 4) top = r.bottom + 8;                       // would clip the top -> drop below
+    top = Math.max(sr.top + 4, Math.min(top, sr.bottom - th - 4));  // keep on-screen
+    tb.style.left = left + 'px';
+    tb.style.top = top + 'px';
+  }
+
+  /** Apply one control to whatever text is active. */
+  applyTextStyle(kind, value) {
+    const t = this._ttTarget;
+    if (!t) return;
+    if (t.kind === 'editor') {
+      if (kind === 'bold' || kind === 'italic' || kind === 'size') {
+        if (this._activeInsertEditor) this._activeInsertEditor.applyStyle(kind, value);
+      } else {
+        this._setBoxField(t.edit, kind, value);
+        this._restyleEditorDiv(t.el, kind, value);
+      }
+    } else if (t.kind === 'overlay') {
+      this._applyOverlayStyle(t.edit, kind, value);
+      this.refresh().then(() => { this.selectInsert(t.edit); this._positionTextToolbar(); });
+      return;                                                       // reflect after the re-render
+    } else if (t.kind === 'line') {
+      this._applyLineStyle(t, kind, value);
+    }
+    this._reflectTextToolbar();
+    this._positionTextToolbar();
+  }
+
+  _setBoxField(edit, kind, value) {
+    if (kind === 'underline') edit.underline = !!value;
+    else if (kind === 'color') edit.color = value;
+    else if (kind === 'opacity') edit.opacity = value;
+    else if (kind === 'align') edit.align = value;
+    else if (kind === 'family') edit.fontFamily = value;
+  }
+
+  _restyleEditorDiv(div, kind, value) {
+    if (!div) return;
+    if (kind === 'underline') div.style.textDecoration = value ? 'underline' : 'none';
+    else if (kind === 'color') div.style.color = this._rgbCss(value);
+    else if (kind === 'opacity') div.style.opacity = value;
+    else if (kind === 'align') div.style.textAlign = value;
+    else if (kind === 'family') div.style.fontFamily = this._familyCss(value);
+  }
+
+  /** Whole-box styling for a selected (not-being-edited) added-text overlay. */
+  _applyOverlayStyle(edit, kind, value) {
+    if (kind === 'bold' || kind === 'italic') {
+      edit[kind] = !!value;
+      if (edit.runs) edit.runs.forEach(line => line.forEach(r => { r[kind] = !!value; }));
+    } else if (kind === 'size') {
+      edit.fontSize = value;
+      if (edit.runs) edit.runs.forEach(line => line.forEach(r => { r.size = value; }));
+    } else {
+      this._setBoxField(edit, kind, value);
+    }
+    this.commitHistory();
+  }
+
+  /** Whole-line styling for a focused existing-text line box (updates CSS in place + tracks the edit
+   *  immediately; trackEdit does not re-render, so the box keeps focus). */
+  _applyLineStyle(t, kind, value) {
+    const l = t.line, div = t.el;
+    if (kind === 'bold') { l.bold = !!value; div.style.fontWeight = value ? 'bold' : 'normal'; }
+    else if (kind === 'italic') { l.italic = !!value; div.style.fontStyle = value ? 'italic' : 'normal'; }
+    else if (kind === 'underline') { l.underline = !!value; div.style.textDecoration = value ? 'underline' : 'none'; }
+    else if (kind === 'size') { l.fontSizePx = value * this.scale; l.sizeOverridden = true; div.style.fontSize = (value * this.scale * (div.__displayScale || 1)) + 'px'; }
+    else if (kind === 'color') { l.color = value; div.style.color = this._rgbCss(value); }
+    else if (kind === 'opacity') { l.opacity = value; div.style.opacity = value; }
+    else if (kind === 'align') { l.align = value; div.style.textAlign = value; }
+    else if (kind === 'family') { l.fontFamily = value; div.style.fontFamily = this._familyCss(value); }
+    this.trackEdit(this.lineToEdit(l, this.cleanEditableText(div.textContent)));
+  }
+
+  /** Duplicate the selected added-text object (existing text isn't a movable object). */
+  duplicateActiveText() {
+    const t = this._ttTarget;
+    if (!t || t.kind === 'line' || !t.edit) return;
+    const src = t.edit;
+    const copy = JSON.parse(JSON.stringify(src));   // deep copy (runs included); plain data only
+    copy.x = (src.x || 0) + 12;
+    copy.baseline = (src.baseline || 0) + 12;
+    this.edits.push(copy);
+    this.commitHistory();
+    this.refresh().then(() => { this.selectInsert(copy); this._positionTextToolbar(); });
+  }
+
+  /** Delete the active text: an added object is removed; an existing line is blanked (redacted). */
+  deleteActiveText() {
+    const t = this._ttTarget;
+    if (!t) return;
+    if (t.kind === 'line') {
+      this.trackEdit(this.lineToEdit(t.line, ''));   // empty replacement -> redacted away on save
+      if (t.el) { t.el.textContent = ''; t.el.dataset.originalText = ''; }
+      this.hideTextToolbar();
+    } else if (t.edit) {
+      this.edits = this.edits.filter(e => e !== t.edit);
+      this.commitHistory();
+      this.selectedInsert = null;
+      this.hideTextToolbar();
+      this.refresh();
+    }
   }
 
   /** Attach move / resize / rotate / delete behaviour to one insert overlay. */
@@ -2121,6 +2514,8 @@ class PDFEditorApp {
     del.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
       this.edits = this.edits.filter(x => x !== edit);
+      if (this.selectedInsert === edit) this.selectedInsert = null;
+      if (this._ttTarget && this._ttTarget.edit === edit) this.hideTextToolbar();
       this.commitHistory();
       this.renderCurrentPage();
     });
