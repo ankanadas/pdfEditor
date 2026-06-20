@@ -929,5 +929,103 @@ class MixedSizeSaveTests(unittest.TestCase):
         self.assertIn("World", txt)
 
 
+class PasswordTests(unittest.TestCase):
+    """Open / unlock password-protected PDFs. The editor unlocks at open via /decrypt and then
+    works on plain bytes; /edit-pdf also accepts a password for robustness."""
+
+    def _encrypted(self, user_pw="open123", owner_pw="owner999", text="SECRETLINE"):
+        doc = fitz.open(); page = doc.new_page(width=420, height=200)
+        page.insert_text((72, 100), text, fontsize=16)
+        return doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, user_pw=user_pw, owner_pw=owner_pw)
+
+    def _decrypt(self, pdf_bytes, password=None):
+        body = {"pdfBase64": base64.b64encode(pdf_bytes).decode()}
+        if password is not None:
+            body["password"] = password
+        resp = appmod.app.test_client().post("/decrypt", json=body)
+        return resp.status_code, resp.get_json()
+
+    def test_decrypt_with_correct_password_returns_unlocked_copy(self):
+        status, data = self._decrypt(self._encrypted(), "open123")
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("success"), data)
+        res = fitz.open(stream=base64.b64decode(data["pdfBase64"]), filetype="pdf")
+        self.assertFalse(res.needs_pass, "returned copy must be unlocked")
+        self.assertIn("SECRETLINE", res[0].get_text())
+
+    def test_decrypt_wrong_password_reports_wrongPassword(self):
+        _, data = self._decrypt(self._encrypted(), "nope")
+        self.assertFalse(data.get("success"))
+        self.assertTrue(data.get("wrongPassword"))
+        self.assertFalse(data.get("needsPassword"))
+
+    def test_decrypt_no_password_reports_needsPassword(self):
+        _, data = self._decrypt(self._encrypted(), None)
+        self.assertFalse(data.get("success"))
+        self.assertTrue(data.get("needsPassword"))
+
+    def test_edit_pdf_accepts_password_and_edits(self):
+        enc = self._encrypted(text="EDITME ORIGINAL")
+        src = fitz.open(stream=enc, filetype="pdf"); src.authenticate("open123")
+        edit = edit_from_span(find_span(src, "EDITME"), "EDITME CHANGED")
+        resp = appmod.app.test_client().post("/edit-pdf", json={
+            "pdfBase64": base64.b64encode(enc).decode(), "edits": [edit], "password": "open123",
+        })
+        data = resp.get_json()
+        self.assertTrue(data.get("success"), data)
+        res = fitz.open(stream=base64.b64decode(data["pdfBase64"]), filetype="pdf")
+        self.assertIn("CHANGED", page_text(res))
+
+    def test_edit_pdf_without_password_reports_needsPassword(self):
+        resp = appmod.app.test_client().post("/edit-pdf", json={
+            "pdfBase64": base64.b64encode(self._encrypted()).decode(), "edits": [],
+        })
+        data = resp.get_json()
+        self.assertFalse(data.get("success"))
+        self.assertTrue(data.get("needsPassword"))
+
+    def test_empty_password_file_unlocks_without_a_password(self):
+        # Permission-only encryption (empty user password) — common in the wild; must unlock with
+        # no password supplied and come back as plain, readable bytes.
+        doc = fitz.open(); page = doc.new_page(width=420, height=200)
+        page.insert_text((72, 100), "PERMONLY", fontsize=16)
+        enc = doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw="owneronly",
+                          permissions=int(fitz.PDF_PERM_PRINT))
+        _, data = self._decrypt(enc, None)
+        self.assertTrue(data.get("success"), data)
+        res = fitz.open(stream=base64.b64decode(data["pdfBase64"]), filetype="pdf")
+        self.assertFalse(res.needs_pass)
+        self.assertIn("PERMONLY", res[0].get_text())
+
+
+class Type1FontReuseTests(unittest.TestCase):
+    """Embedded PostScript Type1 fonts must NOT be reused to re-insert edited text — PyMuPDF re-embeds
+    them as a CIDFontType0/Identity-H font that strict viewers (Preview/Acrobat) mis-map, so the
+    edited line renders as the wrong glyphs there (gibberish that still copies correctly). They drop
+    to the bundled open fallback instead. TrueType embeds reuse cleanly and are kept."""
+
+    def test_is_embedded_type1_detection(self):
+        self.assertTrue(appmod._is_embedded_type1("pfa", "Type1"))
+        self.assertTrue(appmod._is_embedded_type1("pfb", "Type1"))
+        self.assertTrue(appmod._is_embedded_type1("", "Type1"))
+        # TrueType embeds (and TrueType-based CIDFontType2 Type0) reuse cleanly — keep them
+        self.assertFalse(appmod._is_embedded_type1("ttf", "TrueType"))
+        self.assertFalse(appmod._is_embedded_type1("ttf", "Type0"))
+        self.assertFalse(appmod._is_embedded_type1("", "n/a"))
+
+    def test_sans_named_font_with_serif_flag_is_treated_as_sans(self):
+        # A 'HelveticaBold' span whose FontDescriptor wrongly sets the serif flag bit (4) must still be
+        # treated as sans, so the fallback redraw is Arimo (sans), not Times (serif).
+        serif, bold, italic = appmod._span_style({"font": "HelveticaBold", "flags": 4 | 16, "text": "X"})
+        self.assertFalse(serif, "a Helvetica-named span must not be treated as serif")
+        self.assertTrue(bold, "the bold flag must still be honoured")
+
+    def test_serif_named_font_still_detected_serif(self):
+        self.assertTrue(appmod._span_style({"font": "Times-Roman", "flags": 0, "text": "X"})[0])
+
+    def test_unflagged_sans_font_stays_sans(self):
+        self.assertFalse(appmod._span_style({"font": "Arial", "flags": 0, "text": "X"})[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -87,6 +87,23 @@ class PDFEditorApp {
     document.getElementById('stampModeBtn')?.addEventListener('click', () => {
       this.setMode('stamp');
     });
+    // Editing-restriction gate: on a document with owner permissions that forbid modification, the
+    // FIRST click that would start an edit on a page asks the user to confirm they're authorised.
+    // We listen in the CAPTURE phase on both mousedown (blocks focusing an existing-text box and the
+    // erase drag) and click (blocks add-text / stamp via handleCanvasClick) so the interaction is
+    // stopped before any editor opens. _confirmEditAllowed only shows the prompt once; once confirmed
+    // the gate is a no-op and editing proceeds normally for the rest of the session.
+    const editGate = (e) => {
+      if (this._restrictionConfirmed || !this._editRestricted) return;
+      if (!(e.target instanceof Element) || !e.target.closest('.page-wrap')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this._confirmEditAllowed();
+    };
+    const stageEl = document.getElementById('stage');
+    stageEl?.addEventListener('mousedown', editGate, true);
+    stageEl?.addEventListener('click', editGate, true);
+
     // Stamp picker chips: choose which stamp to drop on the next page click.
     this.activeStamp = null;
     document.querySelectorAll('.stamp-chip').forEach(chip => {
@@ -374,12 +391,66 @@ class PDFEditorApp {
 
       // Read file as ArrayBuffer and clone it to prevent detachment
       const arrayBuffer = await file.arrayBuffer();
-      this.originalFileData = arrayBuffer.slice(0); // Clone the ArrayBuffer
-      
-      // Load into PDF.js for rendering
+
+      // Load into PDF.js for rendering. If the PDF is encrypted, PDF.js invokes onPassword;
+      // we prompt the user and capture the working password so the backend can produce a
+      // decrypted (unlocked) working copy. Empty-password / permission-only files never trigger
+      // onPassword (PDF.js opens them automatically) and behave exactly as before.
+      let enteredPassword = '';
+      let userCancelledPw = false;
       const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }); // Clone for PDF.js
-      this.pdfJsDoc = await loadingTask.promise;
+      loadingTask.onPassword = (updatePassword, reason) => {
+        const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
+        this.promptPassword(incorrect).then((pw) => {
+          if (pw == null) { userCancelledPw = true; try { loadingTask.destroy(); } catch (_) {} }
+          else { enteredPassword = pw; updatePassword(pw); }
+        });
+      };
+      try {
+        this.pdfJsDoc = await loadingTask.promise;
+      } catch (err) {
+        // Cancelled password prompt (task destroyed) -> quietly back out of loading.
+        if (userCancelledPw || this._isPasswordError(err)) {
+          document.body.classList.remove('has-pdf');
+          const fn = document.getElementById('fileName'); if (fn) fn.textContent = '';
+          this.showStatus('Opening cancelled — the PDF is password-protected.', 'info');
+          return;
+        }
+        throw err;
+      }
       console.log('PDF.js loaded PDF');
+
+      // Detect owner editing restrictions on the ORIGINAL document now, before the decrypt step
+      // below reloads PDF.js from a permission-free copy (which would otherwise hide the restriction).
+      // This covers both permission-only PDFs (open without a password) and password-protected PDFs
+      // that ALSO restrict modification — both get the authorisation confirmation before editing.
+      const editRestricted = await this._detectEditRestriction();
+
+      // If the user supplied a real password, fetch an unlocked copy from the backend so the
+      // edit/save pipeline works on plain bytes (the saved copy is unlocked, by design). If the
+      // backend can't be reached, we keep the viewable PDF.js doc and the save chain flattens.
+      let workingData = arrayBuffer.slice(0);
+      if (enteredPassword) {
+        this.showStatus('Unlocking PDF…', 'info');
+        try {
+          const res = await PDFBackendService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
+          if (res.bytes) {
+            const dec = res.bytes;
+            workingData = dec.buffer.slice(dec.byteOffset, dec.byteOffset + dec.byteLength);
+            this.pdfJsDoc = await pdfjsLib.getDocument({ data: dec.slice(0) }).promise;
+          } else {
+            console.warn('Backend could not unlock the PDF; it will save as a flattened copy.');
+          }
+        } catch (e) {
+          console.warn('Backend decrypt unavailable; protected PDF will save as a flattened copy:', e);
+        }
+      }
+      this.originalFileData = workingData; // Clone the (possibly decrypted) ArrayBuffer
+
+      // Owner/editing-restriction gate: ask the user to confirm they're authorised before their FIRST
+      // edit (see _confirmEditAllowed / the stage mousedown gate). Reset the confirmation per document.
+      this._editRestricted = editRestricted;
+      this._restrictionConfirmed = false;
       
       // Try to load into controller (pdf-lib) for editing - but don't fail if it doesn't work
       try {
@@ -419,13 +490,95 @@ class PDFEditorApp {
       if (error.message.includes('Invalid') || error.message.includes('corrupted')) {
         errorMessage = 'This PDF file appears to be corrupted or in an unsupported format';
       } else if (error.message.includes('password') || error.message.includes('encrypted')) {
-        errorMessage = 'This PDF is password-protected. Please use an unencrypted PDF';
+        errorMessage = 'This PDF is protected and could not be opened.';
       } else {
         errorMessage = `Failed to load PDF: ${error.message}`;
       }
       
       this.showStatus(errorMessage, 'error');
     }
+  }
+
+  /** True if an error from PDF.js indicates the document is password-protected/encrypted. */
+  _isPasswordError(err) {
+    if (!err) return false;
+    const name = err.name || '', msg = err.message || '';
+    return name === 'PasswordException' || /password/i.test(msg) || /encrypt/i.test(msg);
+  }
+
+  /**
+   * Show the password prompt for an encrypted PDF and resolve with the entered password, or
+   * null if the user cancels. `incorrect` shows the "wrong password, try again" hint. The
+   * password is used in-memory only (handed to PDF.js / the backend) — never stored or logged.
+   */
+  promptPassword(incorrect = false) {
+    return new Promise((resolve) => {
+      const backdrop = document.getElementById('pwBackdrop');
+      const form = document.getElementById('pwForm');
+      const input = document.getElementById('pwInput');
+      const errEl = document.getElementById('pwError');
+      const cancelBtn = document.getElementById('pwCancel');
+      if (!backdrop || !form || !input || !cancelBtn) { resolve(null); return; }
+
+      if (errEl) { errEl.hidden = !incorrect; errEl.textContent = 'Incorrect password. Please try again.'; }
+      input.value = '';
+      backdrop.hidden = false;
+      setTimeout(() => input.focus(), 30);
+
+      const cleanup = () => {
+        backdrop.hidden = true;
+        form.removeEventListener('submit', onSubmit);
+        cancelBtn.removeEventListener('click', onCancel);
+        document.removeEventListener('keydown', onKey);
+      };
+      const onSubmit = (e) => {
+        e.preventDefault();
+        const v = input.value;
+        if (!v) { if (errEl) { errEl.hidden = false; errEl.textContent = 'Please enter a password.'; } return; }
+        cleanup(); resolve(v);
+      };
+      const onCancel = () => { cleanup(); resolve(null); };
+      const onKey = (e) => { if (e.key === 'Escape') onCancel(); };
+
+      form.addEventListener('submit', onSubmit);
+      cancelBtn.addEventListener('click', onCancel);
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  /**
+   * True if the loaded document carries owner-level editing restrictions — i.e. it is encrypted with
+   * a permissions dictionary that does NOT grant "modify contents" (a permission-only / empty-user-
+   * password PDF that opens without prompting). A real-password PDF the user unlocked is decrypted to
+   * an unrestricted copy, so it returns false (they already proved authorisation).
+   */
+  async _detectEditRestriction() {
+    try {
+      const perms = await this.pdfJsDoc.getPermissions();
+      if (!perms) return false;   // no permissions dictionary -> unrestricted
+      const MODIFY = (pdfjsLib.PermissionFlag && pdfjsLib.PermissionFlag.MODIFY_CONTENTS) || 0x08;
+      return !perms.includes(MODIFY);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Gate the first edit on a restricted document. Resolves true if editing may proceed: immediately
+   * when the document isn't restricted or the user already confirmed; otherwise it shows a one-time
+   * authorisation confirmation and resolves with the user's choice (remembered for the session).
+   */
+  async _confirmEditAllowed() {
+    if (!this._editRestricted || this._restrictionConfirmed) return true;
+    if (this._restrictionPromptOpen) return false;          // a prompt is already on screen
+    this._restrictionPromptOpen = true;
+    const ok = await this.confirmDialog(
+      'This document contains editing restrictions. By continuing, you confirm that you are authorized to modify this document.',
+      { title: 'Editing restrictions', okText: 'Continue', cancelText: 'Cancel' }
+    );
+    this._restrictionPromptOpen = false;
+    if (ok) this._restrictionConfirmed = true;
+    return ok;
   }
 
   /**
@@ -1889,6 +2042,8 @@ class PDFEditorApp {
   }
 
   async signPadAdd() {
+    // Signatures are placed from this dialog rather than a page click, so gate them here too.
+    if (!(await this._confirmEditAllowed())) return;
     let dataUrl = null, ratio = 0.3;
 
     if (this.signTab === 'draw') {

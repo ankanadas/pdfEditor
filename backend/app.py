@@ -340,6 +340,14 @@ def _clamp_opacity(v):
         return 1.0
 
 
+# Font-family name hints (used by _span_style and the _resolve_fonts serif override). A clear family
+# name in the font's basename is more reliable than the PDF's serif flag bit or the frontend's guess.
+_SERIF_NAME_HINTS = ('times', 'serif', 'georgia', 'garamond', 'roman', 'minion', 'charter')
+_SANS_NAME_HINTS = ('helvetica', 'arial', 'verdana', 'tahoma', 'segoe', 'calibri', 'roboto',
+                    'open sans', 'opensans', 'montserrat', 'noto sans', 'dejavu sans',
+                    'liberation sans', 'gill', 'futura', 'myriad')
+
+
 def _span_style(span):
     """(serif, bold, italic) inferred from a PyMuPDF span's flags + font name. This is the
     authoritative weight/slant for that span — the frontend can only guess from the pdf.js font NAME
@@ -351,8 +359,12 @@ def _span_style(span):
         return (False, False, False)
     flags = int(span.get('flags', 0) or 0)
     nm = (span.get('font', '') or '').lower()
-    serif = bool(flags & 4) or any(k in nm for k in
-                                   ('times', 'serif', 'georgia', 'garamond', 'roman', 'minion', 'charter'))
+    name_serif = any(k in nm for k in _SERIF_NAME_HINTS)
+    # A recognisably SANS font name wins over a stray serif flag bit: some PDFs (e.g. Jio bills) set
+    # the serif FontDescriptor flag on a 'HelveticaBold', which would otherwise redraw the fallback in
+    # Times. Trust the explicit family name over the flag in that case.
+    name_sans = any(k in nm for k in _SANS_NAME_HINTS)
+    serif = name_serif or (bool(flags & 4) and not name_sans)
     bold = bool(flags & 16) or any(k in nm for k in ('bold', 'black', 'heavy', 'semibold'))
     italic = bool(flags & 2) or ('italic' in nm) or ('oblique' in nm)
     return (serif, bold, italic)
@@ -410,6 +422,36 @@ def _is_latex_subset_font(basefont):
     (symbol-like) glyphs — the 'edited line is gibberish only after save' bug. We do NOT reuse them;
     their text is redrawn with the open serif/sans fallback, which is correct on every host."""
     return bool(_LATEX_FONT_RE.match((basefont or '').split('+')[-1].lower()))
+
+
+def _is_embedded_type1(ext, ftype):
+    """An embedded PostScript Type1 / CIDFontType0 outline font (ext 'pfa'/'pfb', or type 'Type1').
+
+    Reusing one to re-insert edited text is unsafe: PyMuPDF re-embeds it as a CIDFontType0 /
+    Identity-H font whose glyph indices don't line up with what STRICT viewers (macOS Preview,
+    Acrobat) expect, so the edited text renders as the WRONG glyphs there — while PyMuPDF and PDF.js
+    render it fine and it still copies/extracts correctly via ToUnicode, which hides the bug until
+    the user opens the download (e.g. Jio bills with custom 'HelveticaBold' Type1 fonts). We don't
+    reuse them; the text is redrawn with the bundled, metric-compatible open font, which is correct
+    everywhere. TrueType ('ttf') embeds reuse cleanly (CIDFontType2 with a proper CIDToGIDMap) and
+    are kept — that's how an edited résumé line keeps its real Calibri outlines."""
+    return (ext or '').lower() in ('pfa', 'pfb') or (ftype or '').lower() == 'type1'
+
+
+def _span_uses_unreusable_embedded(page, span):
+    """True if `span` is drawn with an embedded font we WON'T reuse for re-insertion (a PostScript
+    Type1 or LaTeX subset). These faces often carry the 'Foradian' rupee convention — the ₹ glyph
+    sits in the grave-accent slot (U+0060), so the symbol extracts/edits as a backtick. When such a
+    line is redrawn with the bundled fallback (which draws a literal backtick), the grave accent must
+    be mapped back to a real ₹ (see the remap in edit_pdf)."""
+    if not span:
+        return False
+    target = (span.get('font', '') or '').split('+')[-1].lower()
+    for f in page.get_fonts(full=True):     # (xref, ext, type, basefont, refname, encoding)
+        if (f[3] or '').split('+')[-1].lower() == target:
+            if _is_latex_subset_font(f[3]) or _is_embedded_type1(f[1], f[2]):
+                return True
+    return False
 
 
 def _font_is_embedded(page, basefont):
@@ -515,6 +557,15 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
         size = float(span['size'])
     _fam_key = (edit.get('fontFamily') or '').lower()
     want_serif = bool(edit.get('serif')) or _TOOLBAR_FONTS.get(_fam_key, (None,))[0] == 'serif'
+    # The backend knows the original span's REAL font name; a clearly sans/serif family there overrides
+    # the frontend's name-based guess (pdf.js can mislabel a flag-serifed 'HelveticaBold' as serif, so
+    # the sans original would otherwise be redrawn in Times). Only a user-chosen fontFamily wins over it.
+    if span and not _fam_key:
+        _nm = (span.get('font', '') or '').lower()
+        if any(k in _nm for k in _SANS_NAME_HINTS):
+            want_serif = False
+        elif any(k in _nm for k in _SERIF_NAME_HINTS):
+            want_serif = True
     # style_override lets a per-run segment request its own weight/slant (mixed bold/italic in
     # one "Add text" box); otherwise the box-level flags apply.
     want_bold = bool(style_override[0]) if style_override else bool(edit.get('bold'))
@@ -527,12 +578,14 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
             want_italic = want_italic or bool(ls[2])
     options = []
     if span:
-        xref_base = {f[0]: (f[3] or '') for f in page.get_fonts(full=True)}   # xref -> basefont
+        # xref -> (basefont, ext, type) so we can both name- and type-match each embedded font.
+        xref_meta = {f[0]: (f[3] or '', f[1] or '', f[2] or '') for f in page.get_fonts(full=True)}
         for xref in _embedded_xrefs(page, span.get('font', '')):
-            base = xref_base.get(xref, '')
-            # Never reuse a LaTeX/Computer-Modern subset font for re-insertion — its TeX encoding can
-            # draw the wrong glyphs (gibberish) after save. Its text drops to the open serif fallback.
-            if _is_latex_subset_font(base):
+            base, ext, ftype = xref_meta.get(xref, ('', '', ''))
+            # Never reuse a font whose re-insertion draws the wrong glyphs after save: LaTeX/Computer-
+            # Modern subsets (TeX encoding) and any embedded PostScript Type1/CIDFontType0 outline
+            # (mis-mapped by strict viewers — Preview/Acrobat). Their text drops to the open fallback.
+            if _is_latex_subset_font(base) or _is_embedded_type1(ext, ftype):
                 continue
             ent = _install_embedded_font(doc, page, xref, cache)
             if ent:
@@ -775,6 +828,20 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None,
     return cx - start          # drawn advance width (lets a caller chain segments on one line)
 
 
+def _open_authenticated(pdf_bytes, password=""):
+    """Open a PDF and authenticate it if it is encrypted.
+
+    Tries the empty password first (covers permission-only / empty-user-password files that
+    are common in the wild), then the supplied password. Returns (doc, ok); when ok is False
+    the document needs a real password the caller didn't provide and must not be used.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if doc.needs_pass:
+        if not doc.authenticate("") and not (password and doc.authenticate(password)):
+            return doc, False
+    return doc, True
+
+
 @app.route('/health', methods=['GET'])
 @limiter.exempt
 def health():
@@ -792,7 +859,11 @@ def extract_text():
             return jsonify({"error": "No file provided"}), 400
 
         pdf_bytes = request.files['file'].read()
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc, ok = _open_authenticated(pdf_bytes, request.form.get('password', ''))
+        if not ok:
+            doc.close()
+            return jsonify({"success": False, "needsPassword": True,
+                            "error": "This PDF needs a password."}), 200
 
         pages_data = []
         for page_num in range(len(doc)):
@@ -847,7 +918,14 @@ def edit_pdf():
             return jsonify({"error": "Missing required fields"}), 400
 
         pdf_bytes = base64.b64decode(data['pdfBase64'])
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        # Authenticate if encrypted. The frontend normally sends an already-decrypted working
+        # copy (see /decrypt at open time), but accept a password here too for robustness and
+        # so empty-password ("permission-only") files edit cleanly.
+        doc, ok = _open_authenticated(pdf_bytes, data.get('password', ''))
+        if not ok:
+            doc.close()
+            return jsonify({"success": False, "needsPassword": True,
+                            "error": "This PDF needs a password."}), 200
 
         edits = data['edits']
         print(f"\nProcessing {len(edits)} edit(s)")
@@ -884,6 +962,10 @@ def edit_pdf():
                     continue
                 edit['_span'] = _find_original_span(
                     page, float(edit.get('x', 0)), float(edit.get('baseline', 0)))
+                # Whether this line's original font is an unreusable embedded face (Type1/LaTeX) that
+                # may use the Foradian rupee convention — captured now, before redaction removes the
+                # spans, so the grave-accent→₹ remap below knows to apply.
+                edit['_graveRupee'] = _span_uses_unreusable_embedded(page, edit['_span'])
                 # The line's uniform weight/slant (authoritative PyMuPDF flags) recovers a bold/italic
                 # the frontend's name-based guess missed; mixed lines stay on the frontend's flag.
                 x = float(edit.get('x', 0))
@@ -947,6 +1029,13 @@ def edit_pdf():
                 raw = re.sub(r'[\u200b\u200c\u200d\u2060\ufeff\u00ad]', '', raw)
                 raw = re.sub(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]', '', raw)  # keeps \t and \n
                 is_insert = not edit.get('redact', True)
+                # Foradian rupee convention: some Indian-bill fonts (e.g. these custom Type1 'Helvetica*'
+                # faces) place the ₹ glyph at the grave-accent slot (U+0060), so the rupee extracts/edits
+                # as a backtick. When we redraw such a REPLACE line with the bundled fallback (which draws
+                # a literal backtick), map the grave accent to the real ₹ so the symbol survives. Scoped
+                # to those fonts only — never touches added text (`is_insert`) or normal-font edits.
+                if not is_insert and '`' in raw and edit.get('_graveRupee'):
+                    raw = raw.replace('`', '₹')
                 text_lines = raw.split('\n') if is_insert else [raw.replace('\n', ' ')]
                 if not any(ln.strip() for ln in text_lines):
                     continue
@@ -1073,7 +1162,11 @@ def clear_signature():
             return jsonify({"error": "Missing required fields"}), 400
 
         pdf_bytes = base64.b64decode(data['pdfBase64'])
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc, ok = _open_authenticated(pdf_bytes, data.get('password', ''))
+        if not ok:
+            doc.close()
+            return jsonify({"success": False, "needsPassword": True,
+                            "error": "This PDF needs a password."}), 200
 
         for page_num in range(len(doc)):
             page = doc[page_num]
@@ -1106,6 +1199,8 @@ def decrypt_pdf():
     password (empty user password / permission-only restrictions). The client-side Merge
     feature uses this because pdf-lib cannot decrypt. PDFs that need a real password are
     reported back (needsPassword) so the UI can ask the user to unlock them first.
+    A user-supplied `password` unlocks files that need a real password (used by the editor's
+    "open a password-protected PDF" flow); the saved/working copy returned is unlocked.
     Nothing is stored — the file is decrypted in memory and the bytes are returned."""
     try:
         data = request.get_json(silent=True) or {}
@@ -1113,16 +1208,25 @@ def decrypt_pdf():
             return jsonify({"success": False, "error": "Missing required fields"}), 400
 
         pdf_bytes = base64.b64decode(data['pdfBase64'])
+        password = data.get('password') or ''
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         except Exception:
             return jsonify({"success": False, "error": "Could not read PDF"}), 400
 
-        # A real password is required only if the empty password fails to authenticate.
+        # Try the empty password first (permission-only files), then the user-supplied one.
         if doc.needs_pass and not doc.authenticate(""):
-            doc.close()
-            return jsonify({"success": False, "needsPassword": True,
-                            "error": "This PDF needs a password to open."}), 200
+            if password and doc.authenticate(password):
+                pass  # unlocked with the user's password
+            else:
+                doc.close()
+                # Distinguish "needs a password" from "that password was wrong" so the UI can
+                # show the right message and re-prompt.
+                if password:
+                    return jsonify({"success": False, "wrongPassword": True,
+                                    "error": "Incorrect password."}), 200
+                return jsonify({"success": False, "needsPassword": True,
+                                "error": "This PDF needs a password to open."}), 200
 
         # Re-save with encryption explicitly removed (the default KEEP would retain it).
         output_bytes = doc.tobytes(encryption=fitz.PDF_ENCRYPT_NONE, deflate=True, garbage=3)
