@@ -22,7 +22,7 @@ class PDFEditorApp {
     this.controller = new EditorController();
     this.pageViews = [];   // one {pageNum, page, viewport, canvas, ctx, wrapper} per page
     this.currentPage = 0;  // page currently in view (for the indicator / page nav)
-    this.mode = null; // 'text', 'signature', or 'edit'
+    this.mode = null; // 'auto' (smart: edit-on-text / add-on-blank), 'edit', 'text', 'erase', 'stamp'
     this.pageWidth = 612; // Standard US Letter width in points
     this.pageHeight = 792; // Standard US Letter height in points
     this.scale = 1.5; // Increased for better visibility
@@ -397,6 +397,12 @@ class PDFEditorApp {
       await this.extractTextFromPDFjs();
 
       this.currentPage = 0;
+      // Smart default: don't force a tool choice. Set it BEFORE buildPages so the pages render
+      // the editable line boxes straight away (the page is immediately interactive — clicking
+      // existing text edits it, clicking a blank area adds new text; see setMode/handleCanvasClick).
+      // Setting it up front also means a fast tool click during load can't be clobbered by a late
+      // mode switch.
+      this.setMode('auto');
       await this.buildPages();
       document.getElementById('stage')?.scrollTo({ top: 0 });
 
@@ -470,13 +476,16 @@ class PDFEditorApp {
     try {
       do {
         this._refreshPending = false;
+        // Edit and smart (auto) modes both expose existing text as per-line editable boxes;
+        // every other mode paints committed line edits straight onto the canvas instead.
+        const textEditing = this.mode === 'edit' || this.mode === 'auto';
         for (const pv of this.pageViews) {
           this.clearPageOverlays(pv);
           await pv.page.render({ canvasContext: pv.ctx, viewport: pv.viewport }).promise;
           this.drawPendingErases(pv);
-          if (this.mode !== 'edit') this.drawPendingLineEdits(pv);  // edit mode shows them in boxes
+          if (!textEditing) this.drawPendingLineEdits(pv);  // edit/auto show them in boxes
           this.createInsertOverlays(pv);
-          if (this.mode === 'edit') this.createEditableTextBoxes(pv);
+          if (textEditing) this.createEditableTextBoxes(pv);
         }
       } while (this._refreshPending);
     } catch (error) {
@@ -622,6 +631,9 @@ class PDFEditorApp {
           : 'transparent';
         div.style.zIndex = '200';
         this.activeEditBox = div;
+        // Smart mode: focusing a line resolves this click as "edit existing text" — light
+        // up the Edit button (stays in auto, so the next click is still smart).
+        this._reflectActiveTool('edit');
       });
 
       div.addEventListener('blur', () => {
@@ -960,6 +972,11 @@ class PDFEditorApp {
       this.showStatus('Click anywhere on the page, then type. Press Enter for a new line.', 'info');
     } else if (mode === 'edit') {
       editBtn.classList.add('active');
+    } else if (mode === 'auto') {
+      // Smart mode: no tool is forced. Neither button starts highlighted — the matching
+      // one lights up as the user acts (click text → Edit, click blank → Add). The page
+      // renders the per-line edit boxes (see refresh) so existing text is directly clickable.
+      this.showStatus('Click existing text to edit it, or click a blank area to add text.', 'info');
     } else if (mode === 'erase') {
       if (eraseBtn) eraseBtn.classList.add('active');
     } else if (mode === 'stamp') {
@@ -971,11 +988,33 @@ class PDFEditorApp {
     this.updateModeIndicator();
   }
 
+  /**
+   * In smart (auto) mode, mirror the resolved action onto the matching sidebar button
+   * WITHOUT leaving auto mode — so the next click is still smart. `which` is 'edit'
+   * (clicked existing text) or 'text' (clicked a blank area / added text).
+   */
+  _reflectActiveTool(which) {
+    if (this.mode !== 'auto') return;   // manual modes keep their own button state
+    const editBtn = document.getElementById('editModeBtn');
+    const textBtn = document.getElementById('textModeBtn');
+    [editBtn, textBtn].forEach(b => b && b.classList.remove('active'));
+    if (which === 'edit') editBtn?.classList.add('active');
+    else if (which === 'text') textBtn?.classList.add('active');
+    const indicator = document.getElementById('modeIndicator');
+    if (indicator) {
+      indicator.textContent = which === 'edit' ? 'Editing Text' : 'Add Text';
+      indicator.classList.add('active');
+    }
+  }
+
   updateModeIndicator() {
     const indicator = document.getElementById('modeIndicator');
     if (!this.controller.isLoaded) {
       indicator.textContent = 'No PDF loaded';
       indicator.classList.remove('active');
+    } else if (this.mode === 'auto') {
+      indicator.textContent = 'Edit or Add';
+      indicator.classList.add('active');
     } else if (this.mode === 'text') {
       indicator.textContent = 'Add Text';
       indicator.classList.add('active');
@@ -1003,7 +1042,9 @@ class PDFEditorApp {
       this.showStatus('Pick a tool on the left first — Edit, Add, or Sign — then click the page.', 'error');
       return;
     }
-    if (this.mode === 'edit') return;  // edit mode is handled by the per-line boxes
+    // Edit mode owns existing text via the per-line boxes; a click that reaches the bare
+    // canvas here is blank space, and Edit must NOT add new text there.
+    if (this.mode === 'edit') return;
 
     // Map the click to that page's intrinsic canvas pixels (handles CSS scaling), then
     // to PDF points (top-left origin) — the coordinate space used when saving.
@@ -1012,7 +1053,10 @@ class PDFEditorApp {
     const xPt = ((event.clientX - rect.left) * toIntrinsic) / this.scale;
     const clickYPt = ((event.clientY - rect.top) * toIntrinsic) / this.scale;
 
-    if (this.mode === 'text') {
+    // 'text' = Add Text tool (click anywhere adds). 'auto' = smart mode: existing text is
+    // covered by editable line boxes, so a click landing on the canvas is genuinely blank
+    // space → add new text there (and reflect the Add button).
+    if (this.mode === 'text' || this.mode === 'auto') {
       // Seed the new box from the toolbar's size / B / I (its current "defaults").
       const fontSize = parseInt(document.getElementById('addSize')?.value, 10) || this._lastInsertSize || 14;
       // Drop an empty, editable text box where the user clicked and let them type in place.
@@ -1024,6 +1068,8 @@ class PDFEditorApp {
         bold: document.getElementById('addBold')?.classList.contains('on'),
         italic: document.getElementById('addItalic')?.classList.contains('on'),
       };
+      // Smart mode: this click resolved to "add new text" — light up the Add button.
+      this._reflectActiveTool('text');
       this.openInsertEditor(edit, pv, true);
     } else if (this.mode === 'stamp') {
       if (!this.activeStamp) { this.showStatus('Pick a stamp (Approved, Reject, …) first', 'error'); return; }

@@ -204,6 +204,7 @@
       flex: 0 0 auto; animation: abIn .15s ease;
     }
     @keyframes abIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+    body[data-mode="auto"] .action-bar,
     body[data-mode="edit"] .action-bar,
     body[data-mode="text"] .action-bar,
     body[data-mode="signature"] .action-bar,
@@ -258,6 +259,10 @@
     .ctx .stamp-upload:active { transform: translateY(0); }
     body[data-mode="edit"] .ctx-edit { display: flex; }
     body[data-mode="text"] .ctx-text { display: flex; }
+    /* Smart (auto) mode: one combined hint. Hidden once an Add-text editor opens (the
+       Add-text controls take over via .editing-insert below). */
+    body[data-mode="auto"] .ctx-auto { display: flex; }
+    body.editing-insert .ctx-auto { display: none; }
     /* Keep the Add-text controls available while an editor box is open, whatever the tool. */
     body.editing-insert .ctx-text { display: flex; }
     body[data-mode="signature"] .ctx-sign { display: flex; }
@@ -330,6 +335,9 @@
     body[data-mode="signature"] .page-canvas,
     body[data-mode="erase"] .page-canvas,
     body[data-mode="stamp"] .page-canvas { cursor: crosshair; }
+    /* Smart mode: a text caret over blank page area hints "click to add text" (existing
+       text shows its own text cursor via the editable boxes layered on top). */
+    body[data-mode="auto"] .page-canvas { cursor: text; }
 
     /* Landing / drop zone */
     .landing { max-width: 640px; margin: 0 auto 24px; }
@@ -390,6 +398,13 @@
     /* Editable line boxes (positioned/styled inline by app.js) */
     .editable-text-box { font-family: inherit; }
     .editable-text-box:focus { outline: none; }
+    /* Smart-click affordance: a subtle highlight on hover over existing editable text
+       (Edit / auto mode). !important beats the inline border/box-shadow app.js sets. */
+    .editable-text-box:hover:not(:focus) {
+      box-shadow: 0 0 0 2px rgba(74, 144, 226, .30) !important;
+      background: rgba(74, 144, 226, .07) !important;
+      border-radius: 3px;
+    }
 
     /* In-place editor for "Add text" (click a spot, type, Enter = new line). It's a
        contentEditable div so a single box can mix font size / bold / italic per run. Size and
@@ -886,6 +901,10 @@
 
       <!-- Prominent contextual action bar: shows what to do for the active tool -->
       <div id="actionBar" class="action-bar">
+        <div class="ctx ctx-auto">
+          <span class="ab-label">Edit or add text</span>
+          <span class="ab-hint">Click existing text to edit it &middot; click a blank area to add new text.</span>
+        </div>
         <div class="ctx ctx-edit">
           <span class="ab-label">Edit text</span>
           <span class="ab-hint">Click any line on the page and type to change it.</span>
