@@ -571,6 +571,20 @@ class PDFEditorApp {
       const shownText = pending ? pending.newText : line.text;
       div.dataset.originalText = shownText;
       div.textContent = shownText;
+      // Re-apply any floating-toolbar styling stored on the tracked edit. The line objects are
+      // rebuilt from the PDF spans on every refresh, so without this the box reverts to the
+      // original span's look (e.g. a colour set via the toolbar vanishes when another text box
+      // is added/edited and the page re-renders).
+      if (pending) {
+        line.bold = !!pending.bold;
+        line.italic = !!pending.italic;
+        if (pending.fontSize) line.fontSizePx = pending.fontSize * this.scale;
+        if (pending.underline) line.underline = true;
+        if (pending.color) line.color = pending.color;
+        if (pending.opacity != null) line.opacity = pending.opacity;
+        if (pending.align) line.align = pending.align;
+        if (pending.fontFamily) line.fontFamily = pending.fontFamily;
+      }
 
       const fontSizePx = line.fontSizePx * displayScale;
       const lineBoxPx = Math.max((line.bottom - line.top) * displayScale, fontSizePx);
@@ -597,22 +611,31 @@ class PDFEditorApp {
       // Mirror PDF.js's own text rendering: a non-embedded standard font uses the system-font
       // @font-face PDF.js injected (line.fontCss -> real Helvetica); an embedded font uses its
       // loadedName web font. Either way the edit box matches the page; fall back if neither resolves.
-      div.style.fontFamily = line.fontCss
-        ? `${line.fontCss}, ${fallbackFamily}`
-        : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily);
+      // A toolbar font-family override wins over the page's own font; otherwise mirror PDF.js.
+      div.style.fontFamily = line.fontFamily
+        ? this._familyCss(line.fontFamily)
+        : (line.fontCss
+          ? `${line.fontCss}, ${fallbackFamily}`
+          : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily));
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
       // Show the editable text in the line's REAL colour so the box blends into the page (e.g.
-      // white text on a dark headline). If text-colour detection failed, fall back to a readable
-      // contrast vs the background. (The saved file uses the exact original colour regardless.)
+      // white text on a dark headline). A toolbar colour override wins; if text-colour detection
+      // failed, fall back to a readable contrast vs the background. (The saved file uses the exact
+      // colour regardless.)
       const tc = line.textColor;
-      if (tc) {
+      if (line.color) {
+        div.style.color = `rgb(${line.color[0]},${line.color[1]},${line.color[2]})`;
+      } else if (tc) {
         div.style.color = `rgb(${tc[0]},${tc[1]},${tc[2]})`;
       } else {
         const bg = line.bgColor;
         const lum = bg ? (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) : 255;
         div.style.color = lum < 140 ? '#fff' : '#000';
       }
+      if (line.underline) div.style.textDecoration = 'underline';
+      if (line.opacity != null) div.style.opacity = line.opacity;
+      if (line.align) div.style.textAlign = line.align;
       div.style.padding = '0';
       div.style.margin = '0';
       div.style.border = '1px solid transparent';
