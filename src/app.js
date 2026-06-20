@@ -326,6 +326,7 @@ class PDFEditorApp {
             height: fontHeightPx,
             fontSizePx: fontHeightPx,
             fontName: item.fontName || 'Helvetica',
+            fontFamilyName: fam,             // css family + loaded name, for the toolbar's font guess
             bold: bold,
             italic: italic,
             serif: serif
@@ -815,6 +816,7 @@ class PDFEditorApp {
       ...(line.opacity != null && line.opacity < 1 ? { opacity: line.opacity } : {}),
       ...(line.align ? { align: line.align } : {}),
       ...(line.fontFamily ? { fontFamily: line.fontFamily } : {}),
+      ...(line.sizeOverridden ? { sizeOverride: true } : {}),
     };
   }
 
@@ -838,6 +840,7 @@ class PDFEditorApp {
         left: item.left, right: item.right, baseline: item.baseline,
         top: item.top, bottom: item.bottom, height: item.height,
         fontSizePx: item.fontSizePx, fontName: item.fontName,
+        fontFamilyName: item.fontFamilyName,
         pageIndex: item.pageIndex, items: [item],
       };
       lines.push(currentLine);
@@ -2127,7 +2130,7 @@ class PDFEditorApp {
     on('tt-italic', 'click', () => this.applyTextStyle('italic', !this._ttStyle().italic));
     on('tt-underline', 'click', () => this.applyTextStyle('underline', !this._ttStyle().underline));
     on('tt-size', 'input', (e) => { const v = parseInt(e.target.value, 10); if (v) this.applyTextStyle('size', v); });
-    on('tt-font', 'change', (e) => this.applyTextStyle('family', e.target.value));
+    on('tt-font', 'change', (e) => { if (e.target.value) this.applyTextStyle('family', e.target.value); });
     this._initColorPalette();
     on('tt-align-left', 'click', () => this.applyTextStyle('align', 'left'));
     on('tt-align-center', 'click', () => this.applyTextStyle('align', 'center'));
@@ -2167,6 +2170,35 @@ class PDFEditorApp {
     })[f] || 'Arial, Helvetica, sans-serif';
   }
 
+  // The 10 font-family keys the toolbar dropdown offers.
+  static get TOOLBAR_FONT_KEYS() { return ['arial', 'helvetica', 'times', 'georgia', 'verdana', 'courier', 'roboto', 'opensans', 'montserrat', 'comicsans']; }
+
+  /** Normalise a stored fontFamily to a dropdown key. The 10 keys pass through; the legacy
+   *  sans/serif/mono map to their nearest dropdown entry; anything else -> '' (unknown). */
+  _normFamilyKey(fam) {
+    const f = (fam || '').toLowerCase();
+    if (PDFEditorApp.TOOLBAR_FONT_KEYS.includes(f)) return f;
+    return ({ sans: 'arial', serif: 'times', mono: 'courier' })[f] || '';
+  }
+
+  /** Best-guess dropdown key from a PDF font NAME (e.g. 'Helvetica-Bold' -> 'helvetica'). Returns ''
+   *  when the font isn't one the dropdown offers (e.g. Computer Modern), so we can show a placeholder. */
+  _familyKeyFromFont(name) {
+    const n = (name || '').toLowerCase();
+    if (!n) return '';
+    const hits = [['arial', 'arial'], ['helvetica', 'helvetica'], ['times', 'times'], ['georgia', 'georgia'],
+      ['verdana', 'verdana'], ['courier', 'courier'], ['roboto', 'roboto'], ['opensans', 'opensans'],
+      ['open sans', 'opensans'], ['montserrat', 'montserrat'], ['comic', 'comicsans']];
+    for (const [needle, key] of hits) if (n.includes(needle)) return key;
+    return '';
+  }
+
+  /** The dropdown key to SHOW for a target: an explicit family override, else a guess from the PDF
+   *  font name, else '' (-> the "Select a Font Style" placeholder). */
+  _displayFontKey(fam, fontName) {
+    return this._normFamilyKey(fam) || this._familyKeyFromFont(fontName) || '';
+  }
+
   /** Build the Sejda-style swatch palette popover and wire it to applyTextStyle('color', …). */
   _initColorPalette() {
     const btn = document.getElementById('tt-color-btn');
@@ -2192,7 +2224,7 @@ class PDFEditorApp {
     // A "custom" native picker for anything outside the palette.
     const custom = document.createElement('label');
     custom.className = 'tt-sw tt-sw-custom'; custom.title = 'Custom colour';
-    custom.innerHTML = 'Custom <input type="color" id="tt-color-custom" value="#000000">';
+    custom.innerHTML = 'Custom <input type="color" id="tt-color-custom" value="#000000" title="Custom colour" aria-label="Custom colour">';
     custom.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
     pop.appendChild(custom);
     custom.querySelector('input').addEventListener('input', (e) => { this.applyTextStyle('color', this._hexToRgb(e.target.value)); this._setColorSwatch(e.target.value); });
@@ -2231,13 +2263,15 @@ class PDFEditorApp {
       const s = this._activeInsertEditor ? this._activeInsertEditor.style() : {};
       const e = t.edit || {};
       return { bold: s.bold, italic: s.italic, size: s.size, underline: !!e.underline,
-               color: e.color, opacity: e.opacity, align: e.align, family: e.fontFamily };
+               color: e.color, opacity: e.opacity, align: e.align,
+               family: this._displayFontKey(e.fontFamily, e.fontName) };
     }
     const o = t.kind === 'overlay' ? t.edit : t.line;
     if (!o) return {};
     const size = t.kind === 'overlay' ? Math.round(o.fontSize) : Math.round((o.fontSizePx || 0) / this.scale);
     return { bold: !!o.bold, italic: !!o.italic, underline: !!o.underline, size,
-             color: o.color, opacity: o.opacity, align: o.align, family: o.fontFamily };
+             color: o.color, opacity: o.opacity, align: o.align,
+             family: this._displayFontKey(o.fontFamily, o.fontFamilyName || o.fontName) };
   }
 
   _reflectTextToolbar() {
@@ -2248,7 +2282,9 @@ class PDFEditorApp {
     // Don't clobber an input the user is actively typing into (else mid-type reflect mangles it).
     const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null && el !== document.activeElement) el.value = v; };
     if (s.size) set('tt-size', s.size);
-    if (s.family) set('tt-font', s.family);
+    // Always reflect the font: a known family selects it; an unknown one ('' ) shows the
+    // "Select a Font Style" placeholder so the dropdown is never blank.
+    set('tt-font', s.family || '');
     this._setColorSwatch(s.color ? this._rgbToHex(s.color) : '#000000');
     set('tt-opacity', Math.round((s.opacity == null ? 1 : s.opacity) * 100));
   }
@@ -2332,7 +2368,7 @@ class PDFEditorApp {
     if (kind === 'bold') { l.bold = !!value; div.style.fontWeight = value ? 'bold' : 'normal'; }
     else if (kind === 'italic') { l.italic = !!value; div.style.fontStyle = value ? 'italic' : 'normal'; }
     else if (kind === 'underline') { l.underline = !!value; div.style.textDecoration = value ? 'underline' : 'none'; }
-    else if (kind === 'size') { l.fontSizePx = value * this.scale; div.style.fontSize = (value * this.scale * (div.__displayScale || 1)) + 'px'; }
+    else if (kind === 'size') { l.fontSizePx = value * this.scale; l.sizeOverridden = true; div.style.fontSize = (value * this.scale * (div.__displayScale || 1)) + 'px'; }
     else if (kind === 'color') { l.color = value; div.style.color = this._rgbCss(value); }
     else if (kind === 'opacity') { l.opacity = value; div.style.opacity = value; }
     else if (kind === 'align') { l.align = value; div.style.textAlign = value; }
