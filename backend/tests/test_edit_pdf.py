@@ -413,6 +413,59 @@ class SyntheticTests(unittest.TestCase):
         self.assertIs(font, primary)
         self.assertEqual(kwargs.get("fontname"), "calibri")
 
+    def test_overcredited_glyph_falls_back_instead_of_notdef(self):
+        # Generalises the space fix to ANY character. A subset font's drawn-charset can CLAIM a
+        # character it cannot actually draw (e.g. a curly apostrophe re-inserted into a Computer-
+        # Modern line). Picking it would emit a .notdef box (the "gibberish" the user reported), so
+        # _pick_font must verify has_glyph and fall through to a font that really has the glyph.
+        ch = "’"  # ’
+
+        class _StubFont:
+            def __init__(self, glyphs):
+                self._g = glyphs
+
+            def has_glyph(self, cp):
+                return 1 if cp in self._g else 0
+
+        cm = _StubFont({ord('O'), ord('P'), ord('s')})                  # cannot draw ’
+        fallback = _StubFont({ord('O'), ord('P'), ord('s'), ord(ch), 0x20})
+        options = [
+            (dict(fontname="cm"), cm, set("OP" + ch + "s"), True),      # charset over-credits ’
+            (dict(fontname="fallback"), fallback, None, True),
+        ]
+        kwargs, font = appmod._pick_font(ch, options)
+        self.assertIs(font, fallback, "over-credited glyph drew .notdef instead of falling back")
+        self.assertEqual(kwargs.get("fontname"), "fallback")
+
+    def test_embedded_font_kept_when_it_really_has_the_glyph(self):
+        # The has_glyph guard must NOT divert a character the embedded font genuinely draws.
+        class _StubFont:
+            def __init__(self, glyphs):
+                self._g = glyphs
+
+            def has_glyph(self, cp):
+                return 1 if cp in self._g else 0
+
+        embedded = _StubFont({ord('A'), ord('B')})
+        options = [
+            (dict(fontname="emb"), embedded, set("AB"), True),
+            (dict(fontname="fallback"), _StubFont({ord('A'), ord('B'), ord('C')}), None, True),
+        ]
+        kwargs, font = appmod._pick_font("A", options)
+        self.assertIs(font, embedded)
+        self.assertEqual(kwargs.get("fontname"), "emb")
+
+    def test_size_override_honours_toolbar_size(self):
+        # A replace keeps the span's exact original size by DEFAULT (the frontend size guess can come
+        # out too big); an explicit toolbar size change (sizeOverride) must be honoured instead.
+        doc = fitz.open()
+        pg = doc.new_page()
+        base = {"_span": {"font": "helv", "size": 11.0}, "newText": "Hi"}
+        _, size_default = appmod._resolve_fonts(doc, pg, dict(base, fontSize=40), "Hi", {}, {})
+        self.assertEqual(size_default, 11.0)
+        _, size_override = appmod._resolve_fonts(doc, pg, dict(base, fontSize=40, sizeOverride=True), "Hi", {}, {})
+        self.assertEqual(size_override, 40.0)
+
     def test_erase_still_whitens(self):
         # The erase tool (kind='erase') must still paint white.
         doc = fitz.open()

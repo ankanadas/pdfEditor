@@ -1027,12 +1027,13 @@
        newly-added text (see app.js applyTextStyle). Positioned over the selected text; hidden by
        default. position:fixed so it tracks the selection across scroll/zoom and never clips. -->
   <div id="textToolbar" role="toolbar" aria-label="Text styling" hidden>
-    <button class="tt-btn" id="tt-bold" type="button" title="Bold"><b>B</b></button>
-    <button class="tt-btn" id="tt-italic" type="button" title="Italic"><i>I</i></button>
-    <button class="tt-btn" id="tt-underline" type="button" title="Underline"><u>U</u></button>
+    <button class="tt-btn" id="tt-bold" type="button" title="Bold" aria-label="Bold"><b>B</b></button>
+    <button class="tt-btn" id="tt-italic" type="button" title="Italic" aria-label="Italic"><i>I</i></button>
+    <button class="tt-btn" id="tt-underline" type="button" title="Underline" aria-label="Underline"><u>U</u></button>
     <span class="tt-sep"></span>
     <input type="number" id="tt-size" class="tt-num" min="4" max="200" step="1" title="Font size" aria-label="Font size" />
-    <select id="tt-font" class="tt-sel" title="Font family" aria-label="Font family">
+    <select id="tt-font" class="tt-sel" title="Font family — pick a font for the selected text" aria-label="Font family">
+      <option value="" hidden>Select a Font Style</option>
       <option value="arial">Arial</option>
       <option value="helvetica">Helvetica</option>
       <option value="times">Times New Roman</option>
@@ -1053,11 +1054,11 @@
     <button class="tt-btn" id="tt-align-center" type="button" title="Align center" aria-label="Align center">≡</button>
     <button class="tt-btn" id="tt-align-right" type="button" title="Align right" aria-label="Align right">⯈</button>
     <span class="tt-sep"></span>
-    <label class="tt-opacity" title="Opacity">α<input type="range" id="tt-opacity" min="10" max="100" step="5" value="100" aria-label="Opacity" /></label>
+    <label class="tt-opacity" title="Text opacity"><span aria-hidden="true">α</span><input type="range" id="tt-opacity" min="10" max="100" step="5" value="100" title="Text opacity" aria-label="Text opacity" /></label>
     <span class="tt-sep"></span>
-    <button class="tt-btn" id="tt-link" type="button" title="Hyperlink (coming soon)" disabled>🔗</button>
-    <button class="tt-btn" id="tt-dup" type="button" title="Duplicate">⧉</button>
-    <button class="tt-btn tt-danger" id="tt-del" type="button" title="Delete">🗑</button>
+    <button class="tt-btn" id="tt-link" type="button" title="Add link (coming soon)" aria-label="Add link (coming soon)" disabled>🔗</button>
+    <button class="tt-btn" id="tt-dup" type="button" title="Duplicate this text" aria-label="Duplicate this text">⧉</button>
+    <button class="tt-btn tt-danger" id="tt-del" type="button" title="Delete this text" aria-label="Delete this text">🗑</button>
   </div>
 
   <!-- Slim site footer: links + trust note, visible on the editor and every page -->

@@ -488,8 +488,10 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
     + regular body) to the frontend's dominant flag. Union only adds — never un-bolds a correct line."""
     span = edit.get('_span')
     size = float(edit.get('fontSize', 12) or 12)
-    if span and span.get('size'):
-        size = float(span['size'])               # exact original size (fixes "too big")
+    # Keep the line's exact original size by DEFAULT (the frontend's geometric size guess can come out
+    # "too big"); but honour an explicit toolbar size change, which the frontend marks sizeOverride.
+    if span and span.get('size') and not edit.get('sizeOverride'):
+        size = float(span['size'])
     _fam_key = (edit.get('fontFamily') or '').lower()
     want_serif = bool(edit.get('serif')) or _TOOLBAR_FONTS.get(_fam_key, (None,))[0] == 'serif'
     # style_override lets a per-run segment request its own weight/slant (mixed bold/italic in
@@ -564,14 +566,18 @@ def _pick_font(ch, options):
             if font.has_glyph(0x20):
                 return kwargs, font
         return options[0][0], options[0][1]
+    # A subset font's drawn-charset can over-credit a character it cannot actually draw (PyMuPDF
+    # synthesises some glyphs — e.g. spaces, and in LaTeX/Computer-Modern fonts the odd punctuation),
+    # so picking it would emit a .notdef box that renders as gibberish (�). Verify has_glyph before
+    # trusting the charset, and fall through to a font that really has the glyph.
     for kwargs, font, charset, style_ok in options:    # 1: drawn-with + right weight/slant
-        if charset is not None and style_ok and ch in charset:
+        if charset is not None and style_ok and ch in charset and font.has_glyph(ord(ch)):
             return kwargs, font
     fb = options[-1]                                    # 2: weight/slant-matched fallback (if it has it)
     if fb[2] is None and fb[1].has_glyph(ord(ch)):
         return fb[0], fb[1]
     for kwargs, font, charset, style_ok in options:    # 3: drawn-with (any embedded weight)
-        if charset is not None and ch in charset:
+        if charset is not None and ch in charset and font.has_glyph(ord(ch)):
             return kwargs, font
     for kwargs, font, charset, style_ok in options:    # 4: full fallback
         if charset is None:
