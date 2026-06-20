@@ -445,9 +445,15 @@ def _pick_font(ch, options):
     character, then (3) any embedded font that drew it, then (4) the full fallback. Step 2 keeps a
     NEW character the document's own fonts never drew — a digit typed into a bold heading whose
     subset font lacks digit glyphs — in the line's weight, instead of borrowing a wrong-weight
-    document font (which made typed numbers come out regular inside a bold line). Spaces go with the
-    first option (any font advances a space)."""
+    document font (which made typed numbers come out regular inside a bold line). A space goes with
+    the first option whose font actually HAS a space glyph (subset CM/LaTeX fonts have none)."""
     if ch == ' ':
+        # A space MUST be drawn with a font that actually has a space glyph. Subset LaTeX/Computer
+        # Modern fonts have none — PyMuPDF synthesizes inter-word spaces from glyph gaps, so the
+        # drawn-charset wrongly credits them, and drawing one yields a .notdef box that renders as �.
+        for kwargs, font, charset, style_ok in options:
+            if font.has_glyph(0x20):
+                return kwargs, font
         return options[0][0], options[0][1]
     for kwargs, font, charset, style_ok in options:    # 1: drawn-with + right weight/slant
         if charset is not None and style_ok and ch in charset:
@@ -537,8 +543,11 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None,
     edit keeps the line's alignment instead of always starting at the left."""
     runs, cur, cur_opt = [], [], None
     for ch in text:
-        if ch == ' ' and cur_opt is not None:
-            cur.append(ch)                 # keep a space within the current run (don't fragment)
+        # Keep a space within the current run only when that run's font can actually draw one (most
+        # fonts). If it can't (a Computer Modern / LaTeX subset font has no space glyph), fall through
+        # to _pick_font so the space is drawn with a space-capable font instead of a � (.notdef) box.
+        if ch == ' ' and cur_opt is not None and cur_opt[1].has_glyph(0x20):
+            cur.append(ch)
             continue
         opt = _pick_font(ch, options)
         if cur_opt is None or opt[0].get('fontname') != cur_opt[0].get('fontname'):
