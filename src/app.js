@@ -507,6 +507,29 @@ class PDFEditorApp {
   }
 
   /**
+   * Classify the source strip used to hide a text line: 'clean' (uniform background close to the
+   * cell's own colour — safe to stretch), 'dirty' (a border / rule / adjacent glyph passes through,
+   * so stretching it would paint a dark "shadow" band — fill solid instead) or 'unknown' (pixel
+   * readback unavailable — keep the legacy drawImage behaviour). Coordinates are device pixels.
+   */
+  _coverStripState(ctx, x, y, w, h, bg) {
+    if (!bg) return 'unknown';                       // no sampled bg (readback failed earlier) -> legacy
+    let d;
+    try { d = ctx.getImageData(Math.round(x), Math.round(y), Math.max(1, Math.round(w)), Math.max(1, Math.round(h))).data; }
+    catch (e) { return 'unknown'; }
+    const bgL = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
+    let sum = 0, n = 0; const vals = [];
+    for (let i = 0; i < d.length; i += 4) { const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; vals.push(l); sum += l; n++; }
+    if (!n) return 'unknown';
+    const mean = sum / n;
+    let q = 0; for (const l of vals) q += (l - mean) * (l - mean);
+    const std = Math.sqrt(q / n);
+    // Not uniform (a line/glyph runs through it) OR materially darker than the cell's own background.
+    if (std > 24 || mean < bgL - 22) return 'dirty';
+    return 'clean';
+  }
+
+  /**
    * Overlay an editable box on EACH line of text. Every box sits exactly on its original
    * line (same left, baseline and size) and edits that line in place. Only the lines the
    * user actually changes are tracked, so saving leaves all other text untouched.
@@ -551,13 +574,21 @@ class PDFEditorApp {
       const band = Math.max(2, Math.round((line.bottom - line.top) * 0.18));
       let sy = ly - band - 2;                                            // clean strip ABOVE the line...
       if (sy < 0) sy = Math.min(ch - band, Math.ceil(line.bottom) + 2);  // ...else just BELOW it
-      try {
-        if (sy < 0 || lw <= 0 || lh <= 0) throw new Error('no source strip');
-        pv.ctx.drawImage(pv.canvas, lx, sy, lw, band, lx, ly, lw, lh);   // stretch bg strip over the text
-      } catch (e) {
+      // Only stretch the strip when it is genuinely CLEAN background. Next to a table border or a
+      // section rule the strip catches that dark line and, stretched over the box, shows as a dark
+      // band ("shadow") above the text. In that case cover with the line's solid background colour
+      // instead — hides the original text with no band. A smooth gradient strip stays on drawImage.
+      const fillSolid = () => {
         const c = line.bgColor;
         pv.ctx.fillStyle = c ? `rgb(${c[0]},${c[1]},${c[2]})` : '#ffffff';
         pv.ctx.fillRect(lx, ly, lw, lh);
+      };
+      try {
+        if (sy < 0 || lw <= 0 || lh <= 0) throw new Error('no source strip');
+        if (this._coverStripState(pv.ctx, lx, sy, lw, band, line.bgColor) === 'dirty') fillSolid();
+        else pv.ctx.drawImage(pv.canvas, lx, sy, lw, band, lx, ly, lw, lh);   // stretch clean bg strip
+      } catch (e) {
+        fillSolid();
       }
     });
     pv.ctx.restore();
