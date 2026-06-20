@@ -111,6 +111,41 @@ export class PDFBackendService {
   }
 
   /**
+   * Unlock a password-protected PDF via the backend (PyMuPDF). Returns an unlocked copy so the
+   * rest of the editor (render / edit / save) works on plain bytes.
+   * @param {ArrayBuffer} pdfArrayBuffer - The encrypted PDF as ArrayBuffer
+   * @param {string} password - The user-supplied open password ('' for empty/permission-only)
+   * @returns {Promise<{bytes: Uint8Array|null, needsPassword: boolean, wrongPassword: boolean}>}
+   */
+  static async decryptPDF(pdfArrayBuffer, password = '') {
+    const pdfBytes = new Uint8Array(pdfArrayBuffer);
+    let binary = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < pdfBytes.length; i += chunkSize) {
+      const chunk = pdfBytes.subarray(i, Math.min(i + chunkSize, pdfBytes.length));
+      binary += String.fromCharCode.apply(null, chunk);
+    }
+    const pdfBase64 = btoa(binary);
+
+    const response = await fetch(`${BACKEND_URL}/decrypt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdfBase64, password })
+    });
+    if (!response.ok) throw new Error(`Backend error: ${response.statusText}`);
+
+    const data = await response.json();
+    if (!data.success) {
+      return { bytes: null, needsPassword: !!data.needsPassword, wrongPassword: !!data.wrongPassword };
+    }
+
+    const str = atob(data.pdfBase64);
+    const out = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i);
+    return { bytes: out, needsPassword: false, wrongPassword: false };
+  }
+
+  /**
    * Clear signature images from PDF
    * @param {ArrayBuffer} pdfArrayBuffer - The PDF as ArrayBuffer
    * @returns {Promise<Uint8Array>} - PDF with signatures cleared
