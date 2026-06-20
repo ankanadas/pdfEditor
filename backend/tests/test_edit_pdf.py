@@ -266,6 +266,62 @@ class SyntheticTests(unittest.TestCase):
         fonts = {s["font"] for s in line}
         self.assertEqual(len(fonts), 1, f"edited line scattered across fonts: {fonts}")
 
+    def test_edit_keeps_hyperlink(self):
+        # Editing a line that carries a hyperlink must NOT drop the link (redaction removes it; the
+        # backend re-adds it). Footer/contact links stay clickable.
+        doc = fitz.open()
+        pg = doc.new_page(width=400, height=200)
+        pg.insert_text((40, 60), "Visit our site", fontsize=12)
+        pg.insert_link({"kind": fitz.LINK_URI, "from": fitz.Rect(40, 50, 150, 63),
+                        "uri": "https://example.com/"})
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "Visit our site")
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "Visit our website")]), filetype="pdf")
+        uris = [l["uri"] for l in res[0].get_links() if l.get("uri")]
+        self.assertIn("https://example.com/", uris, "hyperlink dropped when the line was edited")
+
+    def test_right_aligned_edit_keeps_right_edge(self):
+        # A right-aligned column (rows ending at the same x, starting at varying x): editing one row
+        # with shorter text must keep its RIGHT edge aligned, not left-shift it.
+        doc = fitz.open()
+        pg = doc.new_page(width=400, height=300)
+        f = fitz.Font("helv")
+        right = 360.0
+        rows = [("January 2020 - March 2021", 60), ("May 2019", 95), ("Feb 2018 - Dec 2018", 130)]
+        for text, y in rows:
+            pg.insert_text((right - f.text_length(text, 11), y), text, fontsize=11)
+        src = doc.tobytes()
+        sdoc = fitz.open(stream=src, filetype="pdf")
+        span = next(s for b in sdoc[0].get_text("dict")["blocks"]
+                    for l in b.get("lines", []) for s in l["spans"] if "May 2019" in s["text"])
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "Q4")]), filetype="pdf")
+        s = next(x for b in res[0].get_text("dict")["blocks"] for l in b.get("lines", [])
+                 for x in l["spans"] if "Q4" in x["text"] and abs(x["origin"][1] - 95) < 4)
+        self.assertAlmostEqual(s["bbox"][2], right, delta=4,
+                               msg=f"right-aligned edit lost its right edge: {s['bbox'][2]:.1f} != {right}")
+
+    def test_typed_digit_in_bold_line_stays_bold(self):
+        # Typing a digit the bold line's own (subset) font never had must stay BOLD via the
+        # weight-matched fallback, not borrow a regular document font that happens to have the digit.
+        fb = "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf"
+        fr = "/System/Library/Fonts/Supplemental/Times New Roman.ttf"
+        if not (os.path.exists(fb) and os.path.exists(fr)):
+            self.skipTest("needs Times New Roman + bold system fonts")
+        doc = fitz.open()
+        pg = doc.new_page(width=400, height=200)
+        pg.insert_text((40, 60), "ABC", fontsize=20, fontfile=fb, fontname="FB")   # bold line, no digits
+        pg.insert_text((40, 120), "5", fontsize=20, fontfile=fr, fontname="FR")    # '5' only in a REGULAR font
+        src = doc.tobytes()
+        sdoc = fitz.open(stream=src, filetype="pdf")
+        span = next(s for b in sdoc[0].get_text("dict")["blocks"]
+                    for l in b.get("lines", []) for s in l["spans"]
+                    if "ABC" in s["text"] and abs(s["origin"][1] - 60) < 3)
+        res = fitz.open(stream=post_edit(src, [edit_from_span(span, "ABC5", bold=True)]), filetype="pdf")
+        s5 = next(x for b in res[0].get_text("dict")["blocks"] for l in b.get("lines", [])
+                  for x in l["spans"] if "5" in x["text"] and abs(x["origin"][1] - 60) < 4)
+        self.assertTrue((s5["flags"] & 16) or "Bold" in s5["font"],
+                        f"typed digit fell to a regular font: {s5['font']}")
+
     def test_erase_still_whitens(self):
         # The erase tool (kind='erase') must still paint white.
         doc = fitz.open()
