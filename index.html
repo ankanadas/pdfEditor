@@ -88,6 +88,12 @@
       background: var(--bg);
       display: flex;
       flex-direction: column;
+      /* Lock the shell to exactly one viewport tall so the stage (and only the stage) scrolls.
+         100dvh tracks the *dynamic* viewport so mobile/Edge browser chrome can't clip the footer;
+         100vh is the fallback for browsers without dvh. */
+      height: 100vh;
+      height: 100dvh;
+      min-height: 0;
       overflow: hidden;
     }
 
@@ -146,6 +152,9 @@
       width: 112px; background: #fff; border-right: 1px solid var(--line);
       display: flex; flex-direction: column; align-items: center; gap: 6px;
       padding: 14px 8px; flex: 0 0 auto;
+      /* On short screens (e.g. 1280×720 Windows laptops) the tool icons can be taller than the
+         workspace — scroll the rail instead of clipping the lower tools (Discard, etc.). */
+      min-height: 0; overflow-y: auto; overflow-x: hidden;
     }
     .tool {
       width: 100%; border: 1px solid transparent; background: transparent; cursor: pointer;
@@ -173,8 +182,16 @@
     .tool.featured:hover:not(:disabled) { background: #efecff; color: var(--ink); }
     .sidebar .sep { width: 60%; height: 1px; background: var(--line); margin: 6px 0; }
 
-    /* Main column */
-    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    /* Slim, unobtrusive scrollbars for the tool rails (only visible when they overflow on short
+       screens). Keeps the icons at full size rather than shrinking them to fit. */
+    .sidebar, .rightbar { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+    .sidebar::-webkit-scrollbar, .rightbar::-webkit-scrollbar { width: 6px; }
+    .sidebar::-webkit-scrollbar-thumb, .rightbar::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+    .sidebar::-webkit-scrollbar-track, .rightbar::-webkit-scrollbar-track { background: transparent; }
+
+    /* Main column. min-height:0 lets the inner flex column shrink so the stage (its flex:1 child)
+       owns the scroll instead of pushing the toolbar/footer off-screen on short viewports. */
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
     /* Toolbar */
     .toolbar {
@@ -684,6 +701,8 @@
       width: 112px; background: #fff; border-left: 1px solid var(--line);
       display: flex; flex-direction: column; align-items: center; gap: 6px;
       padding: 14px 8px; flex: 0 0 auto;
+      /* Same short-screen safeguard as the left rail (see .sidebar). */
+      min-height: 0; overflow-y: auto; overflow-x: hidden;
     }
     .rightbar .tool.active {
       background: var(--brand); color: #fff; border-color: var(--brand); font-weight: 700;
