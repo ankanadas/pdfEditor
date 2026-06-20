@@ -210,6 +210,31 @@ class LatexResumeTests(unittest.TestCase):
         self.assertTrue(any(("CMBX" in s["font"]) or (s["flags"] & 16) or ("Bold" in s["font"]) for s in head),
                         f"bold heading lost its weight: {[s['font'] for s in head]}")
 
+    def test_edited_line_text_layer_is_clean_ascii(self):
+        # The edited line must COPY/EXTRACT as clean ASCII. PyMuPDF stores inserted spaces in the
+        # ToUnicode as U+00A0 (nbsp) and a reused CM font maps its hyphen glyph to U+00AD (soft
+        # hyphen) — both render fine but make the text layer "unreadable unicode". _clean_tounicode
+        # repairs them. Edit a CM line that has a hyphen + spaces and change its font.
+        src = fitz.open(RESUME_LATEX)
+        edit, _ = self._line_edit(src, "J.B. Hunt", "fast-paced agile teams")
+        edit["fontFamily"] = "times"                     # the user's repro changes the font
+        res = fitz.open(stream=post_edit(src.tobytes(), [edit]), filetype="pdf")
+        txt = res[0].get_text()
+        self.assertNotIn("\u00a0", txt, "nbsp left in the text layer (copies as unreadable unicode)")
+        self.assertNotIn("\u00ad", txt, "soft hyphen left in the text layer")
+        self.assertIn("fast-paced agile teams", txt, f"edited line not clean/searchable: {txt!r}")
+
+    def test_inserted_spaces_extract_as_plain_space(self):
+        # End-to-end guard for the nbsp fix on a plain inserted line (any font).
+        doc = fitz.open(); doc.new_page(width=400, height=120)
+        edit = {"pageIndex": 0, "redact": False, "style": "text", "x": 30, "baseline": 70,
+                "fontSize": 16, "newText": "alpha beta gamma", "fontFamily": "roboto",
+                "runs": [[{"text": "alpha beta gamma", "size": 16}]]}
+        res = fitz.open(stream=post_edit(doc.tobytes(), [edit]), filetype="pdf")
+        txt = res[0].get_text()
+        self.assertIn("alpha beta gamma", txt, f"spaces not plain in the text layer: {txt!r}")
+        self.assertNotIn("\u00a0", txt)
+
 
 # --------------------------------------------------------------------------- #
 # Synthetic tests (always run) for fixes the real PDFs don't exercise
