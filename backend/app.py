@@ -587,6 +587,42 @@ def _pick_font(ch, options):
     return options[-1][0], options[-1][1]
 
 
+# ToUnicode destinations to repair: nbsp -> space, soft-hyphen -> hyphen. These are NOT in the text
+# we draw (input is cleaned to ASCII) — they are artifacts of how PyMuPDF/the reused font build the
+# ToUnicode CMap, and only corrupt the *text layer* (copy/extract), not the rendering.
+_TOUNI_FIX = {b'00a0': b'0020', b'00ad': b'002d'}
+_BFCHAR_BLOCK = re.compile(rb'beginbfchar(.*?)endbfchar', re.S)
+_BFCHAR_PAIR = re.compile(rb'(<[0-9a-fA-F]{4,}>)\s*<([0-9a-fA-F]{4})>')
+
+
+def _clean_tounicode(doc):
+    """PyMuPDF's insert_text writes inter-word spaces into the ToUnicode CMap as U+00A0 (nbsp), and a
+    reused LaTeX/Computer-Modern font maps its hyphen glyph to U+00AD (soft hyphen). Both render fine
+    but make an edited line's TEXT LAYER copy/extract as 'unreadable unicode'. Rewrite those bfchar
+    destinations back to plain space / hyphen so selected text is clean ASCII. Only touches bfchar
+    destinations (the 2nd code of each pair); bfrange and source codes are left untouched."""
+    def fix_block(bm):
+        def fix_pair(pm):
+            dst = pm.group(2).lower()
+            return pm.group(1) + b' <' + _TOUNI_FIX[dst] + b'>' if dst in _TOUNI_FIX else pm.group(0)
+        return b'beginbfchar' + _BFCHAR_PAIR.sub(fix_pair, bm.group(1)) + b'endbfchar'
+    for x in range(1, doc.xref_length()):
+        if not doc.xref_is_stream(x):
+            continue
+        try:
+            s = doc.xref_stream(x)
+        except Exception:
+            continue
+        if not s or b'beginbfchar' not in s:
+            continue
+        ns = _BFCHAR_BLOCK.sub(fix_block, s)
+        if ns != s:
+            try:
+                doc.update_stream(x, ns)
+            except Exception:
+                pass
+
+
 def _clean_text(s):
     """Drop stray characters a browser's editable box introduces (nbsp, zero-width, soft hyphen,
     control chars) so they don't save as a missing-glyph box. Keeps tabs; spaces are preserved."""
@@ -989,6 +1025,7 @@ def edit_pdf():
                     except Exception:
                         pass
 
+        _clean_tounicode(doc)   # repair nbsp/soft-hyphen in the edited lines' text layer (copy/extract)
         output_bytes = doc.tobytes(deflate=True, garbage=3)
         doc.close()
         return jsonify({
