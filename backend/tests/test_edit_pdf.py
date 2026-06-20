@@ -783,12 +783,36 @@ class ToolbarStyleTests(unittest.TestCase):
             self.assertIn(expect, s["font"], f"{fam}: expected {expect!r}, got {s['font']!r}")
 
 
-# The ten dropdown labels and the open font each one embeds (the proprietary originals are never used).
+# Every dropdown label, and the open font each one embeds (the proprietary originals are never used).
 DROPDOWN_FONTS = ["arial", "helvetica", "times", "georgia", "verdana", "courier",
-                  "roboto", "opensans", "montserrat", "comicsans"]
-OPEN_FACES = ["Arimo", "Tinos", "Cousine", "Gelasio", "ComicNeue", "Roboto", "OpenSans", "Montserrat"]
-PROPRIETARY = ["Arial", "Helvetica", "TimesNewRoman", "Times New Roman", "Georgia",
-               "Verdana", "CourierNew", "Courier New", "ComicSans", "Comic Sans"]
+                  "roboto", "opensans", "montserrat", "comicsans",
+                  # newly added
+                  "calibri", "cambria", "consolas", "tahoma", "trebuchet", "garamond", "baskerville",
+                  "palatino", "brushscript", "inter", "lato", "poppins", "nunito", "sourcesans",
+                  "ubuntu", "ptsans", "merriweather", "librebaskerville", "playfair", "notoserif",
+                  "firacode", "jetbrainsmono", "sourcecodepro", "ibmplexmono", "pacifico", "comicneue"]
+# Open faces that may be embedded (spaceless form, as the embed check compares). NB EBGaramond /
+# LibreBaskerville legitimately contain "Garamond"/"Baskerville", so those words are NOT proprietary.
+OPEN_FACES = ["Arimo", "Tinos", "Cousine", "Gelasio", "ComicNeue", "Roboto", "OpenSans", "Montserrat",
+              "Carlito", "Caladea", "EBGaramond", "LibreBaskerville", "Inter", "Lato", "Poppins",
+              "Nunito", "SourceSans3", "Ubuntu", "PTSans", "Merriweather", "NotoSerif",
+              "PlayfairDisplay", "FiraCode", "JetBrainsMono", "SourceCodePro", "IBMPlexMono", "Pacifico"]
+PROPRIETARY = ["Arial", "Helvetica", "TimesNewRoman", "Times New Roman", "Georgia", "Verdana",
+               "CourierNew", "Courier New", "ComicSans", "Comic Sans", "Calibri", "Cambria",
+               "Consolas", "Tahoma", "Trebuchet", "Palatino", "BrushScript", "Brush Script"]
+# (display key -> embedded open face) for the substitution mappings the spec requires.
+SUBSTITUTIONS = [("arial", "Arimo"), ("times", "Tinos"), ("georgia", "Gelasio"), ("courier", "Cousine"),
+                 ("comicsans", "ComicNeue"), ("calibri", "Carlito"), ("cambria", "Caladea"),
+                 ("consolas", "Cousine"), ("tahoma", "Arimo"), ("trebuchet", "Arimo"),
+                 ("garamond", "EBGaramond"), ("baskerville", "LibreBaskerville"),
+                 ("palatino", "NotoSerif"), ("brushscript", "Pacifico"), ("inter", "Inter"),
+                 ("lato", "Lato"), ("poppins", "Poppins"), ("jetbrainsmono", "JetBrainsMono"),
+                 ("pacifico", "Pacifico"), ("comicneue", "ComicNeue"), ("merriweather", "Merriweather")]
+# Open family stems that may live in backend/fonts/ (variable weights per family).
+ALLOWED_STEMS = {"Arimo", "Tinos", "Cousine", "Gelasio", "ComicNeue", "Roboto", "OpenSans", "Montserrat",
+                 "Carlito", "Caladea", "EBGaramond", "LibreBaskerville", "Inter", "Lato", "Poppins",
+                 "Nunito", "SourceSans3", "Ubuntu", "PTSans", "Merriweather", "NotoSerif",
+                 "PlayfairDisplay", "FiraCode", "JetBrainsMono", "SourceCodePro", "IBMPlexMono", "Pacifico"}
 
 
 class FontLicensingTests(unittest.TestCase):
@@ -834,30 +858,38 @@ class FontLicensingTests(unittest.TestCase):
 
     def test_3_substitutions_embed_the_metric_compatible_face(self):
         # Visual-equivalence mapping: the saved PDF embeds the open look-alike for each substitution.
-        for fam, face in [("arial", "Arimo"), ("times", "Tinos"), ("georgia", "Gelasio"),
-                          ("courier", "Cousine"), ("comicsans", "ComicNeue")]:
+        for fam, face in SUBSTITUTIONS:
             res = self._styled(fam, "SUB" + fam)
             s = find_span(res, "SUB" + fam)
-            self.assertIsNotNone(s)
-            self.assertIn(face, s["font"], f"{fam}: expected {face} face, got {s['font']!r}")
+            self.assertIsNotNone(s, f"{fam}: styled text missing")
+            self.assertIn(face, s["font"].split("+")[-1].replace(" ", ""),
+                          f"{fam}: expected {face} face, got {s['font']!r}")
 
     def test_4_bundled_files_are_only_open_licensed_fonts(self):
-        # backend/fonts/ holds ONLY the eight open families (4 weights each) — no proprietary file.
+        # backend/fonts/ holds ONLY open families, and NO file claims a proprietary identity.
         files = sorted(f for f in os.listdir(appmod._FONTS_DIR) if f.lower().endswith(".ttf"))
-        expected = sorted(f"{fam}-{st}.ttf" for fam in
-                          ["Arimo", "Tinos", "Cousine", "Gelasio", "ComicNeue", "Roboto", "OpenSans", "Montserrat"]
-                          for st in ["Regular", "Bold", "Italic", "BoldItalic"])
-        self.assertEqual(files, expected, "backend/fonts/ contents drifted from the open-font set")
-        forbidden = ["arial.ttf", "helvetica.ttf", "times", "georgia.ttf", "verdana.ttf",
-                     "cour", "comicsans", "comic sans"]
-        low = [f.lower() for f in files]
-        for bad in forbidden:
-            self.assertFalse(any(bad in f for f in low), f"proprietary font file present: {bad}")
+        self.assertTrue(files, "no fonts bundled")
+        for f in files:
+            stem = f.rsplit("-", 1)[0]
+            self.assertIn(stem, ALLOWED_STEMS, f"unexpected (non-open) font file: {f}")
+            # The font's OWN internal name must not impersonate a proprietary face.
+            name = fitz.Font(fontfile=os.path.join(appmod._FONTS_DIR, f)).name.replace(" ", "")
+            for p in PROPRIETARY:
+                self.assertNotIn(p.replace(" ", ""), name, f"{f} internal name claims proprietary {p!r}: {name!r}")
         # the licence notice ships alongside them
         notice = os.path.join(appmod._FONTS_DIR, "NOTICE.md")
         self.assertTrue(os.path.exists(notice))
         txt = open(notice).read()
         self.assertTrue(("OFL" in txt or "Open Font License" in txt) and "Apache" in txt)
+
+    def test_5_every_new_key_resolves_to_a_bundled_open_ttf(self):
+        # Each catalogue key embeds a real bundled TTF (not a Base-14 fallback) under backend/fonts/.
+        for fam in DROPDOWN_FONTS:
+            opt = appmod._toolbar_font_option(fam, False, False, "Sample Text 0123")
+            self.assertIsNotNone(opt, f"{fam}: no font option")
+            ff = opt[0].get("fontfile", "")
+            self.assertTrue(ff and appmod._FONTS_DIR in ff and ff.lower().endswith(".ttf"),
+                            f"{fam}: did not resolve to a bundled TTF (got {opt[0]!r})")
 
 
 class MixedSizeSaveTests(unittest.TestCase):

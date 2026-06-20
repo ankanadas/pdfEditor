@@ -1,0 +1,31 @@
+/* In-browser dropdown PREVIEW faces only (Regular weight). Open-source woff2 in assets/fonts/,
+   fetched by scripts/fetch-fonts.sh. font-display:swap + lazy: a face only downloads when a
+   dropdown row using it is rendered (i.e. when the font picker opens). PDF embedding uses the
+   full TTFs in backend/fonts/ — see backend/fonts/NOTICE.md. No proprietary fonts here. */
+@font-face{font-family:'pf-arimo';src:url('/assets/fonts/arimo.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-caladea';src:url('/assets/fonts/caladea.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-carlito';src:url('/assets/fonts/carlito.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-comic-neue';src:url('/assets/fonts/comic-neue.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-cousine';src:url('/assets/fonts/cousine.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-eb-garamond';src:url('/assets/fonts/eb-garamond.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-fira-code';src:url('/assets/fonts/fira-code.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-gelasio';src:url('/assets/fonts/gelasio.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-ibm-plex-mono';src:url('/assets/fonts/ibm-plex-mono.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-inter';src:url('/assets/fonts/inter.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-jetbrains-mono';src:url('/assets/fonts/jetbrains-mono.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-lato';src:url('/assets/fonts/lato.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-libre-baskerville';src:url('/assets/fonts/libre-baskerville.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-merriweather';src:url('/assets/fonts/merriweather.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-montserrat';src:url('/assets/fonts/montserrat.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-serif';src:url('/assets/fonts/noto-serif.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-nunito';src:url('/assets/fonts/nunito.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-open-sans';src:url('/assets/fonts/open-sans.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-pacifico';src:url('/assets/fonts/pacifico.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-playfair-display';src:url('/assets/fonts/playfair-display.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-poppins';src:url('/assets/fonts/poppins.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-pt-sans';src:url('/assets/fonts/pt-sans.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-roboto';src:url('/assets/fonts/roboto.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-source-code-pro';src:url('/assets/fonts/source-code-pro.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-source-sans-3';src:url('/assets/fonts/source-sans-3.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-tinos';src:url('/assets/fonts/tinos.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-ubuntu';src:url('/assets/fonts/ubuntu.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
