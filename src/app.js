@@ -2136,7 +2136,7 @@ class PDFEditorApp {
     on('tt-align-center', 'click', () => this.applyTextStyle('align', 'center'));
     on('tt-align-right', 'click', () => this.applyTextStyle('align', 'right'));
     on('tt-opacity', 'input', (e) => this.applyTextStyle('opacity', Math.max(0.1, Math.min(1, (parseInt(e.target.value, 10) || 100) / 100))));
-    on('tt-dup', 'click', () => this.duplicateActiveText());
+    // tt-dup / tt-link are intentionally not rendered yet; duplicateActiveText() stays for when they return.
     on('tt-del', 'click', () => this.deleteActiveText());
     document.getElementById('stage')?.addEventListener('scroll', () => this._positionTextToolbar());
     window.addEventListener('resize', () => this._positionTextToolbar());
@@ -2269,7 +2269,14 @@ class PDFEditorApp {
     const o = t.kind === 'overlay' ? t.edit : t.line;
     if (!o) return {};
     const size = t.kind === 'overlay' ? Math.round(o.fontSize) : Math.round((o.fontSizePx || 0) / this.scale);
-    return { bold: !!o.bold, italic: !!o.italic, underline: !!o.underline, size,
+    // Added-text bold/italic live per-run, so a committed overlay reflects them from its runs
+    // (every run bold/italic) rather than the box-level flags, which stay at the box default.
+    let bold = !!o.bold, italic = !!o.italic;
+    if (t.kind === 'overlay' && o.runs && o.runs.length) {
+      const flat = o.runs.flat();
+      if (flat.length) { bold = flat.every(r => r.bold); italic = flat.every(r => r.italic); }
+    }
+    return { bold, italic, underline: !!o.underline, size,
              color: o.color, opacity: o.opacity, align: o.align,
              family: this._displayFontKey(o.fontFamily, o.fontFamilyName || o.fontName) };
   }
