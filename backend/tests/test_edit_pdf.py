@@ -235,6 +235,22 @@ class LatexResumeTests(unittest.TestCase):
         self.assertIn("alpha beta gamma", txt, f"spaces not plain in the text layer: {txt!r}")
         self.assertNotIn("\u00a0", txt)
 
+    def test_edited_cm_line_avoids_fragile_cm_subset_font(self):
+        # A LaTeX/Computer-Modern subset font's TeX encoding can re-insert as the WRONG (symbol)
+        # glyphs after save \u2014 "the edited line is gibberish only after save". The line must be
+        # redrawn with a reliable open font, NEVER reusing a CM subset font.
+        src = fitz.open(RESUME_LATEX)
+        edit, orig = self._line_edit(src, "J.B. Hunt", "supporting reliable distributed teams")
+        self.assertTrue(orig.split("+")[-1].lower().startswith("cm"), f"precondition: CM font, got {orig!r}")
+        res = fitz.open(stream=post_edit(src.tobytes(), [edit]), filetype="pdf")
+        got = spans_with(res, "supporting")
+        self.assertTrue(got, "edited line not found")
+        for s in got:
+            self.assertFalse(s["font"].split("+")[-1].lower().startswith("cm"),
+                             f"edited line still drawn with a fragile CM subset font: {s['font']!r}")
+        self.assertTrue(res[0].search_for("supporting reliable distributed teams"),
+                        "edited line not searchable/clean")
+
 
 # --------------------------------------------------------------------------- #
 # Synthetic tests (always run) for fixes the real PDFs don't exercise
@@ -437,6 +453,15 @@ class SyntheticTests(unittest.TestCase):
         kwargs, font = appmod._pick_font(" ", options)
         self.assertIs(font, primary)
         self.assertEqual(kwargs.get("fontname"), "calibri")
+
+    def test_latex_subset_font_detection(self):
+        # CM/LM subset fonts (drawn unreliably on re-insert) are detected so they're not reused.
+        for nm in ["SOWLVM+CMR10", "ABCDEF+CMBX12", "XX+CMSY10", "YY+CMTI10", "ZZ+CMCSC10",
+                   "AAAA+LMRoman10-Regular", "BBBB+LMSans10-Regular"]:
+            self.assertTrue(appmod._is_latex_subset_font(nm), f"should be CM/LM subset: {nm!r}")
+        for nm in ["Calibri", "ABCDEF+ArialMT", "Tinos-Regular", "Helvetica", "CMU Serif",
+                   "Comic Neue", "Cambria"]:
+            self.assertFalse(appmod._is_latex_subset_font(nm), f"should NOT be flagged: {nm!r}")
 
     def test_overcredited_glyph_falls_back_instead_of_notdef(self):
         # Generalises the space fix to ANY character. A subset font's drawn-charset can CLAIM a
