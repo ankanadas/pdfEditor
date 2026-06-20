@@ -98,21 +98,28 @@ def request_too_large(_e):
 
 # Real Unicode TrueType fonts for re-inserting edited text. We choose the family
 # (serif vs sans) and weight/style (bold/italic) per line to match the original as closely
-# as possible, and fall back to PyMuPDF's builtin Base-14 names (Latin-1 only) when no file
-# is present (e.g. on a Linux host). Using TTFs keeps bullets (•), em-dashes (—), curly
-# quotes, etc. intact.
-#                          (bold, italic) -> ordered file candidates
+# as possible. The BUNDLED open fonts (Arimo/Tinos, OFL/Apache) are tried first so the result is
+# license-safe and identical on every host (incl. Linux/Render); local system fonts and Base-14 are
+# only later fallbacks. Using TTFs keeps bullets (•), em-dashes (—), curly quotes, etc. intact.
+_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+
+
+def _bundled(stem):
+    return os.path.join(_FONTS_DIR, stem)
+
+
+#                          (bold, italic) -> ordered file candidates (bundled open font first)
 _SANS_FILES = {
-    (False, False): ["/System/Library/Fonts/Supplemental/Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
-    (True,  False): ["/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"],
-    (False, True):  ["/System/Library/Fonts/Supplemental/Arial Italic.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"],
-    (True,  True):  ["/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"],
+    (False, False): [_bundled("Arimo-Regular.ttf"), "/System/Library/Fonts/Supplemental/Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+    (True,  False): [_bundled("Arimo-Bold.ttf"), "/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"],
+    (False, True):  [_bundled("Arimo-Italic.ttf"), "/System/Library/Fonts/Supplemental/Arial Italic.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"],
+    (True,  True):  [_bundled("Arimo-BoldItalic.ttf"), "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"],
 }
 _SERIF_FILES = {
-    (False, False): ["/System/Library/Fonts/Supplemental/Times New Roman.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"],
-    (True,  False): ["/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"],
-    (False, True):  ["/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf"],
-    (True,  True):  ["/System/Library/Fonts/Supplemental/Times New Roman Bold Italic.ttf"],
+    (False, False): [_bundled("Tinos-Regular.ttf"), "/System/Library/Fonts/Supplemental/Times New Roman.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"],
+    (True,  False): [_bundled("Tinos-Bold.ttf"), "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"],
+    (False, True):  [_bundled("Tinos-Italic.ttf"), "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf"],
+    (True,  True):  [_bundled("Tinos-BoldItalic.ttf"), "/System/Library/Fonts/Supplemental/Times New Roman Bold Italic.ttf"],
 }
 # Builtin Base-14 fallbacks: (serif, bold, italic) -> PyMuPDF font name.
 _BUILTIN = {
@@ -198,7 +205,6 @@ SIGN_FONT_NAME = "edsig"
 #  file candidates; the Base-14 builtin for `generic_family` is the last-resort fallback if a file is
 #  somehow missing (still non-proprietary — Base-14 fonts are referenced by name, never embedded).
 # ---------------------------------------------------------------------------------------------------
-_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
 _F, _T = False, True
 
 
@@ -393,6 +399,19 @@ def _font_xrefs_for(page, basefont):
     return [x[1] for x in matches]
 
 
+# LaTeX/TeX subset fonts: Computer Modern (CMR/CMBX/CMTI/CMSY/CMMI/CMCSC…) and Latin Modern (LMR…).
+_LATEX_FONT_RE = re.compile(r'^(cm|lm)[a-z]{1,6}\d')
+
+
+def _is_latex_subset_font(basefont):
+    """A LaTeX/TeX Type1 SUBSET font (Computer Modern / Latin Modern). These use a non-standard TeX
+    encoding whose re-insertion is unreliable: PyMuPDF draws via the re-embedded font's own glyph
+    mapping, which can disagree with the has_glyph check used to pick it and come out as the WRONG
+    (symbol-like) glyphs — the 'edited line is gibberish only after save' bug. We do NOT reuse them;
+    their text is redrawn with the open serif/sans fallback, which is correct on every host."""
+    return bool(_LATEX_FONT_RE.match((basefont or '').split('+')[-1].lower()))
+
+
 def _font_is_embedded(page, basefont):
     """Whether `basefont` is embedded on the page (carries a font-file stream) rather than a
     name-only standard reference. PyMuPDF reports a non-embedded standard font with ext 'n/a'."""
@@ -510,9 +529,13 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
     if span:
         xref_base = {f[0]: (f[3] or '') for f in page.get_fonts(full=True)}   # xref -> basefont
         for xref in _embedded_xrefs(page, span.get('font', '')):
+            base = xref_base.get(xref, '')
+            # Never reuse a LaTeX/Computer-Modern subset font for re-insertion — its TeX encoding can
+            # draw the wrong glyphs (gibberish) after save. Its text drops to the open serif fallback.
+            if _is_latex_subset_font(base):
+                continue
             ent = _install_embedded_font(doc, page, xref, cache)
             if ent:
-                base = xref_base.get(xref, '')
                 charset = _font_charset(doc, base, charset_cache)
                 nm = base.lower()
                 # Include LaTeX Computer Modern names (cmbx = bold extended, cmti/cmsl = italic/slanted)
@@ -585,6 +608,42 @@ def _pick_font(ch, options):
         if charset is None:
             return kwargs, font
     return options[-1][0], options[-1][1]
+
+
+# ToUnicode destinations to repair: nbsp -> space, soft-hyphen -> hyphen. These are NOT in the text
+# we draw (input is cleaned to ASCII) — they are artifacts of how PyMuPDF/the reused font build the
+# ToUnicode CMap, and only corrupt the *text layer* (copy/extract), not the rendering.
+_TOUNI_FIX = {b'00a0': b'0020', b'00ad': b'002d'}
+_BFCHAR_BLOCK = re.compile(rb'beginbfchar(.*?)endbfchar', re.S)
+_BFCHAR_PAIR = re.compile(rb'(<[0-9a-fA-F]{4,}>)\s*<([0-9a-fA-F]{4})>')
+
+
+def _clean_tounicode(doc):
+    """PyMuPDF's insert_text writes inter-word spaces into the ToUnicode CMap as U+00A0 (nbsp), and a
+    reused LaTeX/Computer-Modern font maps its hyphen glyph to U+00AD (soft hyphen). Both render fine
+    but make an edited line's TEXT LAYER copy/extract as 'unreadable unicode'. Rewrite those bfchar
+    destinations back to plain space / hyphen so selected text is clean ASCII. Only touches bfchar
+    destinations (the 2nd code of each pair); bfrange and source codes are left untouched."""
+    def fix_block(bm):
+        def fix_pair(pm):
+            dst = pm.group(2).lower()
+            return pm.group(1) + b' <' + _TOUNI_FIX[dst] + b'>' if dst in _TOUNI_FIX else pm.group(0)
+        return b'beginbfchar' + _BFCHAR_PAIR.sub(fix_pair, bm.group(1)) + b'endbfchar'
+    for x in range(1, doc.xref_length()):
+        if not doc.xref_is_stream(x):
+            continue
+        try:
+            s = doc.xref_stream(x)
+        except Exception:
+            continue
+        if not s or b'beginbfchar' not in s:
+            continue
+        ns = _BFCHAR_BLOCK.sub(fix_block, s)
+        if ns != s:
+            try:
+                doc.update_stream(x, ns)
+            except Exception:
+                pass
 
 
 def _clean_text(s):
@@ -989,6 +1048,7 @@ def edit_pdf():
                     except Exception:
                         pass
 
+        _clean_tounicode(doc)   # repair nbsp/soft-hyphen in the edited lines' text layer (copy/extract)
         output_bytes = doc.tobytes(deflate=True, garbage=3)
         doc.close()
         return jsonify({
