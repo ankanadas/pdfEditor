@@ -2011,9 +2011,13 @@ class PDFEditorApp {
         div.style.whiteSpace = 'pre-wrap';
         div.style.fontWeight = edit.bold ? 'bold' : 'normal';
         div.style.fontStyle = edit.italic ? 'italic' : 'normal';
-        div.style.fontFamily = edit.fontFamily === 'serif' ? '"Times New Roman",Times,serif'
-          : edit.fontFamily === 'mono' ? '"Courier New",Courier,monospace'
-          : 'Arial,Helvetica,sans-serif';
+        div.style.fontFamily = this._familyCss(edit.fontFamily);
+        // Whole-box styles set via the floating toolbar (color / underline / opacity / alignment)
+        // must survive the commit + static re-render, exactly as the live editor showed them.
+        if (edit.color != null) div.style.color = this._rgbCss(edit.color);
+        if (edit.underline) div.style.textDecoration = 'underline';
+        if (edit.opacity != null) div.style.opacity = edit.opacity;
+        if (edit.align) div.style.textAlign = edit.align;
         div.title = 'Double-click to edit · drag to move · rotate with the top handle';
         div.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); this.openInsertEditor(edit, pv, false); });
         // Rotation pivots on the text origin (left edge at the baseline) so the saved PDF matches.
