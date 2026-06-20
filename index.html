@@ -420,6 +420,31 @@
     .insert-editor:empty::before { content: attr(data-placeholder); color: #9aa0aa; }
     .insert-editor span { line-height: 1.2; }
 
+    /* Shared contextual floating text toolbar (positioned by app.js; one for Edit + Add text). */
+    #textToolbar {
+      position: fixed; z-index: 600; display: none; align-items: center; gap: 4px;
+      padding: 5px 7px; background: #fff; border: 1px solid #d9d4ff; border-radius: 10px;
+      box-shadow: 0 8px 26px rgba(20, 22, 40, .22); white-space: nowrap;
+      font-size: 13px; color: var(--ink);
+    }
+    #textToolbar[hidden] { display: none !important; }
+    #textToolbar.show { display: inline-flex; }
+    #textToolbar .tt-sep { width: 1px; align-self: stretch; background: #ece8ff; margin: 2px 2px; }
+    .tt-btn {
+      min-width: 28px; height: 28px; padding: 0 6px; border: 1px solid transparent; background: #fff;
+      color: var(--ink); border-radius: 7px; cursor: pointer; font-size: 14px; line-height: 26px;
+    }
+    .tt-btn:hover { background: #f1eeff; }
+    .tt-btn.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .tt-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .tt-btn.tt-danger:hover { background: #ffe9e9; color: #c0271f; }
+    .tt-num { width: 48px; height: 28px; padding: 2px 6px; border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; }
+    .tt-sel { height: 28px; padding: 2px 6px; border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; background: #fff; }
+    .tt-color { display: inline-flex; align-items: center; }
+    .tt-color input[type=color] { width: 28px; height: 28px; padding: 0; border: 1px solid #d9d4ff; border-radius: 7px; background: #fff; cursor: pointer; }
+    .tt-opacity { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+    .tt-opacity input[type=range] { width: 64px; }
+
     /* Draggable / resizable added text & signatures */
     .insert-overlay {
       position: absolute; color: #000; white-space: pre; cursor: move;
@@ -984,6 +1009,33 @@
         Merge
       </button>
     </aside>
+  </div>
+
+  <!-- Shared contextual floating text toolbar. ONE toolbar for both edited existing text and
+       newly-added text (see app.js applyTextStyle). Positioned over the selected text; hidden by
+       default. position:fixed so it tracks the selection across scroll/zoom and never clips. -->
+  <div id="textToolbar" role="toolbar" aria-label="Text styling" hidden>
+    <button class="tt-btn" id="tt-bold" type="button" title="Bold"><b>B</b></button>
+    <button class="tt-btn" id="tt-italic" type="button" title="Italic"><i>I</i></button>
+    <button class="tt-btn" id="tt-underline" type="button" title="Underline"><u>U</u></button>
+    <span class="tt-sep"></span>
+    <input type="number" id="tt-size" class="tt-num" min="4" max="200" step="1" title="Font size" aria-label="Font size" />
+    <select id="tt-font" class="tt-sel" title="Font family" aria-label="Font family">
+      <option value="sans">Sans</option>
+      <option value="serif">Serif</option>
+      <option value="mono">Mono</option>
+    </select>
+    <label class="tt-color" title="Text color"><input type="color" id="tt-color" value="#000000" aria-label="Text color" /></label>
+    <span class="tt-sep"></span>
+    <button class="tt-btn" id="tt-align-left" type="button" title="Align left" aria-label="Align left">⯇</button>
+    <button class="tt-btn" id="tt-align-center" type="button" title="Align center" aria-label="Align center">≡</button>
+    <button class="tt-btn" id="tt-align-right" type="button" title="Align right" aria-label="Align right">⯈</button>
+    <span class="tt-sep"></span>
+    <label class="tt-opacity" title="Opacity">α<input type="range" id="tt-opacity" min="10" max="100" step="5" value="100" aria-label="Opacity" /></label>
+    <span class="tt-sep"></span>
+    <button class="tt-btn" id="tt-link" type="button" title="Hyperlink (coming soon)" disabled>🔗</button>
+    <button class="tt-btn" id="tt-dup" type="button" title="Duplicate">⧉</button>
+    <button class="tt-btn tt-danger" id="tt-del" type="button" title="Delete">🗑</button>
   </div>
 
   <!-- Slim site footer: links + trust note, visible on the editor and every page -->
