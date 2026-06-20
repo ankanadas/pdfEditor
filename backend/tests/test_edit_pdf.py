@@ -30,6 +30,9 @@ import app as appmod  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 RESUME = os.path.join(FIXTURES, "resume.pdf")
+# A LaTeX/Computer-Modern résumé (subset Type1 CM fonts that have NO space glyph). Personal data,
+# so gitignored and absent in CI — the test below skips when missing.
+RESUME_LATEX = os.path.join(FIXTURES, "resume_latex.pdf")
 
 
 # --------------------------------------------------------------------------- #
@@ -159,6 +162,53 @@ class ResumeTests(unittest.TestCase):
         new = "Designed and shipped a scalable service"
         res = fitz.open(stream=post_edit(src.tobytes(), [edit_from_span(span, new)]), filetype="pdf")
         self.assertIn(new, page_text(res), "some characters were dropped on re-insert")
+
+
+@unittest.skipUnless(os.path.exists(RESUME_LATEX), f"missing fixture: {RESUME_LATEX}")
+class LatexResumeTests(unittest.TestCase):
+    """LaTeX / Computer-Modern résumé (CMR10/CMBX10/CMTI10 …). These subset fonts have NO space
+    glyph (LaTeX positions words by kerning, not a space char), so a careless re-insert drew
+    .notdef boxes (U+FFFD) for every space — the "full of gibberish chars" bug. Guards that an
+    edited CM line stays clean: real spaces, weight kept, digits intact."""
+
+    def _line_edit(self, src_doc, contains, new_text):
+        line = next((l for b in src_doc[0].get_text("dict")["blocks"]
+                     for l in b.get("lines", [])
+                     if contains in "".join(s["text"] for s in l["spans"])), None)
+        self.assertIsNotNone(line, f"could not find line {contains!r}")
+        sp = line["spans"]
+        x0 = min(s["bbox"][0] for s in sp); y0 = min(s["bbox"][1] for s in sp)
+        x1 = max(s["bbox"][2] for s in sp); y1 = max(s["bbox"][3] for s in sp)
+        s0 = sp[0]
+        return {
+            "pageIndex": 0, "x": round(x0, 1), "right": round(x1, 1),
+            "top": round(y0, 1), "bottom": round(y1, 1), "baseline": round(s0["origin"][1], 1),
+            "fontSize": round(s0["size"], 1),
+            "bold": bool(s0["flags"] & 16), "italic": bool(s0["flags"] & 2), "serif": bool(s0["flags"] & 4),
+            "newText": new_text,
+        }, s0["font"]
+
+    def test_edited_cm_line_has_no_missing_glyph_boxes(self):
+        src = fitz.open(RESUME_LATEX)
+        edit, _ = self._line_edit(src, "J.B. Hunt", "J.B. Hunt, Boston, MA")
+        res = fitz.open(stream=post_edit(src.tobytes(), [edit]), filetype="pdf")
+        self.assertNotIn("�", res[0].get_text(),
+                         "missing-glyph box (U+FFFD) in edited CM line — spaces broke")
+        self.assertTrue(res[0].search_for("J.B. Hunt, Boston, MA"),
+                        "edited CM text not searchable (spaces mangled)")
+
+    def test_edited_cm_bold_heading_keeps_weight_and_digits(self):
+        src = fitz.open(RESUME_LATEX)
+        edit, font = self._line_edit(src, "Software Engineer III", "Software Engineer 2024")
+        self.assertTrue("CMBX" in font or edit["bold"], f"precondition: bold CM heading, got {font!r}")
+        res = fitz.open(stream=post_edit(src.tobytes(), [edit]), filetype="pdf")
+        self.assertNotIn("�", res[0].get_text())
+        self.assertTrue(res[0].search_for("Software Engineer 2024"),
+                        "digits/spaces broke in the bold CM heading")
+        head = [s for s in spans_with(res, "Engineer") if abs(s["origin"][1] - edit["baseline"]) < 4]
+        self.assertTrue(head, "edited heading not found in output")
+        self.assertTrue(any(("CMBX" in s["font"]) or (s["flags"] & 16) or ("Bold" in s["font"]) for s in head),
+                        f"bold heading lost its weight: {[s['font'] for s in head]}")
 
 
 # --------------------------------------------------------------------------- #
@@ -321,6 +371,47 @@ class SyntheticTests(unittest.TestCase):
                   for x in l["spans"] if "5" in x["text"] and abs(x["origin"][1] - 60) < 4)
         self.assertTrue((s5["flags"] & 16) or "Bold" in s5["font"],
                         f"typed digit fell to a regular font: {s5['font']}")
+
+    def test_space_drawn_with_a_space_capable_font(self):
+        # A space must NEVER be assigned to a font that lacks a space glyph. LaTeX/Computer Modern
+        # subset fonts have none — PyMuPDF synthesizes inter-word spaces from glyph gaps, so the
+        # drawn-charset wrongly credits the font with ' '; drawing one then yields a .notdef box that
+        # renders as U+FFFD ("Software<box>Engineer"). _pick_font must skip such a font for ' '.
+        class _StubFont:
+            def __init__(self, space):
+                self._space = space
+
+            def has_glyph(self, cp):
+                return 1 if (cp != 0x20 or self._space) else 0
+
+        cm = _StubFont(space=False)          # like CMR10/CMBX10/CMTI10: NO space glyph
+        fallback = _StubFont(space=True)     # the Arial/Times catch-all: always has a space
+        options = [
+            (dict(fontname="cm"), cm, set("Software "), True),   # charset wrongly includes ' '
+            (dict(fontname="fallback"), fallback, None, True),
+        ]
+        kwargs, font = appmod._pick_font(" ", options)
+        self.assertIs(font, fallback, "space went to a font with no space glyph (renders as a box)")
+        self.assertEqual(kwargs.get("fontname"), "fallback")
+
+    def test_space_keeps_primary_font_when_it_has_a_space(self):
+        # Normal documents must NOT fragment: when the primary font has a real space glyph the space
+        # is drawn with it (no needless switch to the fallback).
+        class _StubFont:
+            def __init__(self, space):
+                self._space = space
+
+            def has_glyph(self, cp):
+                return 1 if (cp != 0x20 or self._space) else 0
+
+        primary = _StubFont(space=True)
+        options = [
+            (dict(fontname="calibri"), primary, set("Hi "), True),
+            (dict(fontname="fallback"), _StubFont(space=True), None, True),
+        ]
+        kwargs, font = appmod._pick_font(" ", options)
+        self.assertIs(font, primary)
+        self.assertEqual(kwargs.get("fontname"), "calibri")
 
     def test_erase_still_whitens(self):
         # The erase tool (kind='erase') must still paint white.

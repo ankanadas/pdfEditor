@@ -17,6 +17,8 @@ backend/tests/fixtures/*.pdf
 # Test/sample PDFs are never committed (test-document.pdf is regenerable via create-test-pdf.js).
 *.pdf
 
-# The entire tests/ tree is kept LOCAL only — never committed, on any branch (jest suite,
-# agentic harness, fixtures and personal sample PDFs all stay on disk, not in git).
-tests/
+# The ROOT tests/ tree is kept LOCAL only — never committed, on any branch (jest suite,
+# agentic harness, fixtures and personal sample PDFs all stay on disk, not in git). Anchored to
+# the repo root with a leading slash so it does NOT also shadow backend/tests/ (the committed
+# Python suite that runs as the build gate).
+/tests/
