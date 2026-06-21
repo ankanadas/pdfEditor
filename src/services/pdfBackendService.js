@@ -28,18 +28,30 @@ export class PDFBackendService {
   }
 
   /**
-   * Extract text with positions from PDF
-   * @param {File} pdfFile - The PDF file
+   * Extract text with positions from PDF.
+   * Sends the PDF as base64 JSON (the same in-memory path as the other endpoints), so the
+   * server never spools the upload to a temp file on disk.
+   * @param {File|ArrayBuffer} pdfFile - The PDF file or its bytes
    * @returns {Promise<Object>} - Extracted text data
    */
   static async extractText(pdfFile) {
     try {
-      const formData = new FormData();
-      formData.append('file', pdfFile);
+      const buf = pdfFile instanceof ArrayBuffer ? pdfFile : await pdfFile.arrayBuffer();
+      const pdfBytes = new Uint8Array(buf);
+
+      // Convert to base64 in chunks to avoid a call-stack overflow on large files.
+      let binary = '';
+      const chunkSize = 8192;
+      for (let i = 0; i < pdfBytes.length; i += chunkSize) {
+        const chunk = pdfBytes.subarray(i, Math.min(i + chunkSize, pdfBytes.length));
+        binary += String.fromCharCode.apply(null, chunk);
+      }
+      const pdfBase64 = btoa(binary);
 
       const response = await fetch(`${BACKEND_URL}/extract-text`, {
         method: 'POST',
-        body: formData
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pdfBase64 })
       });
 
       if (!response.ok) {

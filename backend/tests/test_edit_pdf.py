@@ -1121,5 +1121,123 @@ class HyperlinkTests(unittest.TestCase):
         self.assertGreater(ys[1] - ys[0], 30, f"link boxes overlap: {links}")
 
 
+class MemoryGuardTests(unittest.TestCase):
+    """Phase 2 — memory/DoS guards on the 512 MB free tier: /extract-text takes base64 JSON
+    (no multipart temp-file spill), every endpoint refuses a PDF with more than MAX_PDF_PAGES
+    pages with a clean 413, and the byte-size cap stays conservative."""
+
+    def _client(self):
+        return appmod.app.test_client()
+
+    def _doc_b64(self, pages=1):
+        d = fitz.open()
+        for i in range(pages):
+            p = d.new_page(width=200, height=200)
+            p.insert_text((20, 40), f"page {i}")
+        return base64.b64encode(d.tobytes()).decode()
+
+    def test_extract_text_uses_base64_json(self):
+        resp = self._client().post("/extract-text", json={"pdfBase64": self._doc_b64(2)})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("success"))
+        self.assertEqual(data.get("pageCount"), 2)
+        self.assertEqual(len(data["pages"]), 2)
+        first = data["pages"][0]["textItems"]
+        self.assertTrue(any("page 0" in t["text"] for t in first), f"text not extracted: {first}")
+
+    def test_extract_text_missing_field_is_400(self):
+        self.assertEqual(self._client().post("/extract-text", json={}).status_code, 400)
+
+    def test_page_cap_rejects_oversized_docs_on_every_endpoint(self):
+        b64 = self._doc_b64(3)
+        orig = appmod.MAX_PDF_PAGES
+        appmod.MAX_PDF_PAGES = 2
+        try:
+            c = self._client()
+            self.assertEqual(c.post("/extract-text", json={"pdfBase64": b64}).status_code, 413)
+            self.assertEqual(c.post("/edit-pdf", json={"pdfBase64": b64, "edits": []}).status_code, 413)
+            self.assertEqual(c.post("/decrypt", json={"pdfBase64": b64}).status_code, 413)
+            self.assertEqual(c.post("/clear-signature", json={"pdfBase64": b64}).status_code, 413)
+        finally:
+            appmod.MAX_PDF_PAGES = orig
+
+    def test_page_cap_allows_docs_within_limit(self):
+        b64 = self._doc_b64(2)
+        orig = appmod.MAX_PDF_PAGES
+        appmod.MAX_PDF_PAGES = 2
+        try:
+            resp = self._client().post("/extract-text", json={"pdfBase64": b64})
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.get_json().get("success"))
+        finally:
+            appmod.MAX_PDF_PAGES = orig
+
+    def test_pdf_size_cap_is_conservative(self):
+        # The whole base64 PDF sits in RAM, then PyMuPDF's working set is a multiple of that;
+        # on 512 MB the document cap must stay modest.
+        self.assertLessEqual(appmod.MAX_PDF_MB, 40)
+
+
+class MagicByteTests(unittest.TestCase):
+    """Phase 3 — reject non-PDF / malformed uploads with a clean 400 before the bytes ever reach
+    the MuPDF C parser. The %PDF- signature is checked on the decoded bytes (head-scanned, so a
+    little leading junk is tolerated the way viewers do)."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    TEXT = b"this is definitely not a pdf, just some text " * 4
+
+    def _client(self):
+        return appmod.app.test_client()
+
+    def _b64(self, raw):
+        return base64.b64encode(raw).decode()
+
+    def test_looks_like_pdf_helper(self):
+        self.assertTrue(appmod._looks_like_pdf(b"%PDF-1.7\n more"))
+        self.assertTrue(appmod._looks_like_pdf(b"   \n\n%PDF-1.4 leading junk tolerated"))
+        self.assertFalse(appmod._looks_like_pdf(b""))
+        self.assertFalse(appmod._looks_like_pdf(self.PNG))
+        self.assertFalse(appmod._looks_like_pdf(b"x" * 2000 + b"%PDF-1.4"))  # signature beyond 1 KB
+
+    def test_non_pdf_rejected_on_every_endpoint(self):
+        c = self._client()
+        for raw in (self.PNG, self.TEXT, b""):
+            b64 = self._b64(raw)
+            self.assertEqual(c.post("/extract-text", json={"pdfBase64": b64}).status_code, 400)
+            self.assertEqual(c.post("/edit-pdf", json={"pdfBase64": b64, "edits": []}).status_code, 400)
+            self.assertEqual(c.post("/clear-signature", json={"pdfBase64": b64}).status_code, 400)
+            self.assertEqual(c.post("/decrypt", json={"pdfBase64": b64}).status_code, 400)
+
+    def test_valid_pdf_still_accepted(self):
+        d = fitz.open(); d.new_page(width=200, height=200).insert_text((20, 40), "ok")
+        b64 = self._b64(d.tobytes())
+        c = self._client()
+        self.assertEqual(c.post("/extract-text", json={"pdfBase64": b64}).status_code, 200)
+        self.assertEqual(c.post("/edit-pdf", json={"pdfBase64": b64, "edits": []}).status_code, 200)
+        self.assertEqual(c.post("/decrypt", json={"pdfBase64": b64}).status_code, 200)
+        self.assertEqual(c.post("/clear-signature", json={"pdfBase64": b64}).status_code, 200)
+
+
+class PyMuPDFVersionFloorTests(unittest.TestCase):
+    """Security floor: the C PDF parser (MuPDF) chews on untrusted uploads, so the build gate must
+    refuse to ship on an old, unpatched PyMuPDF. We bumped 1.23.8 -> 1.27.x (MuPDF 1.27) for the
+    memory-safety fixes in between; this test fails if anyone reinstalls a version below that floor."""
+
+    MIN = (1, 27)  # (major, minor) — raise this when we intentionally bump again
+
+    def test_pymupdf_meets_security_floor(self):
+        ver = tuple(int(x) for x in fitz.VersionBind.split(".")[:2])
+        self.assertGreaterEqual(
+            ver, self.MIN,
+            f"PyMuPDF {fitz.VersionBind} is below the security floor {'.'.join(map(str, self.MIN))}; "
+            f"upgrade backend/requirements.txt (untrusted PDFs hit the MuPDF C parser).")
+
+    def test_mupdf_meets_security_floor(self):
+        ver = tuple(int(x) for x in fitz.VersionFitz.split(".")[:2])
+        self.assertGreaterEqual(
+            ver, self.MIN, f"MuPDF {fitz.VersionFitz} is below the security floor.")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

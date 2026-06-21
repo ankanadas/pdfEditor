@@ -8,8 +8,16 @@ services:
     rootDir: backend
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 2
+    # 1 worker on the 512 MB free tier: each worker holds a whole base64 PDF + PyMuPDF's
+    # multiple-of-that working set in RAM, so 2 concurrent large uploads across 2 workers
+    # would OOM. 1 worker also makes the in-memory rate limiter exact (no per-worker x N).
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.7"
+      # Rate-limit counters live in-process and are exact with the single worker above.
+      # If you ever raise --workers or run multiple instances, set RATELIMIT_STORAGE_URI to
+      # a Redis URL so the limit stays exact and survives restarts (see app.py).
+      # - key: RATELIMIT_STORAGE_URI
+      #   value: "redis://<host>:6379"
