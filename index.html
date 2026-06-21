@@ -509,6 +509,29 @@
     .tt-opacity { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
     .tt-opacity input[type=range] { width: 64px; }
 
+    /* ---------- Hyperlink popover (floating toolbar) ---------- */
+    .tt-link-wrap { position: relative; display: inline-flex; }
+    .tt-link-pop {
+      position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+      background: #fff; border: 1px solid #d9d4ff; border-radius: 10px; padding: 9px;
+      box-shadow: 0 10px 28px rgba(20, 22, 40, .24); z-index: 10; width: 240px;
+    }
+    .tt-link-pop[hidden] { display: none; }
+    .tt-link-input {
+      width: 100%; height: 30px; padding: 4px 9px; box-sizing: border-box;
+      border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; outline: none;
+    }
+    .tt-link-input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(109, 94, 252, .15); }
+    .tt-link-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
+    .tt-link-actions button { border: 1px solid var(--line); background: #fff; cursor: pointer; border-radius: 7px; padding: 5px 12px; font-size: 12.5px; font-weight: 600; }
+    .tt-link-apply { border-color: var(--brand) !important; background: var(--brand) !important; color: #fff; }
+    .tt-link-apply:hover { background: var(--brand-dark) !important; }
+    .tt-link-remove { color: var(--danger); }
+    .tt-link-remove:hover { background: #fdeced; }
+    .tt-link-remove[hidden] { display: none; }
+    /* Editor-only affordance so linked text is visible WHILE editing (never exported to the PDF). */
+    .tt-has-link { text-decoration: underline dotted rgba(109, 94, 252, .85) !important; text-underline-offset: 2px; }
+
     /* Draggable / resizable added text & signatures */
     .insert-overlay {
       position: absolute; color: #000; white-space: pre; cursor: move;
@@ -831,6 +854,23 @@
       border-top-color: var(--brand); animation: merge-spin .7s linear infinite;
     }
     @keyframes merge-spin { to { transform: rotate(360deg); } }
+
+    /* Blocking loading overlay (page reorder / delete / insert) */
+    .busy-overlay {
+      position: fixed; inset: 0; z-index: 1400; display: flex; align-items: center; justify-content: center;
+      background: rgba(20, 22, 40, .42);
+    }
+    .busy-overlay[hidden] { display: none; }
+    .busy-box {
+      background: #fff; border-radius: 16px; padding: 26px 34px; display: flex; flex-direction: column;
+      align-items: center; gap: 14px; box-shadow: 0 24px 70px rgba(20, 22, 40, .32);
+    }
+    .busy-spin {
+      width: 40px; height: 40px; border-radius: 50%; border: 3px solid #e7e8ef;
+      border-top-color: var(--brand); animation: merge-spin .7s linear infinite;
+    }
+    .busy-msg { font-size: 14.5px; font-weight: 600; color: var(--ink); }
+
     .merge-meta { flex: 1; min-width: 0; }
     .merge-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .merge-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
@@ -1139,8 +1179,30 @@
     <span class="tt-sep"></span>
     <label class="tt-opacity" title="Text opacity"><span aria-hidden="true">α</span><input type="range" id="tt-opacity" min="10" max="100" step="5" value="100" title="Text opacity" aria-label="Text opacity" /></label>
     <span class="tt-sep"></span>
-    <!-- Hyperlink + Duplicate are not built yet — intentionally not rendered (will return later). -->
+    <!-- Hyperlink: add / edit / remove a clickable link area over the selected text (tracks the area
+         only — it does not restyle the text). -->
+    <div class="tt-link-wrap">
+      <button class="tt-btn" id="tt-link" type="button" title="Add or edit a hyperlink" aria-label="Hyperlink">🔗</button>
+      <div class="tt-link-pop" id="tt-link-pop" hidden>
+        <input type="url" id="tt-link-input" class="tt-link-input" placeholder="https://example.com" title="Link URL" aria-label="Link URL" autocomplete="off" spellcheck="false" />
+        <div class="tt-link-actions">
+          <button class="tt-link-remove" id="tt-link-remove" type="button" title="Remove the link">Remove</button>
+          <button class="tt-link-apply" id="tt-link-apply" type="button" title="Apply the link">Apply</button>
+        </div>
+      </div>
+    </div>
+    <!-- Duplicate the selected ADDED-text box (disabled for existing-text lines). -->
+    <button class="tt-btn" id="tt-dup" type="button" title="Duplicate this text" aria-label="Duplicate">⧉</button>
     <button class="tt-btn tt-danger" id="tt-del" type="button" title="Delete this text" aria-label="Delete this text">🗑</button>
+  </div>
+
+  <!-- Blocking loading overlay for page operations (reorder / delete / insert): covers the screen
+       so nothing is clickable until the rebuild + reload finishes. -->
+  <div class="busy-overlay" id="busyOverlay" hidden>
+    <div class="busy-box">
+      <div class="busy-spin" aria-hidden="true"></div>
+      <div class="busy-msg" id="busyMsg">Reordering pages…</div>
+    </div>
   </div>
 
   <!-- Password prompt for opening an encrypted PDF. Shown by app.js when PDF.js reports the

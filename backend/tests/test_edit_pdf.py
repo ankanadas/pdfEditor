@@ -1059,5 +1059,67 @@ class Type1FontReuseTests(unittest.TestCase):
         self.assertFalse(appmod._span_style({"font": "Arial", "flags": 0, "text": "X"})[0])
 
 
+class HyperlinkTests(unittest.TestCase):
+    """Phase 2 hyperlinks: a link edit places a clickable LINK_URI area over the final text; editing
+    replaces it; removing drops it; added text and existing text both work; links survive save."""
+
+    def _doc(self, text="LINKME here", with_link=None):
+        d = fitz.open(); p = d.new_page(width=440, height=220)
+        p.insert_text((60, 100), text, fontsize=14)
+        if with_link:
+            uri, rect = with_link
+            p.insert_link({"kind": fitz.LINK_URI, "from": fitz.Rect(rect), "uri": uri})
+        return d
+
+    def _links(self, pdf_bytes):
+        d = fitz.open(stream=pdf_bytes, filetype="pdf")
+        return [(l.get("uri"), fitz.Rect(l["from"])) for l in d[0].get_links() if l.get("uri")]
+
+    def test_added_text_gets_a_clickable_link(self):
+        edit = {"pageIndex": 0, "redact": False, "style": "text", "x": 60, "baseline": 150, "fontSize": 16,
+                "newText": "Visit", "runs": [[{"text": "Visit", "size": 16}]],
+                "link": {"uri": "https://example.com"}}
+        links = self._links(post_edit(self._doc().tobytes(), [edit]))
+        match = [r for u, r in links if u == "https://example.com"]
+        self.assertTrue(match, f"added-text link missing: {links}")
+        r = match[0]                                  # rect should sit over the drawn text (x~60, y~150)
+        self.assertTrue(r.x0 <= 62 and r.x1 > 70 and 130 < r.y1 < 165, f"link rect off the text: {r}")
+
+    def test_existing_line_gets_a_link(self):
+        src = self._doc("CONTACT us today").tobytes()
+        s = find_span(fitz.open(stream=src, filetype="pdf"), "CONTACT")
+        edit = edit_from_span(s, "CONTACT us today"); edit["link"] = {"uri": "https://help.example.com"}
+        out = post_edit(src, [edit])
+        self.assertTrue(any(u == "https://help.example.com" for u, _ in self._links(out)))
+        self.assertIn("CONTACT", page_text(fitz.open(stream=out, filetype="pdf")))
+
+    def test_removing_a_preexisting_link(self):
+        src = self._doc("EMAIL me", with_link=("mailto:a@b.com", (58, 86, 150, 104))).tobytes()
+        self.assertTrue(self._links(src), "fixture should start with a link")
+        s = find_span(fitz.open(stream=src, filetype="pdf"), "EMAIL")
+        edit = edit_from_span(s, "EMAIL me"); edit["linkRemoved"] = True
+        out = post_edit(src, [edit])
+        self.assertFalse(self._links(out), f"link should be gone: {self._links(out)}")
+        self.assertIn("EMAIL", page_text(fitz.open(stream=out, filetype="pdf")))
+
+    def test_editing_a_link_replaces_not_duplicates(self):
+        src = self._doc("DOCS link", with_link=("https://old.example.com", (58, 86, 140, 104))).tobytes()
+        s = find_span(fitz.open(stream=src, filetype="pdf"), "DOCS")
+        edit = edit_from_span(s, "DOCS link"); edit["link"] = {"uri": "https://new.example.com"}
+        uris = [u for u, _ in self._links(post_edit(src, [edit]))]
+        self.assertIn("https://new.example.com", uris)
+        self.assertNotIn("https://old.example.com", uris)
+
+    def test_two_added_links_each_over_its_own_box(self):
+        e = lambda y, uri, t: {"pageIndex": 0, "redact": False, "style": "text", "x": 60, "baseline": y,
+                               "fontSize": 14, "newText": t, "runs": [[{"text": t, "size": 14}]], "link": {"uri": uri}}
+        out = post_edit(self._doc().tobytes(), [e(70, "https://one.example.com", "One"),
+                                                e(150, "https://two.example.com", "Two")])
+        links = self._links(out)
+        self.assertEqual(sorted(u for u, _ in links), ["https://one.example.com", "https://two.example.com"])
+        ys = sorted(r.y0 for _, r in links)
+        self.assertGreater(ys[1] - ys[0], 30, f"link boxes overlap: {links}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
