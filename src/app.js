@@ -304,12 +304,25 @@ class PDFEditorApp {
   async extractTextFromPDFjs() {
     console.log('Extracting text geometry from all pages using PDF.js...');
     this.extractedTextItems = [];
+    this.extractedLinks = [];   // pre-existing PDF hyperlinks (canvas px, top-origin) -> shown as linked
 
     for (let pageNum = 0; pageNum < this.pdfJsDoc.numPages; pageNum++) {
       const page = await this.pdfJsDoc.getPage(pageNum + 1);
       const viewport = page.getViewport({ scale: this.scale });
       const textContent = await page.getTextContent();
       const styles = textContent.styles || {};
+
+      // Capture existing URI link annotations so the toolbar can show/edit/remove them. rect is in PDF
+      // points (bottom-left origin); convertToViewportRectangle maps it to canvas px (top-origin).
+      try {
+        for (const a of await page.getAnnotations()) {
+          const uri = a.url || a.unsafeUrl || '';
+          if (a.subtype !== 'Link' || !uri || !a.rect) continue;
+          const [x1, y1, x2, y2] = viewport.convertToViewportRectangle(a.rect);
+          this.extractedLinks.push({ pageIndex: pageNum, uri,
+            left: Math.min(x1, x2), right: Math.max(x1, x2), top: Math.min(y1, y2), bottom: Math.max(y1, y2) });
+        }
+      } catch (_) { /* annotations optional */ }
 
       textContent.items
         // Keep whitespace-only fragments too: many PDFs emit spaces as their own items,
@@ -634,6 +647,11 @@ class PDFEditorApp {
     try {
       do {
         this._refreshPending = false;
+        // Rebuild the overlay registry from scratch each pass: clearPageOverlays removes the DOM nodes
+        // but the array would otherwise keep stale (disconnected) refs, so _overlayElFor could return a
+        // removed element and _positionTextToolbar would hide the toolbar (e.g. after styling/linking a
+        // committed overlay, which re-renders it).
+        this.insertOverlays = [];
         // Edit and smart (auto) modes both expose existing text as per-line editable boxes;
         // every other mode paints committed line edits straight onto the canvas instead.
         const textEditing = this.mode === 'edit' || this.mode === 'auto';
@@ -760,6 +778,9 @@ class PDFEditorApp {
       // rebuilt from the PDF spans on every refresh, so without this the box reverts to the
       // original span's look (e.g. a colour set via the toolbar vanishes when another text box
       // is added/edited and the page re-renders).
+      // Default this line's hyperlink to any pre-existing PDF link over it; a pending edit overrides.
+      const detectedLink = this._lineLink(line);
+      if (detectedLink) line.link = detectedLink;
       if (pending) {
         line.bold = !!pending.bold;
         line.italic = !!pending.italic;
@@ -769,6 +790,22 @@ class PDFEditorApp {
         if (pending.opacity != null) line.opacity = pending.opacity;
         if (pending.align) line.align = pending.align;
         if (pending.fontFamily) line.fontFamily = pending.fontFamily;
+        if (pending.link) line.link = pending.link;
+        if (pending.linkRemoved) { line.link = null; line.linkRemoved = true; }
+        if (pending.linkRange) line.linkRange = pending.linkRange;
+      }
+      // Editor-only "linked" affordance (a detected-on-load OR toolbar-applied link); never exported.
+      if (line.link) div.classList.add('tt-has-link');
+      // Partial link: show just the linked character range in blue + underline (matches the saved PDF).
+      if (line.linkRange && shownText) {
+        const a = Math.max(0, Math.min(line.linkRange.start, shownText.length));
+        const b = Math.max(a, Math.min(line.linkRange.end, shownText.length));
+        if (b > a) {
+          const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          div.innerHTML = esc(shownText.slice(0, a))
+            + `<span class="tt-has-link" style="color:${this._rgbCss(PDFEditorApp.LINK_BLUE)};text-decoration:underline">${esc(shownText.slice(a, b))}</span>`
+            + esc(shownText.slice(b));
+        }
       }
 
       const fontSizePx = line.fontSizePx * displayScale;
@@ -948,9 +985,20 @@ class PDFEditorApp {
    * Convert a line (canvas-pixel geometry) into the edit descriptor the backend expects:
    * PDF points with a TOP-LEFT origin (x, right, top, bottom, baseline).
    */
+  /** The pre-existing PDF hyperlink overlapping `line` (canvas px), or null. */
+  _lineLink(line) {
+    for (const lk of (this.extractedLinks || [])) {
+      if (lk.pageIndex !== line.pageIndex) continue;
+      if (lk.left < line.right && lk.right > line.left && lk.top < line.bottom && lk.bottom > line.top) {
+        return { uri: lk.uri };
+      }
+    }
+    return null;
+  }
+
   lineToEdit(line, newText) {
     const s = this.scale;
-    return {
+    const edit = {
       pageIndex: line.pageIndex,
       x: line.left / s,
       right: line.right / s,
@@ -970,7 +1018,25 @@ class PDFEditorApp {
       ...(line.align ? { align: line.align } : {}),
       ...(line.fontFamily ? { fontFamily: line.fontFamily } : {}),
       ...(line.sizeOverridden ? { sizeOverride: true } : {}),
+      // Hyperlink over the WHOLE line (tracks the area only; does not restyle the text).
+      ...(line.link ? { link: line.link } : {}),
+      ...(line.linkRemoved ? { linkRemoved: true } : {}),
     };
+    // PARTIAL hyperlink: split the line into runs so only the selected range is linked + blue/underlined.
+    if (line.linkRange) {
+      const t = newText || '';
+      const a = Math.max(0, Math.min(line.linkRange.start, t.length));
+      const b = Math.max(a, Math.min(line.linkRange.end, t.length));
+      if (b > a) {
+        const seg = [];
+        if (a > 0) seg.push({ text: t.slice(0, a) });
+        seg.push({ text: t.slice(a, b), color: PDFEditorApp.LINK_BLUE, underline: true, link: line.linkRange.uri });
+        if (b < t.length) seg.push({ text: t.slice(b) });
+        edit.runs = [seg.filter(r => r.text)];
+        edit.linkRange = line.linkRange;     // kept so the partial style re-renders on rebuild
+      }
+    }
+    return edit;
   }
 
   /**
@@ -1170,7 +1236,8 @@ class PDFEditorApp {
 
     this.commitHistory();
     console.log('Tracked edit:', edit);
-    this.showStatus(`Updated: "${edit.newText.slice(0, 40)}"`, 'success');
+    // (No "Updated:" toast for text add/edit — it fired on every keystroke-commit. Page reorder /
+    //  merge keep their own success messages.)
   }
 
   setMode(mode) {
@@ -1316,24 +1383,32 @@ class PDFEditorApp {
    * [{text,size,bold,italic}]); edit.newText/fontSize are kept in sync.
    */
   openInsertEditor(edit, pv, isNew) {
+    // Already editing this box (e.g. a click + the dblclick both fired)? Keep the open editor.
+    if (!isNew && this._activeInsertEditor && this.selectedInsert === edit && pv.wrapper.querySelector('.insert-editor')) return;
     const ds = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
     const unit = this.scale * ds;
     const baseFontPx = edit.fontSize * unit;
     const escapeHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const spanHTML = (t, st) =>
-      `<span data-sz="${st.size}" data-bold="${st.bold ? 1 : 0}" data-italic="${st.italic ? 1 : 0}"` +
-      ` style="font-size:${st.size * unit}px;font-weight:${st.bold ? 'bold' : 'normal'};` +
-      `font-style:${st.italic ? 'italic' : 'normal'}">${escapeHtml(t)}</span>`;
+    // A run span carries size/bold/italic AND (optionally) underline / colour / link, so a partial
+    // selection can be styled or hyperlinked. `applyRunStyle` writes both the data-* attr (for
+    // serialisation) and the matching CSS (for the live editor) for any of these kinds.
+    const applyRunStyle = (span, kind, value) => {
+      if (kind === 'size') { span.setAttribute('data-sz', value); span.style.fontSize = (value * unit) + 'px'; }
+      else if (kind === 'bold') { span.setAttribute('data-bold', value ? '1' : '0'); span.style.fontWeight = value ? 'bold' : 'normal'; }
+      else if (kind === 'italic') { span.setAttribute('data-italic', value ? '1' : '0'); span.style.fontStyle = value ? 'italic' : 'normal'; }
+      else if (kind === 'underline') { if (value) { span.setAttribute('data-underline', '1'); span.style.textDecoration = 'underline'; } else { span.removeAttribute('data-underline'); span.style.textDecoration = 'none'; } }
+      else if (kind === 'color') { const hex = this._rgbToHex(value); span.setAttribute('data-color', hex); span.style.color = this._rgbCss(value); }
+      else if (kind === 'link') { if (value) { span.setAttribute('data-link', value); span.classList.add('tt-has-link'); } else { span.removeAttribute('data-link'); span.classList.remove('tt-has-link'); } }
+    };
     const styledSpan = (st) => {
       const span = document.createElement('span');
-      span.setAttribute('data-sz', st.size);
-      span.setAttribute('data-bold', st.bold ? '1' : '0');
-      span.setAttribute('data-italic', st.italic ? '1' : '0');
-      span.style.fontSize = (st.size * unit) + 'px';
-      span.style.fontWeight = st.bold ? 'bold' : 'normal';
-      span.style.fontStyle = st.italic ? 'italic' : 'normal';
+      ['size', 'bold', 'italic'].forEach(k => applyRunStyle(span, k, st[k]));
+      if (st.underline) applyRunStyle(span, 'underline', true);
+      if (st.color) applyRunStyle(span, 'color', st.color);
+      if (st.link) applyRunStyle(span, 'link', st.link);
       return span;
     };
+    const spanHTML = (t, st) => { const sp = styledSpan(st); sp.textContent = t; return sp.outerHTML; };
 
     // This box is now the active one.
     this.selectedInsert = edit;
@@ -1391,11 +1466,14 @@ class PDFEditorApp {
       }
       if (node && node.nodeType === Node.TEXT_NODE) node = node.parentNode;
       const st = { ...boxDefaults };
-      let fS = false, fB = false, fI = false;
+      let fS = false, fB = false, fI = false, fU = false, fC = false, fL = false;
       while (node && node !== div && node.getAttribute) {
         if (!fS && node.hasAttribute('data-sz')) { st.size = Math.round(parseFloat(node.getAttribute('data-sz'))); fS = true; }
         if (!fB && node.hasAttribute('data-bold')) { st.bold = node.getAttribute('data-bold') === '1'; fB = true; }
         if (!fI && node.hasAttribute('data-italic')) { st.italic = node.getAttribute('data-italic') === '1'; fI = true; }
+        if (!fU && node.hasAttribute('data-underline')) { st.underline = node.getAttribute('data-underline') === '1'; fU = true; }
+        if (!fC && node.hasAttribute('data-color')) { st.color = this._hexToRgb(node.getAttribute('data-color')); fC = true; }
+        if (!fL && node.hasAttribute('data-link')) { st.link = node.getAttribute('data-link'); fL = true; }
         node = node.parentNode;
       }
       return st;
@@ -1455,19 +1533,15 @@ class PDFEditorApp {
         }
         syncToolbar(); return;
       }
-      // A real selection: restyle just that text and drop the pen.
+      // A real selection: restyle just that text and drop the pen. Wrap it in a span carrying the new
+      // style (size/bold/italic/underline/color/link) and propagate to any nested same-kind spans.
       pendingStyle = null;
-      const attr = kind === 'size' ? 'data-sz' : kind === 'bold' ? 'data-bold' : 'data-italic';
-      const prop = kind === 'size' ? 'fontSize' : kind === 'bold' ? 'fontWeight' : 'fontStyle';
-      const cssVal = kind === 'size' ? (value * unit) + 'px'
-        : kind === 'bold' ? (value ? 'bold' : 'normal') : (value ? 'italic' : 'normal');
-      const attrVal = kind === 'size' ? String(value) : (value ? '1' : '0');
+      const attr = { size: 'data-sz', bold: 'data-bold', italic: 'data-italic', underline: 'data-underline', color: 'data-color', link: 'data-link' }[kind];
       const frag = range.extractContents();
       const span = document.createElement('span');
-      span.setAttribute(attr, attrVal);
-      span.style[prop] = cssVal;
+      applyRunStyle(span, kind, value);
       span.appendChild(frag);
-      span.querySelectorAll('[' + attr + ']').forEach(sp => { sp.setAttribute(attr, attrVal); sp.style[prop] = cssVal; });
+      if (attr) span.querySelectorAll('[' + attr + ']').forEach(sp => applyRunStyle(sp, kind, value));
       range.insertNode(span);
       const r2 = document.createRange();
       r2.selectNodeContents(span);
@@ -1500,7 +1574,8 @@ class PDFEditorApp {
 
     // Expose the editor to the top toolbar (size box / B / I act on it while it's open) and reveal
     // the Add-text toolbar group regardless of the current tool.
-    this._activeInsertEditor = { applyStyle, style: () => caretStyle(workingRange()) };
+    this._activeInsertEditor = { applyStyle, style: () => caretStyle(workingRange()),
+      hasSelection: () => { const r = workingRange(); return !!(r && !r.collapsed); } };
     document.body.classList.add('editing-insert');
 
     pv.wrapper.appendChild(div);
@@ -1615,12 +1690,21 @@ class PDFEditorApp {
   serializeEditor(root, defaults) {
     const base = { size: Math.round(defaults.size) || 12, bold: !!defaults.bold, italic: !!defaults.italic };
     const lines = [[]];
+    const sameColor = (a, b) => (a == null && b == null) || (Array.isArray(a) && Array.isArray(b) && a[0] === b[0] && a[1] === b[1] && a[2] === b[2]);
     const pushText = (t, st) => {
       if (!t) return;
       const line = lines[lines.length - 1];
       const last = line[line.length - 1];
-      if (last && last.size === st.size && last.bold === st.bold && last.italic === st.italic) last.text += t;
-      else line.push({ text: t, size: st.size, bold: st.bold, italic: st.italic });
+      if (last && last.size === st.size && last.bold === st.bold && last.italic === st.italic
+          && !!last.underline === !!st.underline && sameColor(last.color, st.color) && (last.link || '') === (st.link || '')) {
+        last.text += t;
+      } else {
+        const r = { text: t, size: st.size, bold: st.bold, italic: st.italic };
+        if (st.underline) r.underline = true;
+        if (st.color) r.color = st.color;
+        if (st.link) r.link = st.link;
+        line.push(r);
+      }
     };
     const styleFrom = (child, inherited) => {
       const st = { ...inherited };
@@ -1628,6 +1712,9 @@ class PDFEditorApp {
         const sz = child.getAttribute('data-sz'); if (sz) st.size = Math.round(parseFloat(sz));
         const b = child.getAttribute('data-bold'); if (b !== null) st.bold = b === '1';
         const i = child.getAttribute('data-italic'); if (i !== null) st.italic = i === '1';
+        if (child.hasAttribute('data-underline')) st.underline = child.getAttribute('data-underline') === '1';
+        const c = child.getAttribute('data-color'); if (c) st.color = this._hexToRgb(c);
+        const lk = child.getAttribute('data-link'); if (lk !== null) st.link = lk;
       }
       return st;
     };
@@ -2195,12 +2282,17 @@ class PDFEditorApp {
       div.className = 'insert-overlay';
       div.__edit = edit;                 // lets openInsertEditor find/hide this overlay on re-edit
       if (edit === this.selectedInsert) div.classList.add('selected');
-      // Added text may carry per-run font size / bold / italic — render each run in its own span.
+      // Editor-only "linked" affordance (not exported) for a whole-box link or any per-run link.
+      if (edit.link || (edit.runs && edit.runs.some(ln => ln.some(r => r.link)))) div.classList.add('tt-has-link');
+      // Added text may carry per-run size / bold / italic / underline / colour / link — render each run.
       if (edit.style !== 'signature' && edit.runs && edit.runs.length) {
         const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         div.innerHTML = edit.runs.map(line =>
-          line.map(r => `<span style="font-size:${r.size * unit}px;font-weight:${r.bold ? 'bold' : 'normal'};` +
-            `font-style:${r.italic ? 'italic' : 'normal'}">${esc(r.text)}</span>`).join('')
+          line.map(r => {
+            const css = `font-size:${r.size * unit}px;font-weight:${r.bold ? 'bold' : 'normal'};font-style:${r.italic ? 'italic' : 'normal'}`
+              + (r.underline || r.link ? ';text-decoration:underline' : '') + (r.color ? `;color:${this._rgbCss(r.color)}` : '');
+            return `<span style="${css}">${esc(r.text)}</span>`;
+          }).join('')
         ).join('<br>');
       } else {
         div.textContent = edit.newText;
@@ -2228,7 +2320,7 @@ class PDFEditorApp {
         if (edit.underline) div.style.textDecoration = 'underline';
         if (edit.opacity != null) div.style.opacity = edit.opacity;
         if (edit.align) div.style.textAlign = edit.align;
-        div.title = 'Double-click to edit · drag to move · rotate with the top handle';
+        div.title = 'Click to edit (select part to style/link it) · drag to move · rotate with the top handle';
         div.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); this.openInsertEditor(edit, pv, false); });
         // Rotation pivots on the text origin (left edge at the baseline) so the saved PDF matches.
         if (edit.rotation) {
@@ -2253,7 +2345,7 @@ class PDFEditorApp {
         div.appendChild(rotate);
       }
 
-      this.wireInsertOverlay(div, del, handle, rotate, edit, unit);
+      this.wireInsertOverlay(div, del, handle, rotate, edit, unit, pv);
       wrap.appendChild(div);
       this.insertOverlays.push(div);
     });
@@ -2289,7 +2381,8 @@ class PDFEditorApp {
     on('tt-align-center', 'click', () => this.applyTextStyle('align', 'center'));
     on('tt-align-right', 'click', () => this.applyTextStyle('align', 'right'));
     on('tt-opacity', 'input', (e) => this.applyTextStyle('opacity', Math.max(0.1, Math.min(1, (parseInt(e.target.value, 10) || 100) / 100))));
-    // tt-dup / tt-link are intentionally not rendered yet; duplicateActiveText() stays for when they return.
+    on('tt-dup', 'click', () => this.duplicateActiveText());
+    this._initLinkPopover();
     on('tt-del', 'click', () => this.deleteActiveText());
     document.getElementById('stage')?.addEventListener('scroll', () => this._positionTextToolbar());
     window.addEventListener('resize', () => this._positionTextToolbar());
@@ -2560,6 +2653,48 @@ class PDFEditorApp {
 
   _setColorSwatch(hex) { const sw = document.getElementById('tt-color-sw'); if (sw) sw.style.background = hex; }
 
+  /** Wire the hyperlink popover: open on the Link button (prefilled with the current URL), Apply sets
+   *  the link, Remove clears it, close on outside-click / Esc. Tracks the clickable area only — it
+   *  does not restyle the text (an editor-only dotted underline marks linked text while editing). */
+  _initLinkPopover() {
+    const btn = document.getElementById('tt-link');
+    const pop = document.getElementById('tt-link-pop');
+    const input = document.getElementById('tt-link-input');
+    const apply = document.getElementById('tt-link-apply');
+    const remove = document.getElementById('tt-link-remove');
+    if (!btn || !pop || !input || !apply || !remove) return;
+    const close = () => { pop.hidden = true; };
+    const open = () => {
+      // Capture the existing-text selection NOW (before the URL input steals focus and collapses it),
+      // so a link can target just the selected part of an existing line. Added-text uses its own range.
+      this._pendingLinkSel = this._captureLineSelection();
+      const cur = this._ttStyle().link || '';
+      input.value = cur;
+      remove.hidden = !cur;                         // only offer Remove when a link exists
+      pop.hidden = false;
+      setTimeout(() => { input.focus(); input.select(); }, 20);
+    };
+    const commit = (uri) => { this.applyTextStyle('link', uri); close(); };
+    btn.addEventListener('click', (e) => { e.stopPropagation(); pop.hidden ? open() : close(); });
+    apply.addEventListener('click', () => commit(this._normalizeUrl(input.value)));
+    remove.addEventListener('click', () => commit(''));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(this._normalizeUrl(input.value)); }
+      else if (e.key === 'Escape') { e.preventDefault(); close(); }
+    });
+    document.addEventListener('mousedown', (e) => { if (!pop.hidden && !e.target.closest('.tt-link-wrap')) close(); }, true);
+  }
+
+  /** Add a scheme to a bare URL/email so it forms a valid clickable link ('example.com' -> https://…,
+   *  'a@b.com' -> mailto:…). Empty stays empty (= remove). */
+  _normalizeUrl(v) {
+    const s = (v || '').trim();
+    if (!s) return '';
+    if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return s;     // already has a scheme (http:, mailto:, tel:, …)
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) return 'mailto:' + s;
+    return 'https://' + s;
+  }
+
   /** Show the toolbar for a target { kind:'editor'|'overlay'|'line', el, edit?, line? }. */
   _showTextToolbar(target) {
     this._ttTarget = target;
@@ -2568,6 +2703,7 @@ class PDFEditorApp {
     tb.hidden = false; tb.classList.add('show');
     const dup = document.getElementById('tt-dup');
     if (dup) dup.disabled = (target.kind === 'line');   // duplicate/move are added-text only
+    const lp = document.getElementById('tt-link-pop'); if (lp) lp.hidden = true;   // fresh per selection
     this._reflectTextToolbar();
     this._positionTextToolbar();
   }
@@ -2576,6 +2712,7 @@ class PDFEditorApp {
     this._ttTarget = null;
     const tb = document.getElementById('textToolbar');
     if (tb) { tb.classList.remove('show'); tb.hidden = true; }
+    const lp = document.getElementById('tt-link-pop'); if (lp) lp.hidden = true;
   }
 
   /** Style of the active target, used to light up the toolbar buttons. */
@@ -2586,7 +2723,7 @@ class PDFEditorApp {
       const s = this._activeInsertEditor ? this._activeInsertEditor.style() : {};
       const e = t.edit || {};
       return { bold: s.bold, italic: s.italic, size: s.size, underline: !!e.underline,
-               color: e.color, opacity: e.opacity, align: e.align,
+               color: e.color, opacity: e.opacity, align: e.align, link: e.link ? e.link.uri : '',
                family: this._displayFontKey(e.fontFamily, e.fontName) };
     }
     const o = t.kind === 'overlay' ? t.edit : t.line;
@@ -2601,6 +2738,7 @@ class PDFEditorApp {
     }
     return { bold, italic, underline: !!o.underline, size,
              color: o.color, opacity: o.opacity, align: o.align,
+             link: o.link ? o.link.uri : '',
              // Prefer the REAL font name (from PDF.js's rendered font object) so a saved+reopened font
              // re-selects in the picker; fall back to the generic guess before the page has resolved.
              family: this._displayFontKey(o.fontFamily, this._realFontName(o) || o.fontFamilyName || o.fontName) };
@@ -2610,6 +2748,7 @@ class PDFEditorApp {
     const s = this._ttStyle();
     const tog = (id, v) => document.getElementById(id)?.classList.toggle('on', !!v);
     tog('tt-bold', s.bold); tog('tt-italic', s.italic); tog('tt-underline', s.underline);
+    tog('tt-link', s.link);
     tog('tt-align-left', (s.align || 'left') === 'left'); tog('tt-align-center', s.align === 'center'); tog('tt-align-right', s.align === 'right');
     // Don't clobber an input the user is actively typing into (else mid-type reflect mangles it).
     const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null && el !== document.activeElement) el.value = v; };
@@ -2640,10 +2779,86 @@ class PDFEditorApp {
     tb.style.top = top + 'px';
   }
 
+  // Standard hyperlink blue (classic browser link colour).
+  static get LINK_BLUE() { return [0, 0, 238]; }
+
+  /** Apply a hyperlink (or clear it with value=''). With an active text SELECTION in the open editor
+   *  it links only that selection; otherwise the whole text object. Linked text defaults to blue +
+   *  underline (the standard look) UNLESS the user already set a colour, which then supersedes. */
+  _applyLink(t, value) {
+    const uri = (value == null ? '' : String(value)).trim();
+    const BLUE = PDFEditorApp.LINK_BLUE;
+    if (t.kind === 'editor' && this._activeInsertEditor) {
+      if (this._activeInsertEditor.hasSelection()) {             // partial: just the selected run(s)
+        const had = this._activeInsertEditor.style();
+        this._activeInsertEditor.applyStyle('link', uri || null);
+        if (uri) {
+          if (!had.color) this._activeInsertEditor.applyStyle('color', BLUE);
+          this._activeInsertEditor.applyStyle('underline', true);
+        }
+        return;
+      }
+      this._setLink(t.edit, uri);                                // whole box (no selection)
+      this._restyleEditorDiv(t.el, 'link', uri);
+      if (uri) this._defaultLinkStyle(t.edit, t.el);
+      return;
+    }
+    if (t.kind === 'overlay') {
+      this._setLink(t.edit, uri);
+      if (uri) this._defaultLinkStyle(t.edit, null);
+      this.commitHistory();
+      this.refresh().then(() => { this.selectInsert(t.edit); this._positionTextToolbar(); });
+      return;
+    }
+    // existing-text line
+    const l = t.line, div = t.el;
+    const text = this.cleanEditableText(div.textContent);
+    const psel = this._pendingLinkSel;
+    if (uri && psel && psel.el === div && psel.end > psel.start && psel.end <= text.length) {
+      // Partial: link ONLY the selected character range of the line (blue + underline that range).
+      l.linkRange = { uri, start: psel.start, end: psel.end };
+      l.link = null; l.linkRemoved = false;
+      this.trackEdit(this.lineToEdit(l, text));
+      this.refresh();                              // re-render so the partial style shows
+      return;
+    }
+    // Whole line (no/whole selection, or removing).
+    l.linkRange = null;
+    this._setLink(l, uri);
+    div.classList.toggle('tt-has-link', !!l.link);
+    if (uri) {
+      if (l.color == null) { l.color = BLUE; div.style.color = this._rgbCss(BLUE); }
+      l.underline = true; div.style.textDecoration = 'underline';
+    }
+    this.trackEdit(this.lineToEdit(l, text));
+  }
+
+  /** The current selection's character range within the active existing-text line box, or null. */
+  _captureLineSelection() {
+    const t = this._ttTarget;
+    if (!t || t.kind !== 'line' || !t.el) return null;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const r = sel.getRangeAt(0);
+    if (r.collapsed || !t.el.contains(r.commonAncestorContainer)) return null;
+    const pre = document.createRange();
+    pre.selectNodeContents(t.el); pre.setEnd(r.startContainer, r.startOffset);
+    const start = pre.toString().length;
+    const end = start + r.toString().length;
+    return end > start ? { el: t.el, start, end } : null;
+  }
+
+  /** Default a whole text object's link look to blue + underline, unless a colour is already set. */
+  _defaultLinkStyle(edit, el) {
+    if (edit.color == null) { edit.color = PDFEditorApp.LINK_BLUE; if (el) el.style.color = this._rgbCss(edit.color); }
+    edit.underline = true; if (el) el.style.textDecoration = 'underline';
+  }
+
   /** Apply one control to whatever text is active. */
   applyTextStyle(kind, value) {
     const t = this._ttTarget;
     if (!t) return;
+    if (kind === 'link') { this._applyLink(t, value); this._reflectTextToolbar(); this._positionTextToolbar(); return; }
     if (t.kind === 'editor') {
       if (kind === 'bold' || kind === 'italic' || kind === 'size') {
         if (this._activeInsertEditor) this._activeInsertEditor.applyStyle(kind, value);
@@ -2668,6 +2883,15 @@ class PDFEditorApp {
     else if (kind === 'opacity') edit.opacity = value;
     else if (kind === 'align') edit.align = value;
     else if (kind === 'family') edit.fontFamily = value;
+    else if (kind === 'link') this._setLink(edit, value);
+  }
+
+  /** Set/clear a hyperlink on an edit/line. A URL stores `{uri}`; clearing it marks `linkRemoved` so
+   *  the backend drops a previously-present (e.g. detected-on-load) link instead of re-adding it. */
+  _setLink(obj, value) {
+    const uri = (value == null ? '' : String(value)).trim();
+    if (uri) { obj.link = { uri }; obj.linkRemoved = false; }
+    else { if (obj.link) obj.linkRemoved = true; obj.link = null; }
   }
 
   _restyleEditorDiv(div, kind, value) {
@@ -2677,6 +2901,7 @@ class PDFEditorApp {
     else if (kind === 'opacity') div.style.opacity = value;
     else if (kind === 'align') div.style.textAlign = value;
     else if (kind === 'family') div.style.fontFamily = this._familyCss(value);
+    else if (kind === 'link') div.classList.toggle('tt-has-link', !!(value && String(value).trim()));
   }
 
   /** Whole-box styling for a selected (not-being-edited) added-text overlay. */
@@ -2705,6 +2930,7 @@ class PDFEditorApp {
     else if (kind === 'opacity') { l.opacity = value; div.style.opacity = value; }
     else if (kind === 'align') { l.align = value; div.style.textAlign = value; }
     else if (kind === 'family') { l.fontFamily = value; div.style.fontFamily = this._familyCss(value); }
+    else if (kind === 'link') { this._setLink(l, value); div.classList.toggle('tt-has-link', !!l.link); }
     this.trackEdit(this.lineToEdit(l, this.cleanEditableText(div.textContent)));
   }
 
@@ -2739,7 +2965,7 @@ class PDFEditorApp {
   }
 
   /** Attach move / resize / rotate / delete behaviour to one insert overlay. */
-  wireInsertOverlay(div, del, handle, rotate, edit, unit) {
+  wireInsertOverlay(div, del, handle, rotate, edit, unit, pv) {
     const commitFromDiv = () => {
       const fontPx = parseFloat(div.style.fontSize);
       const topOffset = edit.style === 'signature' ? fontPx * 0.8 : fontPx * 0.9;
@@ -2787,18 +3013,25 @@ class PDFEditorApp {
     // Move (drag the body)
     div.addEventListener('mousedown', (e) => {
       if (e.target === del || e.target === handle || e.target === rotate) return;
-      if (edit.style !== 'signature') this.selectInsert(edit);   // clicking a text box selects it
+      const isText = edit.style !== 'signature';
+      if (isText) this.selectInsert(edit);   // clicking a text box selects it
       e.preventDefault(); e.stopPropagation();
       const sx = e.clientX, sy = e.clientY;
       const ox = parseFloat(div.style.left), oy = parseFloat(div.style.top);
+      let dragged = false;
       const move = (ev) => {
+        if (!dragged && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 4) return;   // ignore jitter
+        dragged = true;
         div.style.left = (ox + ev.clientX - sx) + 'px';
         div.style.top = (oy + ev.clientY - sy) + 'px';
       };
       const up = () => {
         window.removeEventListener('mousemove', move);
         window.removeEventListener('mouseup', up);
-        commitFromDiv();
+        // A drag moves the box; a plain click on a TEXT box opens its editor so the user can place a
+        // caret and select PART of the text to style or hyperlink (mirrors Canva/Figma text boxes).
+        if (dragged) commitFromDiv();
+        else if (isText && pv) this.openInsertEditor(edit, pv, false);
       };
       window.addEventListener('mousemove', move);
       window.addEventListener('mouseup', up);
@@ -3182,7 +3415,7 @@ class PDFEditorApp {
       if (i !== from) order.push({ src: i });
     }
     if (insertBefore >= n) order.push({ src: from });   // moved to the very end
-    this.commitPageOrder(order, 'Pages reordered.');
+    this.commitPageOrder(order, 'Pages reordered.', 'Reordering pages…');
   }
 
   /** Remove a page (never the last remaining one). */
@@ -3192,7 +3425,7 @@ class PDFEditorApp {
     if (this.selectedThumb === index) this.selectedThumb = null;
     const order = [];
     for (let i = 0; i < n; i++) if (i !== index) order.push({ src: i });
-    this.commitPageOrder(order, `Page ${index + 1} deleted.`);
+    this.commitPageOrder(order, `Page ${index + 1} deleted.`, 'Deleting page…');
   }
 
   /** Insert one blank page at the position chosen in the dropdown (end, or after page N). */
@@ -3215,14 +3448,14 @@ class PDFEditorApp {
       if (i === afterIndex) order.push({ blank: true, w, h });
     }
     const where = (val === 'end') ? 'at the end' : `after page ${afterIndex + 1}`;
-    await this.commitPageOrder(order, `Blank page inserted ${where}.`);
+    await this.commitPageOrder(order, `Blank page inserted ${where}.`, 'Adding a blank page…');
   }
 
   /**
    * Rebuild the document from an ordered list of page descriptors and reload it.
    * Each descriptor is { src: indexInCurrentDoc } or { blank: true, w, h }.
    */
-  async commitPageOrder(order, successMsg) {
+  async commitPageOrder(order, successMsg, busyMsg) {
     if (this._pageOpBusy) return;
 
     // Page structure changes shift page indices, which would invalidate any pending
@@ -3236,8 +3469,10 @@ class PDFEditorApp {
     }
 
     this._pageOpBusy = true;
+    // Block the screen with a spinner while the document is rebuilt + reloaded (can take a moment
+    // on large PDFs) so nothing is clickable mid-operation.
+    this._showBusy(busyMsg || 'Updating pages…');
     try {
-      this.showStatus('Updating pages…', 'info');
       const bytes = await this.applyPageOrder(order);
 
       // Adopt the rebuilt document as the new baseline and reload everything from it.
@@ -3258,8 +3493,17 @@ class PDFEditorApp {
       this.showStatus(`Couldn't update pages: ${e.message}`, 'error');
     } finally {
       this._pageOpBusy = false;
+      this._hideBusy();
     }
   }
+
+  /** Show / hide the blocking page-operation loading overlay. */
+  _showBusy(msg) {
+    const o = document.getElementById('busyOverlay'), m = document.getElementById('busyMsg');
+    if (m && msg) m.textContent = msg;
+    if (o) o.hidden = false;
+  }
+  _hideBusy() { const o = document.getElementById('busyOverlay'); if (o) o.hidden = true; }
 
   /** Build new PDF bytes from the ordered descriptor list using pdf-lib. */
   async applyPageOrder(order) {

@@ -761,7 +761,11 @@ def _runs_to_segments(runs, base_size, base_bold, base_italic):
             it = bool(r.get('italic')) if 'italic' in r else base_italic
             ul = bool(r.get('underline'))
             col = _parse_color(r.get('color'))
-            parts.append((t, max(4.0, min(400.0, sz)), b, it, ul, col))
+            lk = r.get('link')
+            if isinstance(lk, dict):
+                lk = lk.get('uri')
+            lk = lk if isinstance(lk, str) and lk.strip() else None
+            parts.append((t, max(4.0, min(400.0, sz)), b, it, ul, col, lk))
         out.append(parts)
     return out if any(parts for parts in out) else None
 
@@ -857,6 +861,26 @@ def _insert_text_runs(page, x, baseline, text, size, options, avail, morph=None,
         sh.finish(**fin)
         sh.commit()
     return cx - start          # drawn advance width (lets a caller chain segments on one line)
+
+
+def _link_rect_for_edit(edit, size, text_lines, font):
+    """Clickable-area rect (PDF points, top-origin) for an edit carrying a hyperlink. An existing-text
+    edit uses the line's own bbox; added text is measured from the drawn block (x/baseline + text
+    width/height). Used to place a LINK_URI annotation over the final text position."""
+    x = float(edit.get('x', 0))
+    if edit.get('redact', True):                      # existing line -> its captured bbox
+        top = float(edit.get('top', 0)); right = float(edit.get('right', x)); bottom = float(edit.get('bottom', top))
+        return fitz.Rect(max(0, x - 1), max(0, top - 1), max(right, x + 4) + 1, bottom + 1)
+    baseline = float(edit.get('baseline', 0))         # added text -> measure the drawn text block
+    lines = [ln for ln in (text_lines or []) if ln.strip()]
+    try:
+        w = max((font.text_length(ln, fontsize=size) for ln in lines), default=size)
+    except Exception:
+        w = max((0.5 * size * len(ln) for ln in lines), default=size)
+    line_h = size * 1.2
+    top = baseline - size * 0.8
+    bottom = baseline + (max(1, len(lines)) - 1) * line_h + size * 0.3
+    return fitz.Rect(x, top, x + max(w, 4), bottom)
 
 
 def _open_authenticated(pdf_bytes, password=""):
@@ -1098,9 +1122,12 @@ def edit_pdf():
                     # italic,underline,color}]). Insert each segment at its own size + weight/slant,
                     # chaining x by the drawn width; line height follows that line's largest run. Font
                     # options are resolved per distinct (bold, italic) so each segment gets the right variant.
+                    # Use the per-run (segmented) drawing for added text AND for a REPLACE edit that
+                    # carries runs (e.g. a partial hyperlink on an existing line — only the linked
+                    # span is blue/underlined). Plain replace edits (no runs) take the simple path.
                     seg_lines = _runs_to_segments(
                         edit.get('runs'), size, bool(edit.get('bold')), bool(edit.get('italic'))
-                    ) if is_insert else None
+                    ) if edit.get('runs') else None
                     if seg_lines is not None:
                         style_opts = {}
 
@@ -1116,30 +1143,54 @@ def edit_pdf():
                         def line_width(parts):
                             return sum(_insert_text_runs(page, 0, 0, st, ssz, opts_for(sb, si), 1e9,
                                                          measure_only=True)
-                                       for st, ssz, sb, si, _, _ in parts if st)
+                                       for st, ssz, sb, si, _, _, _ in parts if st)
                         widths = [line_width(parts) for parts in seg_lines]
                         maxw = max(widths, default=0.0)
 
+                        # Alignment: an ADDED box aligns within its own widest line; a REPLACE line
+                        # re-anchors within the original line's box (x .. right), so a right-/centre-
+                        # aligned existing line keeps its position when re-drawn as runs.
+                        seg_align = box_align or (None if is_insert else edit.get('_align', 'left'))
+                        avail_w = maxw if is_insert else (float(edit.get('right', x)) - x)
+                        run_link_spans = []          # per-run hyperlink areas (rect, uri) -> annotations
                         y = baseline
                         prev_max = None
                         for idx, parts in enumerate(seg_lines):
-                            this_max = max([sz for _, sz, _, _, _, _ in parts], default=size)
+                            this_max = max([sz for _, sz, _, _, _, _, _ in parts], default=size)
                             # Advance to this line using the LARGER of the two adjacent lines, so a
                             # big line after a small one (or vice-versa) never overlaps.
                             if prev_max is not None:
                                 y += max(prev_max, this_max) * 1.2
-                            off = (maxw - widths[idx]) if box_align == 'right' else \
-                                  (maxw - widths[idx]) / 2 if box_align == 'center' else 0.0
+                            off = (avail_w - widths[idx]) if seg_align == 'right' else \
+                                  (avail_w - widths[idx]) / 2 if seg_align == 'center' else 0.0
                             cx = x + max(0.0, off)
-                            for seg_text, seg_size, seg_bold, seg_italic, seg_ul, seg_col in parts:
-                                if seg_text:
-                                    cx += _insert_text_runs(page, cx, y, seg_text, seg_size,
-                                                            opts_for(seg_bold, seg_italic),
-                                                            pw - cx - 4, morph,
-                                                            color=(seg_col or box_color or text_color),
-                                                            opacity=box_opacity,
-                                                            underline=(seg_ul or box_underline))
+                            cur_link = None          # [uri, x0, x1] — merge contiguous same-uri runs
+                            ytop, ybot = y - this_max * 0.8, y + this_max * 0.3
+                            for seg_text, seg_size, seg_bold, seg_italic, seg_ul, seg_col, seg_link in parts:
+                                if not seg_text:
+                                    continue
+                                seg_x0 = cx
+                                cx += _insert_text_runs(page, cx, y, seg_text, seg_size,
+                                                        opts_for(seg_bold, seg_italic),
+                                                        pw - cx - 4, morph,
+                                                        color=(seg_col or box_color or text_color),
+                                                        opacity=box_opacity,
+                                                        underline=(seg_ul or box_underline))
+                                if seg_link:
+                                    if cur_link and cur_link[0] == seg_link:
+                                        cur_link[2] = cx
+                                    else:
+                                        if cur_link:
+                                            run_link_spans.append((fitz.Rect(cur_link[1], ytop, cur_link[2], ybot), cur_link[0]))
+                                        cur_link = [seg_link, seg_x0, cx]
+                                elif cur_link:
+                                    run_link_spans.append((fitz.Rect(cur_link[1], ytop, cur_link[2], ybot), cur_link[0]))
+                                    cur_link = None
+                            if cur_link:
+                                run_link_spans.append((fitz.Rect(cur_link[1], ytop, cur_link[2], ybot), cur_link[0]))
                             prev_max = this_max
+                        if run_link_spans:
+                            edit['_run_link_spans'] = run_link_spans
                     else:
                         # Replace edits re-anchor to keep right/centre alignment (manual override wins
                         # over the auto-detected _align); added text is left.
@@ -1153,16 +1204,54 @@ def edit_pdf():
                                 _insert_text_runs(page, x, baseline + i * line_h, ln, size, options,
                                                   pw - x - 4, morph, color=line_color, anchor=anchor,
                                                   opacity=box_opacity, underline=line_ul)
+                    # Hyperlink: remember the clickable area over this text so it's applied once all
+                    # text/redaction is done (computed here while size/font are in hand).
+                    if edit.get('link') or edit.get('linkRemoved'):
+                        try:
+                            edit['_link_rect'] = _link_rect_for_edit(edit, size, text_lines, options[0][1])
+                        except Exception:
+                            edit['_link_rect'] = None
                 # Note: never log the document's text content (keeps the app traceless).
                 print(f"  page {page_num}: [{style}] text written at ({x:.1f}, {baseline:.1f})")
 
+            # 3) Hyperlinks the user added / edited / removed. A link edit places a LINK_URI annotation
+            #    over the final text area; a removed link is deleted. Every managed area is remembered so
+            #    the saved-link re-add below never brings the old link back (no duplicate / no resurrection).
+            managed_link_rects = []
+            for edit in page_edits:
+                # 3a) Per-run links (a hyperlink applied to PART of an added-text box).
+                for r, uri in (edit.get('_run_link_spans') or []):
+                    managed_link_rects.append(r)
+                    try:
+                        page.insert_link({"kind": fitz.LINK_URI, "from": r, "uri": uri})
+                    except Exception:
+                        pass
+                # 3b) Whole-object link (or removal).
+                r = edit.get('_link_rect')
+                if r is None:
+                    continue
+                managed_link_rects.append(r)
+                link = edit.get('link') if isinstance(edit.get('link'), dict) else None
+                uri = (link or {}).get('uri')
+                try:
+                    for l in page.get_links():        # drop any stale link over this area first
+                        if l.get('uri') and fitz.Rect(l['from']).intersects(r):
+                            page.delete_link(l)
+                except Exception:
+                    pass
+                if uri and not edit.get('linkRemoved'):
+                    try:
+                        page.insert_link({"kind": fitz.LINK_URI, "from": r, "uri": uri})
+                    except Exception:
+                        pass
+
             # Re-add hyperlinks the redaction dropped (so an edited footer/contact line stays
             # clickable). Only restore links that OVERLAP a redacted rect — those are the ones
-            # apply_redactions removed; others survived. Avoids get_links() here (it can raise right
-            # after redaction) and avoids duplicating links that weren't touched.
+            # apply_redactions removed; others survived. Skip any area the user explicitly managed
+            # above. Avoids get_links() here (it can raise right after redaction) and dup links.
             for l in saved_links:
                 r = fitz.Rect(l['from'])
-                if any(r.intersects(rr) for rr in redact_rects):
+                if any(r.intersects(rr) for rr in redact_rects) and not any(r.intersects(rm) for rm in managed_link_rects):
                     try:
                         page.insert_link({"kind": fitz.LINK_URI, "from": r, "uri": l['uri']})
                     except Exception:
