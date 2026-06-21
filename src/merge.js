@@ -12,7 +12,7 @@ import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { mergePdfBytes } from './mergeCore.js';
 
-const MAX_MERGE_MB = 100;                 // per-file cap, mirrors the editor's limit
+const MAX_MERGE_MB = 30;                  // per-file cap, mirrors the editor's limit
 const MAX_MERGE_BYTES = MAX_MERGE_MB * 1024 * 1024;
 
 // --- Analytics: GA-ready, but a safe no-op if no analytics is installed. ----------

@@ -15,7 +15,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 // Largest PDF a user may open/edit. Change this single number to adjust the limit.
 // Note: very large PDFs are slower to render/save since everything runs in the browser.
-const MAX_FILE_MB = 100;
+// Mirrors the backend MAX_PDF_MB so an oversized file is rejected here with a friendly
+// message instead of bouncing off the server with a 413.
+const MAX_FILE_MB = 30;
 const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 
 class PDFEditorApp {
