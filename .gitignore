@@ -6,6 +6,15 @@ coverage/
 .kiro/
 .claude/
 
+# Secrets / environment files — never commit
+.env
+.env.*
+**/.env
+**/.env.*
+
+# macOS AppleDouble / scratch files (e.g. ._foo)
+._*
+
 # Python backend (local virtualenv & caches) — never commit these
 backend/venv/
 __pycache__/
