@@ -1258,6 +1258,107 @@ def edit_pdf():
                         pass
 
         _clean_tounicode(doc)   # repair nbsp/soft-hyphen in the edited lines' text layer (copy/extract)
+
+        # ── Fabric annotation descriptors (highlights, shapes, etc.) ───────────────
+        # These are separate from text edits: they come in as `annotations` and are
+        # burned in using PyMuPDF's native drawing / annotation APIs so PDF viewers
+        # render them correctly, in particular with real transparency.
+        annotations = data.get('annotations', [])
+        for ann in annotations:
+            try:
+                kind = ann.get('kind', '')
+                page_num = int(ann.get('pageIndex', 0))
+                if page_num < 0 or page_num >= len(doc):
+                    continue
+                page = doc[page_num]
+                ph = page.rect.height
+                pw = page.rect.width
+
+                def _hex_to_rgb(h):
+                    """'#rrggbb' → (r, g, b) floats 0..1, or None."""
+                    if not h or not isinstance(h, str):
+                        return None
+                    s = h.strip().lstrip('#')
+                    if len(s) == 6:
+                        try:
+                            return (int(s[0:2], 16) / 255.0,
+                                    int(s[2:4], 16) / 255.0,
+                                    int(s[4:6], 16) / 255.0)
+                        except ValueError:
+                            return None
+                    return None
+
+                def _rgba_to_rgb(c):
+                    """'rgba(r,g,b,a)' or '#rrggbb' → (r,g,b) floats 0..1, or None."""
+                    if not c or not isinstance(c, str):
+                        return None
+                    import re as _re
+                    m = _re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', c)
+                    if m:
+                        return (int(m.group(1)) / 255.0,
+                                int(m.group(2)) / 255.0,
+                                int(m.group(3)) / 255.0)
+                    return _hex_to_rgb(c)
+
+                if kind == 'ann-highlight':
+                    # Use PyMuPDF's NATIVE highlight annotation so every PDF viewer
+                    # renders it as translucent ink (never as an opaque rectangle).
+                    # Coordinates from the serialiser are PDF points, bottom-left origin.
+                    x = float(ann.get('x', 0))
+                    y = float(ann.get('y', 0))         # bottom-left of rect (PDF space)
+                    w = float(ann.get('width', 0))
+                    h = float(ann.get('height', 0))
+                    opacity = float(ann.get('opacity', 0.4))
+                    fill_color = _rgba_to_rgb(ann.get('fill')) or (1.0, 0.84, 0.0)  # #FFD600
+
+                    # fitz.Rect uses top-left origin; the serialiser sends bottom-left
+                    # (y = ph - top - height, so top = ph - y - h).
+                    # Convert back to PyMuPDF rect: (x0, y0, x1, y1) in page top-left space.
+                    rect = fitz.Rect(x, ph - y - h, x + w, ph - y)
+                    try:
+                        hl = page.add_highlight_annot(rect)
+                        hl.set_colors(stroke=fill_color)
+                        hl.set_opacity(opacity)
+                        hl.update()
+                    except Exception:
+                        # Fallback: draw a semi-transparent filled rect if add_highlight_annot fails
+                        page.draw_rect(rect, color=None, fill=fill_color, fill_opacity=opacity)
+
+                elif kind == 'ann-rect':
+                    x = float(ann.get('x', 0))
+                    y = float(ann.get('y', 0))
+                    w = float(ann.get('width', 0))
+                    h = float(ann.get('height', 0))
+                    rect = fitz.Rect(x, ph - y - h, x + w, ph - y)
+                    stroke = _rgba_to_rgb(ann.get('stroke')) or (0, 0, 0)
+                    sw = float(ann.get('strokeWidth', 1))
+                    page.draw_rect(rect, color=stroke, fill=None, width=sw)
+
+                elif kind == 'ann-ellipse':
+                    cx = float(ann.get('x', 0))
+                    cy = float(ann.get('y', 0))
+                    rx = float(ann.get('rx', 0))
+                    ry = float(ann.get('ry', 0))
+                    # PyMuPDF cy is top-origin
+                    pdf_cy = ph - cy
+                    rect = fitz.Rect(cx - rx, pdf_cy - ry, cx + rx, pdf_cy + ry)
+                    stroke = _rgba_to_rgb(ann.get('stroke')) or (0, 0, 0)
+                    sw = float(ann.get('strokeWidth', 1))
+                    page.draw_oval(rect, color=stroke, fill=None, width=sw)
+
+                elif kind == 'ann-line':
+                    x1 = float(ann.get('x1', 0))
+                    y1 = float(ann.get('y1', 0))
+                    x2 = float(ann.get('x2', 0))
+                    y2 = float(ann.get('y2', 0))
+                    stroke = _rgba_to_rgb(ann.get('stroke')) or (0, 0, 0)
+                    sw = float(ann.get('strokeWidth', 1))
+                    page.draw_line(fitz.Point(x1, ph - y1), fitz.Point(x2, ph - y2),
+                                   color=stroke, width=sw)
+
+            except Exception as _ann_err:
+                print(f"  annotation draw error ({ann.get('kind','')}): {_ann_err}")
+
         output_bytes = doc.tobytes(deflate=True, garbage=3)
         doc.close()
         return jsonify({
