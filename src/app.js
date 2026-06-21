@@ -754,6 +754,13 @@ class PDFEditorApp {
       const c = this.sampleLineColors(pv, line);
       line.bgColor = c.bg;          // real background colour (used for the editable text contrast)
       line.textColor = c.text;      // real text colour (e.g. white) for the editable box
+      // Detect drawn underlines (per item) on the still-clean canvas, then build the per-run style
+      // model so a mixed line (bold label + regular tail, partial underline) survives an edit.
+      const anyUnderline = this._detectLineUnderlines(pv, line, c.bg);
+      this._buildLineStyleRuns(line);
+      if (anyUnderline && !line.styleRuns && line.items.every(it => !it.text.trim() || it.underline)) {
+        line.underline = true;      // uniformly underlined line -> simple whole-line path
+      }
     });
 
     // Hide the original text by copying a CLEAN background strip from just outside each line over
@@ -818,6 +825,9 @@ class PDFEditorApp {
         if (pending.link) line.link = pending.link;
         if (pending.linkRemoved) { line.link = null; line.linkRemoved = true; }
         if (pending.linkRange) line.linkRange = pending.linkRange;
+        // A committed mixed-style edit re-renders from its own runs (so its per-run B/I/U persists);
+        // a plain (non-rich) edit clears any original run model so it stays a single style.
+        line.styleRuns = (pending.runs && pending.runs.length && !pending.linkRange) ? pending.runs[0] : null;
       }
       // Editor-only "linked" affordance (a detected-on-load OR toolbar-applied link); never exported.
       if (line.link) div.classList.add('tt-has-link');
@@ -831,6 +841,10 @@ class PDFEditorApp {
             + `<span class="tt-has-link" style="color:${this._rgbCss(PDFEditorApp.LINK_BLUE)};text-decoration:underline">${esc(shownText.slice(a, b))}</span>`
             + esc(shownText.slice(b));
         }
+      } else if (line.styleRuns && line.styleRuns.length) {
+        // Mixed-style line: render per-run styled spans so its bold/italic/underline shows while
+        // editing and serialises back on commit. (Editing keeps each span's data-* style markers.)
+        div.innerHTML = line.styleRuns.map(r => this._lineRunSpanHTML(r)).join('');
       }
 
       const fontSizePx = line.fontSizePx * displayScale;
@@ -920,7 +934,7 @@ class PDFEditorApp {
         div.style.zIndex = '100';
         const newText = this.cleanEditableText(div.textContent);
         if (newText !== div.dataset.originalText) {
-          this.trackEdit(this.lineToEdit(line, newText));
+          this.trackEdit(this.lineToEdit(line, newText, this._readLineRuns(div)));
           div.dataset.originalText = newText;
         }
       });
@@ -994,10 +1008,19 @@ class PDFEditorApp {
       for (const [k, n] of padC) { if (n > bgN) { bgN = n; bg = padRep.get(k); } }
       if (!bg) { for (const [k, n] of inC) { if (n > bgN) { bgN = n; bg = inRep.get(k); } } }
 
-      // Text = the most common colour inside the box that is clearly different from the background.
+      // Text = the inside-box colour most distinct from the background. The plain MODAL far-colour
+      // skews to the anti-aliased grey EDGES of thin glyphs (Computer Modern / LaTeX body text),
+      // which made an edited line look greyed-out in the editor; among the well-represented
+      // far-from-bg colours, take the one FARTHEST from the background — the actual ink.
       const far = (c) => !bg || (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) > 70);
-      let text = null, textN = 0;
-      for (const [k, n] of inC) { const c = inRep.get(k); if (far(c) && n > textN) { textN = n; text = c; } }
+      let maxFar = 0;
+      for (const [k, n] of inC) { if (far(inRep.get(k)) && n > maxFar) maxFar = n; }
+      const fromBg = (c) => bg ? (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2])) : (765 - (c[0] + c[1] + c[2]));
+      let text = null, bestDist = -1;
+      for (const [k, n] of inC) {
+        const c = inRep.get(k);
+        if (far(c) && n >= 0.2 * maxFar && fromBg(c) > bestDist) { bestDist = fromBg(c); text = c; }
+      }
 
       return { bg, text };
     } catch (e) {
@@ -1021,7 +1044,7 @@ class PDFEditorApp {
     return null;
   }
 
-  lineToEdit(line, newText) {
+  lineToEdit(line, newText, runs) {
     const s = this.scale;
     const edit = {
       pageIndex: line.pageIndex,
@@ -1047,6 +1070,12 @@ class PDFEditorApp {
       ...(line.link ? { link: line.link } : {}),
       ...(line.linkRemoved ? { linkRemoved: true } : {}),
     };
+    // MIXED style: a per-run model [{text,bold,italic,underline}] (a bold label + a regular tail, a
+    // partial underline) so each run keeps its style on save. Sent only when there's real text and
+    // >1 run; the linkRange path below (a partial hyperlink) builds its own runs and takes priority.
+    if (runs && runs.length > 1 && !line.linkRange) {
+      edit.runs = [runs.map(r => ({ text: r.text, bold: !!r.bold, italic: !!r.italic, ...(r.underline ? { underline: true } : {}) }))];
+    }
     // PARTIAL hyperlink: split the line into runs so only the selected range is linked + blue/underlined.
     if (line.linkRange) {
       const t = newText || '';
@@ -1181,7 +1210,14 @@ class PDFEditorApp {
       // during render (systemFontInfo.css -> src: local(Helvetica…)); reuse that exact family so the
       // edit box shows the real font, not the Arial fallback. Embedded fonts have no systemFontInfo.
       const css = (f.systemFontInfo && f.systemFontInfo.css) ? f.systemFontInfo.css : null;
-      return { bold: !!(f.black || f.bold), italic: !!f.italic, css };
+      // PDF.js often leaves .bold/.italic UNSET on embedded fonts (a subset whose loadedName hides
+      // the weight) but still exposes the real PostScript name, e.g. "ABCDEF+Calibri-Bold" — read the
+      // weight/slant from that name too, so an embedded bold/italic face is recognised. Mirrors the
+      // item-level name heuristic (incl. the LaTeX cmbx/cmti/cmsl hints).
+      const nm = String(f.name || '').toLowerCase();
+      const bold = !!(f.black || f.bold) || /bold|black|heavy|semibold|cmbx/.test(nm);
+      const italic = !!f.italic || /italic|oblique|cmti|cmsl/.test(nm);
+      return { bold, italic, css };
     } catch (e) {
       return null;
     }
@@ -1201,10 +1237,15 @@ class PDFEditorApp {
       let known = 0, boldAll = true, italicAll = true;
       for (const it of items) {
         const st = this.fontStyleFromPdfjs(pv, it.fontName);
-        if (!st) continue;
-        known++;
-        if (!st.bold) boldAll = false;
-        if (!st.italic) italicAll = false;
+        if (st) {
+          known++;
+          // Adopt the authoritative per-item weight/slant (never clears a name-detected style), so
+          // the per-run model below and the editor preview both match what the save produces.
+          it.bold = it.bold || st.bold;
+          it.italic = it.italic || st.italic;
+        }
+        if (!it.bold) boldAll = false;
+        if (!it.italic) italicAll = false;
       }
       if (known === items.length) {        // every item's font was resolvable -> trust it
         if (boldAll) line.bold = true;
@@ -1214,6 +1255,162 @@ class PDFEditorApp {
       const head = this.fontStyleFromPdfjs(pv, line.fontName);
       if (head && head.css) line.fontCss = head.css;
     });
+  }
+
+  /**
+   * Detect a drawn underline under each item of a line by probing the rendered canvas (PDF.js draws
+   * underlines as a thin line, not a font attribute, so they aren't in the text items). Reads ONE
+   * strip just below the line's baseline, then per item looks for a long, THIN, contiguous run of ink
+   * spanning most of the item's width — an underline — while rejecting glyph descenders (short runs)
+   * and solid fills/shading (ink across many rows). Sets it.underline; returns true if any item is
+   * underlined. Must run on the CLEAN canvas, before the line is covered. Best-effort: any failure
+   * (e.g. a tainted canvas) just leaves underlines undetected.
+   *
+   * Crucially it rejects a horizontal RULE/DIVIDER that merely passes under the text: a real underline
+   * ends with the text, but a page divider/section rule/table border continues past the text on the
+   * left and/or right. The strip is read with a margin on each side, and any candidate rule row that
+   * still has ink in that outside margin is treated as a divider, NOT an underline — so editing a
+   * heading sitting just above a divider never mistakes the divider for an underline (which would make
+   * the save cover-and-redraw it at the new text width and visibly break the line).
+   */
+  _detectLineUnderlines(pv, line, bg) {
+    try {
+      const items = (line.items || []).filter(it => (it.text || '').trim());
+      if (!items.length) return false;
+      const cw = pv.canvas.width, ch = pv.canvas.height;
+      const H = Math.max(6, line.fontSizePx || (line.bottom - line.top));
+      const y0 = Math.max(0, Math.floor(line.baseline + H * 0.04));
+      const y1 = Math.min(ch, Math.ceil(line.baseline + H * 0.34));
+      const margin = Math.max(16, Math.round(H));        // room to see a rule extending past the text
+      const x0 = Math.max(0, Math.floor(line.left) - margin);
+      const x1 = Math.min(cw, Math.ceil(line.right) + margin);
+      const w = x1 - x0, h = y1 - y0;
+      if (w < 4 || h < 2) return false;
+      const data = this._readRegion(pv.canvas, x0, y0, w, h);
+      const isInk = (i) => {
+        if (data[i + 3] < 128) return false;
+        if (!bg) return (data[i] + data[i + 1] + data[i + 2]) < 600;       // dark on assumed-light bg
+        return (Math.abs(data[i] - bg[0]) + Math.abs(data[i + 1] - bg[1]) + Math.abs(data[i + 2] - bg[2])) > 100;
+      };
+      const rowInk = (py, from, to) => { for (let px = from; px < to; px++) { if (isInk((py * w + px) * 4)) return true; } return false; };
+      let any = false;
+      for (const it of items) {
+        const c0 = Math.max(0, Math.floor(it.left) - x0);
+        const c1 = Math.min(w, Math.ceil(it.right) - x0);
+        const iw = c1 - c0;
+        if (iw < 6) { it.underline = false; continue; }
+        // Columns just OUTSIDE the item, where a divider (but not an underline) would still have ink.
+        const lFrom = Math.max(0, c0 - margin), lTo = Math.max(0, c0 - 3);
+        const rFrom = Math.min(w, c1 + 3), rTo = Math.min(w, c1 + margin);
+        let lineRows = 0, inkRows = 0;
+        for (let py = 0; py < h; py++) {
+          let run = 0, best = 0, inkCols = 0;
+          for (let px = c0; px < c1; px++) {
+            const i = (py * w + px) * 4;
+            if (isInk(i)) { run++; inkCols++; if (run > best) best = run; } else run = 0;
+          }
+          if (inkCols > 0) inkRows++;
+          if (best >= 0.55 * iw) {
+            // A near-full-width rule that ALSO has ink in the outside margin is a divider/border, not
+            // this text's underline — don't count it.
+            const extendsOut = (lTo > lFrom && rowInk(py, lFrom, lTo)) || (rTo > rFrom && rowInk(py, rFrom, rTo));
+            if (!extendsOut) lineRows++;
+          }
+        }
+        // Underline = a thin rule (1..4 rows of near-full-width ink), NOT a solid fill (ink in most rows).
+        it.underline = lineRows >= 1 && lineRows <= 4 && inkRows <= Math.max(4, h * 0.6);
+        if (it.underline) any = true;
+      }
+      return any;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * Group a line's items into contiguous style RUNS [{text,bold,italic,underline}] so a mixed line
+   * (a bold label + a regular tail, a partly-underlined line) keeps each run's own style when the
+   * line is edited and re-saved. Whitespace-only items extend the current run (a space carries no
+   * style of its own). Stored on line.styleRuns only when the line genuinely mixes styles AND the
+   * runs reconstruct line.text exactly — otherwise left unset so the simple whole-line path (which
+   * already preserves a uniform style) runs unchanged. No behaviour change for single-style lines.
+   */
+  _buildLineStyleRuns(line) {
+    const items = (line.items || []);
+    if (items.length < 1) return;
+    const runs = [];
+    let prevRight = null, endsSpace = true;          // start "true" so no leading synth space
+    const append = (text, st) => {
+      const last = runs[runs.length - 1];
+      if (!st && last) { last.text += text; }        // a blank item joins the current run
+      else if (last && last.bold === st.b && last.italic === st.i && last.underline === st.u) last.text += text;
+      else runs.push({ text, bold: st ? st.b : false, italic: st ? st.i : false, underline: st ? st.u : false });
+      if (text) endsSpace = /\s$/.test(text);
+    };
+    for (const it of items) {
+      const t = it.text || '';
+      if (!t) continue;
+      if (!t.trim()) { append(t, null); prevRight = it.right; continue; }
+      // Mirror groupTextItemsByLine: synthesise a space across a positional gap so the runs join back
+      // to the same text the simple path would produce (and the safety check below passes).
+      if (runs.length && prevRight != null && !endsSpace && !/^\s/.test(t) &&
+          (it.left - prevRight) > (it.height || 0) * 0.18) {
+        runs[runs.length - 1].text += ' '; endsSpace = true;
+      }
+      append(t, { b: !!it.bold, i: !!it.italic, u: !!it.underline });
+      prevRight = it.right;
+    }
+    // Need ≥2 distinct styles to be worth a per-run model.
+    const distinct = new Set(runs.map(r => `${r.bold}|${r.italic}|${r.underline}`));
+    if (runs.length < 2 || distinct.size < 2) return;
+    // Safety: the runs must reproduce the line's (normalised) text exactly, else fall back to the
+    // simple path rather than risk corrupting the line.
+    const norm = (s) => s.replace(/\s+/g, ' ').trim();
+    if (norm(runs.map(r => r.text).join('')) !== norm(line.text)) return;
+    line.styleRuns = runs;
+  }
+
+  /** One styled <span> (data-* markers + inline CSS) for a mixed existing-line run. */
+  _lineRunSpanHTML(r) {
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const css = [`font-weight:${r.bold ? 'bold' : 'normal'}`, `font-style:${r.italic ? 'italic' : 'normal'}`];
+    if (r.underline) css.push('text-decoration:underline');
+    const attrs = `data-bold="${r.bold ? 1 : 0}" data-italic="${r.italic ? 1 : 0}"${r.underline ? ' data-underline="1"' : ''}`;
+    return `<span ${attrs} style="${css.join(';')}">${esc(r.text)}</span>`;
+  }
+
+  /**
+   * Read a focused existing-line box back into a single line of style runs [{text,bold,italic,
+   * underline}], walking text nodes and inheriting each span's data-* markers. Returns null when the
+   * box has no styled spans (a plain, single-style line) so the caller keeps the simple whole-line
+   * path. Per-run text is cleaned the same way as the plain path, so the runs join back to newText.
+   */
+  _readLineRuns(div) {
+    if (!div || !div.querySelector('span[data-bold],span[data-italic],span[data-underline]')) return null;
+    const runs = [];
+    const push = (text, st) => {
+      if (!text) return;
+      const last = runs[runs.length - 1];
+      if (last && last.bold === st.bold && last.italic === st.italic && last.underline === st.underline) last.text += text;
+      else runs.push({ text, bold: st.bold, italic: st.italic, underline: st.underline });
+    };
+    const walk = (node, inh) => {
+      node.childNodes.forEach((child) => {
+        if (child.nodeType === Node.TEXT_NODE) { push(child.nodeValue, inh); return; }
+        if (child.nodeType !== Node.ELEMENT_NODE || child.tagName === 'BR') return;
+        const st = { ...inh };
+        if (child.hasAttribute && child.hasAttribute('data-bold')) st.bold = child.getAttribute('data-bold') === '1';
+        else if (child.style && (child.style.fontWeight === 'bold' || parseInt(child.style.fontWeight, 10) >= 600)) st.bold = true;
+        if (child.hasAttribute && child.hasAttribute('data-italic')) st.italic = child.getAttribute('data-italic') === '1';
+        else if (child.style && child.style.fontStyle === 'italic') st.italic = true;
+        if (child.hasAttribute && child.hasAttribute('data-underline')) st.underline = child.getAttribute('data-underline') === '1';
+        else if (child.style && /underline/.test(child.style.textDecoration || '')) st.underline = true;
+        walk(child, st);
+      });
+    };
+    walk(div, { bold: false, italic: false, underline: false });
+    const cleaned = runs.map(r => ({ ...r, text: this.cleanEditableText(r.text) })).filter(r => r.text.length);
+    return cleaned.length ? cleaned : null;
   }
 
   /**
@@ -2834,14 +3031,14 @@ class PDFEditorApp {
 
   /** Reflect the current font key on the picker button (rendered in its own face), and update the
    *  hidden #tt-font value-holder the rest of the toolbar reads. '' -> the placeholder. */
-  _setFontPickerValue(key) {
+  _setFontPickerValue(key, labelOverride) {
     const k = (key || '').toLowerCase();
     const hidden = document.getElementById('tt-font');
     const label = document.getElementById('tt-font-label');
     const e = PDFEditorApp._FONT_BY_KEY[k];
     if (hidden) hidden.value = e ? k : '';
     if (label) {
-      label.textContent = e ? e.name : 'Select a Font Style';
+      label.textContent = e ? e.name : (labelOverride || 'Select a Font Style');
       label.style.fontFamily = e ? e.css : '';
     }
   }
@@ -2962,17 +3159,28 @@ class PDFEditorApp {
     const size = t.kind === 'overlay' ? Math.round(o.fontSize) : Math.round((o.fontSizePx || 0) / this.scale);
     // Added-text bold/italic live per-run, so a committed overlay reflects them from its runs
     // (every run bold/italic) rather than the box-level flags, which stay at the box default.
-    let bold = !!o.bold, italic = !!o.italic;
+    let bold = !!o.bold, italic = !!o.italic, underline = !!o.underline;
     if (t.kind === 'overlay' && o.runs && o.runs.length) {
       const flat = o.runs.flat();
       if (flat.length) { bold = flat.every(r => r.bold); italic = flat.every(r => r.italic); }
+    } else if (t.kind === 'line' && o.styleRuns && o.styleRuns.length) {
+      // A mixed existing line reflects bold/italic/underline as "every run" — so the buttons light up
+      // only when the WHOLE line is that style (a partly-bold line shows the Bold button off).
+      bold = o.styleRuns.every(r => r.bold);
+      italic = o.styleRuns.every(r => r.italic);
+      underline = o.styleRuns.every(r => r.underline);
     }
-    return { bold, italic, underline: !!o.underline, size,
+    // Prefer the REAL font name (from PDF.js's rendered font object) so a saved+reopened font
+    // re-selects in the picker; fall back to the generic guess before the page has resolved.
+    const famKey = this._displayFontKey(o.fontFamily, this._realFontName(o) || o.fontFamilyName || o.fontName);
+    return { bold, italic, underline, size,
              color: o.color, opacity: o.opacity, align: o.align,
              link: o.link ? o.link.uri : '',
-             // Prefer the REAL font name (from PDF.js's rendered font object) so a saved+reopened font
-             // re-selects in the picker; fall back to the generic guess before the page has resolved.
-             family: this._displayFontKey(o.fontFamily, this._realFontName(o) || o.fontFamilyName || o.fontName) };
+             family: famKey,
+             // Existing text whose original font isn't in the dropdown (LaTeX/Computer-Modern or any
+             // other unmapped embedded face) is REDRAWN in its own/closest original face on save, so
+             // the picker shows "Original" instead of an unset Arial-looking placeholder.
+             fontOriginal: (t.kind === 'line' && !famKey) };
   }
 
   _reflectTextToolbar() {
@@ -2984,9 +3192,10 @@ class PDFEditorApp {
     // Don't clobber an input the user is actively typing into (else mid-type reflect mangles it).
     const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null && el !== document.activeElement) el.value = v; };
     if (s.size) set('tt-size', s.size);
-    // Always reflect the font: a known family shows its name; an unknown one ('') shows the
-    // "Select a Font Style" placeholder so the picker is never blank.
-    this._setFontPickerValue(s.family || '');
+    // Reflect the font: a known family shows its name; existing text on an unmapped original font
+    // (LaTeX/Computer-Modern, etc.) shows "Original" (the editor preserves it — not an Arial default);
+    // otherwise the "Select a Font Style" placeholder (added text).
+    this._setFontPickerValue(s.family || '', s.fontOriginal ? 'Original' : undefined);
     this._setColorSwatch(s.color ? this._rgbToHex(s.color) : '#000000');
     set('tt-opacity', Math.round((s.opacity == null ? 1 : s.opacity) * 100));
   }
@@ -3153,7 +3362,22 @@ class PDFEditorApp {
    *  immediately; trackEdit does not re-render, so the box keeps focus). */
   _applyLineStyle(t, kind, value) {
     const l = t.line, div = t.el;
-    if (kind === 'bold') { l.bold = !!value; div.style.fontWeight = value ? 'bold' : 'normal'; }
+    const rich = !!(l.styleRuns && l.styleRuns.length) &&
+      div.querySelector('span[data-bold],span[data-italic],span[data-underline]');
+    if (rich && (kind === 'bold' || kind === 'italic' || kind === 'underline')) {
+      // Whole-line B/I/U on a MIXED line: apply it to EVERY run span (so the line becomes uniformly
+      // that style) while keeping the per-run model for the others.
+      div.querySelectorAll('span').forEach((sp) => {
+        if (kind === 'underline') {
+          if (value) { sp.setAttribute('data-underline', '1'); sp.style.textDecoration = 'underline'; }
+          else { sp.removeAttribute('data-underline'); sp.style.textDecoration = 'none'; }
+        } else {
+          sp.setAttribute('data-' + kind, value ? '1' : '0');
+          sp.style[kind === 'bold' ? 'fontWeight' : 'fontStyle'] = value ? (kind === 'bold' ? 'bold' : 'italic') : 'normal';
+        }
+      });
+      l[kind] = !!value;
+    } else if (kind === 'bold') { l.bold = !!value; div.style.fontWeight = value ? 'bold' : 'normal'; }
     else if (kind === 'italic') { l.italic = !!value; div.style.fontStyle = value ? 'italic' : 'normal'; }
     else if (kind === 'underline') { l.underline = !!value; div.style.textDecoration = value ? 'underline' : 'none'; }
     else if (kind === 'size') { l.fontSizePx = value * this.scale; l.sizeOverridden = true; div.style.fontSize = (value * this.scale * (div.__displayScale || 1)) + 'px'; }
@@ -3162,7 +3386,9 @@ class PDFEditorApp {
     else if (kind === 'align') { l.align = value; div.style.textAlign = value; }
     else if (kind === 'family') { l.fontFamily = value; div.style.fontFamily = this._familyCss(value); }
     else if (kind === 'link') { this._setLink(l, value); div.classList.toggle('tt-has-link', !!l.link); }
-    this.trackEdit(this.lineToEdit(l, this.cleanEditableText(div.textContent)));
+    const runs = this._readLineRuns(div);
+    if (runs) l.styleRuns = runs;
+    this.trackEdit(this.lineToEdit(l, this.cleanEditableText(div.textContent), runs));
   }
 
   /** Duplicate the selected added-text object (existing text isn't a movable object). */
