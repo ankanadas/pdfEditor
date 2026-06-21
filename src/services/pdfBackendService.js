@@ -57,10 +57,11 @@ export class PDFBackendService {
   /**
    * Edit PDF using backend
    * @param {ArrayBuffer} pdfArrayBuffer - The PDF as ArrayBuffer
-   * @param {Array} edits - Array of edit operations
+   * @param {Array} edits - Array of text/erase/image edit operations
+   * @param {Array} [annotations] - Optional Fabric annotation descriptors (from annotationManager.serialize())
    * @returns {Promise<Uint8Array>} - Edited PDF bytes
    */
-  static async editPDF(pdfArrayBuffer, edits) {
+  static async editPDF(pdfArrayBuffer, edits, annotations = []) {
     try {
       // Convert ArrayBuffer to base64 in chunks to avoid stack overflow
       const pdfBytes = new Uint8Array(pdfArrayBuffer);
@@ -81,7 +82,10 @@ export class PDFBackendService {
         },
         body: JSON.stringify({
           pdfBase64: pdfBase64,
-          edits: edits
+          edits: edits,
+          // Pass Fabric annotation descriptors so the backend can burn them in with
+          // PyMuPDF's native APIs (real PDF highlight annotations, proper opacity, etc.)
+          annotations: annotations,
         })
       });
 

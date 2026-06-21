@@ -286,15 +286,23 @@ export class AnnotationManager {
       // If the click landed on an existing object (moving a highlight), skip
       if (opt.target) return;
 
-      // scenePoint is in Fabric's scene coordinates which equals intrinsic canvas
-      // pixel space (the container's CSS scale() transform is transparent to Fabric
-      // because it reads the canvas element's own bounding rect). extractedTextItems
-      // coords are also in intrinsic canvas pixel space — so compare directly, no ds.
+      // The Fabric canvas lives inside a CSS-scaled container
+      // (transform:scale(displayScale)). Fabric reads the canvas element's
+      // getBoundingClientRect() which, for a CSS-transformed element, returns
+      // the *rendered* (CSS-display) dimensions — i.e. intrinsic × displayScale.
+      // Fabric therefore maps mouse offsets into canvas-space correctly, but only
+      // when scenePoint is available (Fabric 6+). The absolutePointer fallback can
+      // return raw CSS pixels. To be safe, we always normalise by displayScale.
+      const displayScale = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
       const p = opt.scenePoint ?? opt.absolutePointer;
-      const canvasX = p.x;
-      const canvasY = p.y;
+      // scenePoint is already in intrinsic canvas pixels when Fabric accounts for the
+      // CSS scale correctly; if not (older Fabric / fallback), dividing by displayScale
+      // converts CSS pixels → intrinsic canvas pixels.
+      const canvasX = p.x / displayScale;
+      const canvasY = p.y / displayScale;
 
-      // Find the text item whose bounding box contains the click
+      // Find the text item whose bounding box contains the click.
+      // extractedTextItems coords are intrinsic canvas pixels (this.scale applied).
       const items = this.app.extractedTextItems.filter(i => i.pageIndex === pageIndex);
       let hit = null;
       for (const item of items) {
@@ -306,7 +314,9 @@ export class AnnotationManager {
       }
 
       if (!hit) return;
-      // Place the highlight rect in Fabric scene coordinates (= intrinsic canvas px)
+
+      // Place the highlight rect in intrinsic canvas pixel space so it aligns
+      // exactly with the text bounding box regardless of the display scale.
       const hl = new Rect({
         left: hit.left,
         top: hit.top,
@@ -316,6 +326,9 @@ export class AnnotationManager {
         stroke: 'transparent',
         selectable: true,
         hasControls: true,
+        // Use multiply blend mode so the highlight tints the text rather than
+        // covering it. Fabric respects globalCompositeOperation during renderAll().
+        globalCompositeOperation: 'multiply',
       });
       hl._annotationType = 'highlight';
       fabricCanvas.add(hl);

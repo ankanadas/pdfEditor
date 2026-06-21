@@ -1,7 +1,7 @@
 import { EditorController } from './core/EditorController.js';
 import { PDFBackendService } from './services/pdfBackendService.js';
 import { initMerge } from './merge.js';
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { AnnotationManager } from './annotationManager.js';
 
@@ -3654,7 +3654,10 @@ class PDFEditorApp {
 
     try {
       if (await PDFBackendService.checkHealth()) {
-        editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits);
+        // Serialize Fabric annotations (highlights, shapes, etc.) so the backend can
+        // burn them in as native PDF annotations (real /Highlight with fill_opacity).
+        const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
+        editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits, fabricAnnotations);
         viaBackend = true;
       }
     } catch (e) { console.warn('Backend save failed, trying client-side:', e); }
@@ -4005,12 +4008,16 @@ class PDFEditorApp {
         } catch (_) {}
 
       } else if (ann.kind === 'ann-highlight') {
-        // Yellow semi-transparent highlight rectangle
+        // Semi-transparent highlight rectangle drawn with Multiply blend mode so the
+        // ink tints the text underneath rather than covering it — exactly like a real
+        // highlighter. BlendMode.Multiply darkens where colours overlap and is
+        // transparent-effective on white backgrounds, preventing text from being hidden.
         try {
           page.drawRectangle({
             x: ann.x, y: ann.y, width: ann.width, height: ann.height,
             color: parsePdfColor(ann.fill || '#FFD600'),
             opacity: ann.opacity ?? 0.4,
+            blendMode: BlendMode.Multiply,
           });
         } catch (_) {}
 
