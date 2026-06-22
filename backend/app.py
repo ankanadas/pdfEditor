@@ -40,10 +40,12 @@ CORS(
 )
 
 # ---- Rate limiting (abuse / DoS protection) ------------------------------------------
-# Per-client-IP limits. Storage defaults to in-memory; set RATELIMIT_STORAGE_URI to a
-# Redis URL to share counts across gunicorn workers and instances. With in-memory storage
-# and N workers, each worker counts independently, so the real limit is ~N x the numbers
-# below — fine for abuse prevention; use Redis (or `--workers 1`) for exact limits.
+# Per-client-IP limits. Storage defaults to in-memory, which lives inside ONE process and
+# resets on restart. The default deploy runs a single gunicorn worker (see render.yaml), so
+# in-memory counting is EXACT there. The moment you scale to N workers/instances, each counts
+# independently and the real limit becomes ~N x the numbers below (and still resets on deploy)
+# — fine for casual abuse prevention, but set RATELIMIT_STORAGE_URI to a Redis URL to share
+# counts across workers/instances and make the limit exact and durable when you scale up.
 # Set RATELIMIT_ENABLED=0 as an ops kill-switch to disable limiting entirely.
 RATE_DEFAULTS = ["60 per minute", "600 per hour"]
 RATE_HEAVY = "30 per minute;300 per hour"  # CPU/memory-heavy PDF endpoints
@@ -78,7 +80,14 @@ def _rate_limited(_e):
 # Defense-in-depth file-size limit (the frontend also blocks oversized files).
 # The editor sends the PDF base64-encoded (~1.34x larger), so the raw request cap is
 # set above the document limit to fit a MAX_PDF_MB document plus JSON overhead.
-MAX_PDF_MB = 100
+#
+# Kept deliberately modest: a base64 PDF is held whole in RAM, decoded to bytes, then
+# PyMuPDF's working set is a further multiple of that. On a 512 MB instance a couple of
+# large concurrent uploads would OOM, so 30 MB (override via MAX_PDF_MB) leaves headroom.
+# MAX_PDF_PAGES additionally bounds the per-document working set for pathological
+# tiny-page / huge-count files that would otherwise slip under the byte-size cap.
+MAX_PDF_MB = int(os.environ.get("MAX_PDF_MB", "30"))
+MAX_PDF_PAGES = int(os.environ.get("MAX_PDF_PAGES", "500"))
 app.config['MAX_CONTENT_LENGTH'] = int(MAX_PDF_MB * 1.4 * 1024 * 1024)
 
 
@@ -897,6 +906,43 @@ def _open_authenticated(pdf_bytes, password=""):
     return doc, True
 
 
+def _page_limit_response(doc):
+    """A JSON 413 response if the document has more pages than we allow, else None.
+
+    Bounds PyMuPDF's working memory on the 512 MB Render free tier: a pathological
+    tiny-page / huge-count PDF can slip under the byte-size cap yet still blow up RAM
+    once every page is processed. Callers return this and close the doc when it fires."""
+    n = doc.page_count
+    if n > MAX_PDF_PAGES:
+        return jsonify({"error": f"Too many pages ({n}). Maximum is {MAX_PDF_PAGES} pages."}), 413
+    return None
+
+
+# A PDF must carry the %PDF- signature near the start. The spec / Acrobat tolerate up to ~1 KB of
+# leading junk (and so does PyMuPDF), so we scan the head rather than require it at offset 0.
+PDF_MAGIC = b"%PDF-"
+
+
+def _looks_like_pdf(pdf_bytes):
+    return bool(pdf_bytes) and PDF_MAGIC in pdf_bytes[:1024]
+
+
+def _decode_pdf_or_400(data, field="pdfBase64"):
+    """Decode the base64 PDF payload and verify it really is a PDF *before* it reaches the
+    MuPDF C parser. Returns (pdf_bytes, None) on success, or (None, (response, 400)) for a
+    missing field, undecodable base64, or non-PDF/malformed bytes — a cheap, clean rejection."""
+    b64 = data.get(field)
+    if not b64:
+        return None, (jsonify({"error": "Missing required fields"}), 400)
+    try:
+        pdf_bytes = base64.b64decode(b64)
+    except Exception:
+        return None, (jsonify({"error": "Invalid PDF data."}), 400)
+    if not _looks_like_pdf(pdf_bytes):
+        return None, (jsonify({"error": "This file is not a valid PDF."}), 400)
+    return pdf_bytes, None
+
+
 @app.route('/health', methods=['GET'])
 @limiter.exempt
 def health():
@@ -908,17 +954,26 @@ def health():
 @limiter.limit(RATE_HEAVY)
 def extract_text():
     """Extract text with positions from a PDF (kept for compatibility; the frontend
-    now uses PDF.js for geometry and only relies on the backend for editing/saving)."""
-    try:
-        if 'file' not in request.files:
-            return jsonify({"error": "No file provided"}), 400
+    now uses PDF.js for geometry and only relies on the backend for editing/saving).
 
-        pdf_bytes = request.files['file'].read()
-        doc, ok = _open_authenticated(pdf_bytes, request.form.get('password', ''))
+    Takes the PDF as base64 JSON (`pdfBase64`), the same in-memory path as the other
+    endpoints — nothing is spooled to disk, so "never written to disk" holds server-wide."""
+    try:
+        data = request.get_json(silent=True) or {}
+        pdf_bytes, err = _decode_pdf_or_400(data)
+        if err:
+            return err
+
+        doc, ok = _open_authenticated(pdf_bytes, data.get('password', ''))
         if not ok:
             doc.close()
             return jsonify({"success": False, "needsPassword": True,
                             "error": "This PDF needs a password."}), 200
+
+        over = _page_limit_response(doc)
+        if over:
+            doc.close()
+            return over
 
         pages_data = []
         for page_num in range(len(doc)):
@@ -968,11 +1023,13 @@ def edit_pdf():
     so the original layout (spacing, indents, other text, images) is preserved exactly.
     """
     try:
-        data = request.get_json()
-        if 'pdfBase64' not in data or 'edits' not in data:
+        data = request.get_json(silent=True) or {}
+        if 'edits' not in data:
             return jsonify({"error": "Missing required fields"}), 400
+        pdf_bytes, err = _decode_pdf_or_400(data)
+        if err:
+            return err
 
-        pdf_bytes = base64.b64decode(data['pdfBase64'])
         # Authenticate if encrypted. The frontend normally sends an already-decrypted working
         # copy (see /decrypt at open time), but accept a password here too for robustness and
         # so empty-password ("permission-only") files edit cleanly.
@@ -981,6 +1038,11 @@ def edit_pdf():
             doc.close()
             return jsonify({"success": False, "needsPassword": True,
                             "error": "This PDF needs a password."}), 200
+
+        over = _page_limit_response(doc)
+        if over:
+            doc.close()
+            return over
 
         edits = data['edits']
         print(f"\nProcessing {len(edits)} edit(s)")
@@ -1378,16 +1440,21 @@ def clear_signature():
     """Clear signature images from a PDF by covering middle-of-page images with white
     (leaves top-of-page logos/headers alone)."""
     try:
-        data = request.get_json()
-        if 'pdfBase64' not in data:
-            return jsonify({"error": "Missing required fields"}), 400
+        data = request.get_json(silent=True) or {}
+        pdf_bytes, err = _decode_pdf_or_400(data)
+        if err:
+            return err
 
-        pdf_bytes = base64.b64decode(data['pdfBase64'])
         doc, ok = _open_authenticated(pdf_bytes, data.get('password', ''))
         if not ok:
             doc.close()
             return jsonify({"success": False, "needsPassword": True,
                             "error": "This PDF needs a password."}), 200
+
+        over = _page_limit_response(doc)
+        if over:
+            doc.close()
+            return over
 
         for page_num in range(len(doc)):
             page = doc[page_num]
@@ -1428,7 +1495,13 @@ def decrypt_pdf():
         if 'pdfBase64' not in data:
             return jsonify({"success": False, "error": "Missing required fields"}), 400
 
-        pdf_bytes = base64.b64decode(data['pdfBase64'])
+        try:
+            pdf_bytes = base64.b64decode(data['pdfBase64'])
+        except Exception:
+            return jsonify({"success": False, "error": "Invalid PDF data."}), 400
+        if not _looks_like_pdf(pdf_bytes):
+            return jsonify({"success": False, "error": "This file is not a valid PDF."}), 400
+
         password = data.get('password') or ''
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -1448,6 +1521,11 @@ def decrypt_pdf():
                                     "error": "Incorrect password."}), 200
                 return jsonify({"success": False, "needsPassword": True,
                                 "error": "This PDF needs a password to open."}), 200
+
+        over = _page_limit_response(doc)
+        if over:
+            doc.close()
+            return over
 
         # Re-save with encryption explicitly removed (the default KEEP would retain it).
         output_bytes = doc.tobytes(encryption=fitz.PDF_ENCRYPT_NONE, deflate=True, garbage=3)

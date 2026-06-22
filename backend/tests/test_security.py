@@ -81,6 +81,14 @@ class RateLimitTests(unittest.TestCase):
         first = self.client.post("/edit-pdf", json={}, environ_overrides=fresh).status_code
         self.assertNotEqual(first, 429)
 
+    def test_limiter_is_enabled_and_storage_is_redis_ready(self):
+        # The single worker (render.yaml) makes the default in-memory counting exact. The storage
+        # backend is taken from RATELIMIT_STORAGE_URI, so pointing it at Redis when scaling beyond
+        # one worker is a config change, not a code change.
+        self.assertIs(appmod.app.config.get("RATELIMIT_ENABLED"), True)
+        self.assertEqual(appmod.limiter._storage_uri,
+                         os.environ.get("RATELIMIT_STORAGE_URI", "memory://"))
+
 
 if __name__ == "__main__":
     unittest.main()
