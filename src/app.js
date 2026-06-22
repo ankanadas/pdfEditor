@@ -82,8 +82,17 @@ class PDFEditorApp {
     });
 
     document.getElementById('signatureModeBtn').addEventListener('click', () => {
-      this.openSignPad();   // opens the Draw / Type / Image dialog
+      this.openSignFlow();  // saved signatures? show the picker; otherwise open the Draw/Type/Image dialog
     });
+    // Signature picker: "Add new signature" opens the dialog; outside-click / Esc / scroll dismiss it.
+    document.getElementById('signPickerAdd')?.addEventListener('click', () => { this.closeSignPicker(); this.openSignPad(); });
+    document.addEventListener('click', (e) => {
+      if (!this._signPickerOpen) return;
+      if (e.target.closest && (e.target.closest('#signPicker') || e.target.closest('#signatureModeBtn'))) return;
+      this.closeSignPicker();
+    });
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this._signPickerOpen) this.closeSignPicker(); });
+    window.addEventListener('resize', () => { if (this._signPickerOpen) this.positionSignPicker(); });
 
     document.getElementById('eraseModeBtn')?.addEventListener('click', () => {
       this.setMode('erase');
@@ -690,6 +699,20 @@ class PDFEditorApp {
 
   // Back-compat: existing call sites use renderCurrentPage() to mean "refresh overlays".
   renderCurrentPage() { return this.refresh(); }
+
+  /** Rebuild the HTML overlay layer for ONE page only — no pdf.js canvas re-render, and no loop
+   *  over the whole document. Used when an edit only touches a single page's overlay layer (e.g.
+   *  placing or deleting a signature). refresh()'s loop over every page (clearing + recreating
+   *  overlays, each forcing a layout reflow via canvas.clientWidth) was the multi-second lag on
+   *  long documents; touching just the affected page makes it instant regardless of page count. */
+  refreshPageOverlays(pv) {
+    if (!pv) return;
+    // Drop this page's overlay nodes from the shared registry, then rebuild just this page.
+    this.insertOverlays = this.insertOverlays.filter(el => !pv.wrapper.contains(el));
+    this.clearPageOverlays(pv);
+    this.createInsertOverlays(pv);
+    if (this.mode === 'edit' || this.mode === 'auto') this.createEditableTextBoxes(pv);
+  }
 
   clearPageOverlays(pv) {
     pv.wrapper.querySelectorAll('.editable-text-box, .insert-overlay').forEach(el => el.remove());
@@ -2001,7 +2024,9 @@ class PDFEditorApp {
     this.insertOverlays = [];
   }
 
-  /** Move / proportional-resize / delete for a drawn-signature image overlay. */
+  /** Move / proportional-resize / rotate / delete for a drawn-signature image overlay.
+   *  Uses POINTER events (not mouse) so dragging works with a finger on touch screens, and marks
+   *  the box .sig-active on touch so its handles show (they otherwise only appear on :hover). */
   wireImageOverlay(box, del, handle, rotate, edit, unit) {
     const commit = () => {
       edit.x = parseFloat(box.style.left) / unit;
@@ -2010,58 +2035,69 @@ class PDFEditorApp {
       edit.height = parseFloat(box.style.height) / unit;
       this.commitHistory();
     };
+    // Show this box's handles (and hide others') — needed on touch, which has no :hover.
+    const activate = () => {
+      this.insertOverlays.forEach(el => el.classList && el.classList.remove('sig-active'));
+      box.classList.add('sig-active');
+      this.selectedInsert = edit;
+    };
+    // A reusable pointer-drag: capture the pointer on `target`, run onMove(dx,dy,ev) until release.
+    const drag = (target, e, onMove, onUp) => {
+      e.preventDefault(); e.stopPropagation(); activate();
+      try { target.setPointerCapture(e.pointerId); } catch (_) {}
+      const sx = e.clientX, sy = e.clientY;
+      const move = (ev) => onMove(ev.clientX - sx, ev.clientY - sy, ev);
+      const up = (ev) => {
+        target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', up);
+        target.removeEventListener('pointercancel', up);
+        try { target.releasePointerCapture(e.pointerId); } catch (_) {}
+        if (onUp) onUp(ev);
+      };
+      target.addEventListener('pointermove', move);
+      target.addEventListener('pointerup', up);
+      target.addEventListener('pointercancel', up);
+    };
     // Rotate: drag the top handle around the box centre. Shift snaps to 15°.
-    rotate.addEventListener('mousedown', (e) => {
-      e.preventDefault(); e.stopPropagation();
+    rotate.addEventListener('pointerdown', (e) => {
       const r = box.getBoundingClientRect();
       const cx = r.left + r.width / 2, cy = r.top + r.height / 2;  // centre is invariant under rotation
-      const move = (ev) => {
-        let deg = Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180 / Math.PI + 90;
-        if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
-        deg = Math.round(deg);
-        edit.rotation = deg;
-        box.style.transform = `rotate(${deg}deg)`;
-      };
-      const up = () => {
-        window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
-        this.commitHistory();
-        this.showStatus(`Rotated to ${edit.rotation || 0}°`, 'success');
-      };
-      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+      drag(rotate, e,
+        (dx, dy, ev) => {
+          let deg = Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180 / Math.PI + 90;
+          if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+          deg = Math.round(deg);
+          edit.rotation = deg;
+          box.style.transform = `rotate(${deg}deg)`;
+        },
+        () => { this.commitHistory(); this.showStatus(`Rotated to ${edit.rotation || 0}°`, 'success'); });
     });
-    box.addEventListener('mousedown', (e) => {
+    // Move the whole box.
+    box.addEventListener('pointerdown', (e) => {
       if (e.target === del || e.target === handle || e.target === rotate) return;
-      e.preventDefault(); e.stopPropagation();
-      const sx = e.clientX, sy = e.clientY;
       const ox = parseFloat(box.style.left), oy = parseFloat(box.style.top);
-      const move = (ev) => {
-        box.style.left = (ox + ev.clientX - sx) + 'px';
-        box.style.top = (oy + ev.clientY - sy) + 'px';
-      };
-      const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); commit(); };
-      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+      drag(box, e,
+        (dx, dy) => { box.style.left = (ox + dx) + 'px'; box.style.top = (oy + dy) + 'px'; },
+        commit);
     });
-    handle.addEventListener('mousedown', (e) => {
-      e.preventDefault(); e.stopPropagation();
-      const sx = e.clientX;
+    // Proportional resize from the corner handle.
+    handle.addEventListener('pointerdown', (e) => {
       const w0 = parseFloat(box.style.width), h0 = parseFloat(box.style.height);
       const ar = h0 / w0;
-      const move = (ev) => {
-        const w = Math.max(24, w0 + (ev.clientX - sx));
-        box.style.width = w + 'px';
-        box.style.height = (w * ar) + 'px';
-      };
-      const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); commit(); };
-      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+      drag(handle, e,
+        (dx) => { const w = Math.max(24, w0 + dx); box.style.width = w + 'px'; box.style.height = (w * ar) + 'px'; },
+        commit);
     });
-    del.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    // Delete — keep on tap/click (no preventDefault so the tap still produces a click); stop it
+    // from starting a box drag.
+    del.addEventListener('pointerdown', (e) => { e.stopPropagation(); });
     del.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
       this.edits = this.edits.filter(x => x !== edit);
       if (this.selectedInsert === edit) this.selectedInsert = null;
       if (this._ttTarget && this._ttTarget.edit === edit) this.hideTextToolbar();
       this.commitHistory();
-      this.renderCurrentPage();
+      const pv = this.pageViews.find(p => p.pageNum === edit.pageIndex) || this.pageViews[this.currentPage];
+      this.refreshPageOverlays(pv);   // overlay-only, single page (fast)
     });
   }
 
@@ -2237,6 +2273,7 @@ class PDFEditorApp {
   async signPadAdd() {
     // Signatures are placed from this dialog rather than a page click, so gate them here too.
     if (!(await this._confirmEditAllowed())) return;
+    this.showStatus('Preparing signature…', 'info');   // immediate feedback while we rasterise
     let dataUrl = null, ratio = 0.3;
 
     if (this.signTab === 'draw') {
@@ -2256,27 +2293,11 @@ class PDFEditorApp {
     }
     if (!dataUrl) return;
 
-    // Place on the page currently in view, centred-ish, ~180pt wide (keep aspect).
-    const pv = this.pageViews[this.currentPage] || this.pageViews[0];
-    const pageWpt = pv ? pv.canvas.width / this.scale : 612;
-    const pageHpt = pv ? pv.canvas.height / this.scale : 792;
-    const wPt = Math.min(180, pageWpt - 40);
-    const hPt = wPt * ratio;
-
-    this.edits.push({
-      pageIndex: pv ? pv.pageNum : this.currentPage,
-      redact: false,
-      kind: 'image',
-      dataUrl: dataUrl,
-      x: Math.max(20, (pageWpt - wPt) / 2),
-      top: Math.max(20, pageHpt * 0.45),
-      width: wPt,
-      height: hPt
-    });
-    this.commitHistory();
+    // Remember it for next time (localStorage, on-device only) and enter ghost-placement mode —
+    // a semi-transparent preview follows the cursor; the next click/tap on the page drops it there.
+    this.saveSignatureToStore(dataUrl, ratio);
     this.closeSignPad();
-    this.refresh();
-    this.showStatus('Signature added — drag it into place, resize with the corner', 'success');
+    this.startSignaturePlacement(dataUrl, ratio);
   }
 
   /** Rasterise typed text in a given font/colour to a trimmed transparent PNG. */
@@ -2338,6 +2359,212 @@ class PDFEditorApp {
     });
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Saved signatures: kept in the browser's own localStorage (nothing ever leaves the device, in
+  // keeping with the "files are never stored" promise — this is the user's own signature, on their
+  // own machine). Each entry is { dataUrl, ratio, ts }. Capped, most-recent-first.
+  // ---------------------------------------------------------------------------------------------
+  static get SIG_STORE_KEY() { return 'qpe_signatures'; }
+  static get SIG_STORE_MAX() { return 8; }
+
+  loadSavedSignatures() {
+    try {
+      const a = JSON.parse(localStorage.getItem(PDFEditorApp.SIG_STORE_KEY) || '[]');
+      return Array.isArray(a) ? a.filter(s => s && typeof s.dataUrl === 'string') : [];
+    } catch (e) { return []; }
+  }
+
+  saveSignatureToStore(dataUrl, ratio) {
+    if (!dataUrl) return;
+    let list = this.loadSavedSignatures().filter(s => s.dataUrl !== dataUrl);
+    list.unshift({ dataUrl, ratio: ratio || 0.3, ts: Date.now() });
+    list = list.slice(0, PDFEditorApp.SIG_STORE_MAX);
+    // If storage is full (large image signatures), drop the oldest and retry until it fits.
+    while (list.length) {
+      try { localStorage.setItem(PDFEditorApp.SIG_STORE_KEY, JSON.stringify(list)); break; }
+      catch (e) { list.pop(); }
+    }
+  }
+
+  deleteSavedSignature(dataUrl) {
+    const list = this.loadSavedSignatures().filter(s => s.dataUrl !== dataUrl);
+    try { localStorage.setItem(PDFEditorApp.SIG_STORE_KEY, JSON.stringify(list)); } catch (e) {}
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // "Ghost" signature placement (Sejda-style): once a signature is picked/created, a semi-transparent
+  // preview follows the cursor/finger over the page; the first click/tap drops it there at full
+  // opacity. Only the placement INTERACTION is new — the placed edit, its rendering, resize/move,
+  // PDF coordinates, undo and save pipeline are all unchanged.
+  // ---------------------------------------------------------------------------------------------
+
+  /** Commit the signature edit at explicit PDF-point coords on a page, then rebuild just that page. */
+  _addSignatureEdit(dataUrl, pv, x, top, width, height) {
+    const edit = { pageIndex: pv.pageNum, redact: false, kind: 'image', dataUrl, x, top, width, height };
+    this.edits.push(edit);
+    this.commitHistory();
+    this.selectedInsert = edit;
+    this.refreshPageOverlays(pv);                          // single-page overlay rebuild (fast)
+    const el = this._overlayElFor(edit);
+    if (el) el.classList.add('sig-active');
+    return edit;
+  }
+
+  /** Enter ghost-placement mode: a ~55% opacity preview of the signature follows the cursor over
+   *  the PDF; the next click/tap inside a page places it there at full opacity. Esc cancels. */
+  startSignaturePlacement(dataUrl, ratio) {
+    if (!dataUrl) return;
+    this._cancelSignaturePlacement();
+    const pv0 = this.pageViews[this.currentPage] || this.pageViews[0];
+    const pageWpt = pv0 ? pv0.canvas.width / this.scale : 612;
+    const wPt = Math.min(180, pageWpt - 40);
+    const hPt = wPt * (ratio || 0.3);
+    const ds = pv0 ? (pv0.canvas.clientWidth || pv0.canvas.width) / pv0.canvas.width : 1;
+    const unit = this.scale * ds;
+
+    const ghost = document.createElement('img');
+    ghost.className = 'sig-ghost';
+    ghost.src = dataUrl; ghost.draggable = false; ghost.alt = '';
+    ghost.style.width = (wPt * unit) + 'px';
+    ghost.style.height = (hPt * unit) + 'px';
+    ghost.style.display = 'none';
+    document.body.appendChild(ghost);
+
+    const stage = document.getElementById('stage');
+    const state = { el: ghost, dataUrl, ratio: ratio || 0.3, wPt, hPt, gw: wPt * unit, gh: hPt * unit, x: 0, y: 0, over: false, raf: null };
+    this._sigPlacement = state;
+    document.body.classList.add('placing-signature');
+    this.showStatus('Move over the page and click to place your signature · Esc to cancel', 'info');
+
+    // The ghost stays hidden until the cursor/finger is actually over the page — so it only ever
+    // appears attached to the cursor (no brief flash at the page centre before the first move).
+
+    // rAF loop keeps the ghost glued to the cursor with no layout thrash / flicker.
+    const tick = () => {
+      if (this._sigPlacement !== state) return;
+      state.el.style.display = state.over ? 'block' : 'none';
+      if (state.over) state.el.style.transform = `translate(${Math.round(state.x - state.gw / 2)}px, ${Math.round(state.y - state.gh / 2)}px)`;
+      state.raf = requestAnimationFrame(tick);
+    };
+    state.raf = requestAnimationFrame(tick);
+
+    const pt = (e) => (e.touches && e.touches[0]) ? e.touches[0] : e;
+    state.onMove = (e) => {                                // pointermove (hover) + pointerdown (touch)
+      const p = pt(e); state.x = p.clientX; state.y = p.clientY;
+      const el = document.elementFromPoint(p.clientX, p.clientY);
+      state.over = !!(el && el.closest && el.closest('.page-wrap'));   // ignore movement off the PDF
+    };
+    state.onClick = (e) => {
+      const p = pt(e);
+      const el = document.elementFromPoint(p.clientX, p.clientY);
+      const wrap = el && el.closest && el.closest('.page-wrap');
+      if (!wrap) return;                                   // clicked outside the PDF -> ignore
+      const pv = this.pageViews.find(v => v.wrapper === wrap || v.wrapper.contains(wrap));
+      if (!pv) return;
+      e.preventDefault(); e.stopPropagation();             // pre-empt the canvas add-text click
+      const rect = pv.canvas.getBoundingClientRect();
+      const toIntrinsic = pv.canvas.width / rect.width;    // same screen->PDF mapping as add-text
+      const pageWp = pv.canvas.width / this.scale, pageHp = pv.canvas.height / this.scale;
+      let x = ((p.clientX - rect.left) * toIntrinsic) / this.scale - state.wPt / 2;
+      let top = ((p.clientY - rect.top) * toIntrinsic) / this.scale - state.hPt / 2;
+      x = Math.max(0, Math.min(pageWp - state.wPt, x));
+      top = Math.max(0, Math.min(pageHp - state.hPt, top));
+      this._addSignatureEdit(state.dataUrl, pv, x, top, state.wPt, state.hPt);
+      this._cancelSignaturePlacement();
+    };
+    state.onKey = (e) => { if (e.key === 'Escape') this._cancelSignaturePlacement(); };
+
+    window.addEventListener('pointermove', state.onMove, true);
+    window.addEventListener('pointerdown', state.onMove, true);   // touch: jump the ghost under the finger
+    if (stage) stage.addEventListener('click', state.onClick, true);
+    window.addEventListener('keydown', state.onKey, true);
+  }
+
+  _cancelSignaturePlacement() {
+    const s = this._sigPlacement;
+    if (!s) return;
+    this._sigPlacement = null;
+    if (s.raf) cancelAnimationFrame(s.raf);
+    if (s.el && s.el.parentNode) s.el.parentNode.removeChild(s.el);
+    window.removeEventListener('pointermove', s.onMove, true);
+    window.removeEventListener('pointerdown', s.onMove, true);
+    document.getElementById('stage')?.removeEventListener('click', s.onClick, true);
+    window.removeEventListener('keydown', s.onKey, true);
+    document.body.classList.remove('placing-signature');
+  }
+
+  /** Place a previously-saved signature (chosen from the picker): start ghost-placement mode. */
+  async placeSavedSignature(sig) {
+    if (!sig || !sig.dataUrl) return;
+    this.closeSignPicker();
+    if (!(await this._confirmEditAllowed())) return;
+    this.saveSignatureToStore(sig.dataUrl, sig.ratio);     // bump it to most-recent
+    this.showStatus('Preparing signature…', 'info');
+    this.startSignaturePlacement(sig.dataUrl, sig.ratio);
+  }
+
+  // ----- Signature picker: tap Sign -> a small list of saved signatures + "Add new signature" -----
+  openSignFlow() {
+    if (!this.controller.isLoaded) { this.showStatus('Open a PDF first', 'error'); return; }
+    const saved = this.loadSavedSignatures();
+    if (saved.length) this.openSignPicker(saved);
+    else this.openSignPad();                              // nothing saved yet -> straight to the pad
+  }
+
+  openSignPicker(saved) {
+    const pop = document.getElementById('signPicker');
+    const list = document.getElementById('signPickerList');
+    if (!pop || !list) { this.openSignPad(); return; }
+    list.innerHTML = '';
+    (saved || this.loadSavedSignatures()).forEach(sig => {
+      const item = document.createElement('div');
+      item.className = 'sign-pick-item';
+      const pick = document.createElement('button');
+      pick.type = 'button'; pick.className = 'sign-pick-thumb'; pick.title = 'Place this signature';
+      const img = document.createElement('img'); img.src = sig.dataUrl; img.alt = 'Saved signature'; img.draggable = false;
+      pick.appendChild(img);
+      pick.addEventListener('click', () => this.placeSavedSignature(sig));
+      const rm = document.createElement('button');
+      rm.type = 'button'; rm.className = 'sign-pick-del'; rm.title = 'Remove this saved signature'; rm.textContent = '×';
+      rm.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.deleteSavedSignature(sig.dataUrl);
+        const left = this.loadSavedSignatures();
+        if (left.length) this.openSignPicker(left); else { this.closeSignPicker(); this.openSignPad(); }
+      });
+      item.appendChild(pick); item.appendChild(rm);
+      list.appendChild(item);
+    });
+    pop.hidden = false;
+    this.positionSignPicker();
+    this._signPickerOpen = true;
+  }
+
+  closeSignPicker() {
+    const pop = document.getElementById('signPicker');
+    if (pop) pop.hidden = true;
+    this._signPickerOpen = false;
+  }
+
+  positionSignPicker() {
+    const btn = document.getElementById('signatureModeBtn');
+    const pop = document.getElementById('signPicker');
+    if (!btn || !pop) return;
+    const r = btn.getBoundingClientRect();
+    const pw = pop.offsetWidth || 220, ph = pop.offsetHeight || 200;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let left, top;
+    if (r.bottom > vh - 170) {                    // button low on screen (mobile bottom dock) -> above it
+      top = Math.max(8, r.top - ph - 8);
+      left = Math.min(Math.max(8, r.left + r.width / 2 - pw / 2), vw - pw - 8);
+    } else {                                       // desktop left rail -> to the right of the button
+      left = Math.min(r.right + 8, vw - pw - 8);
+      top = Math.min(Math.max(8, r.top), vh - ph - 8);
+    }
+    pop.style.left = Math.max(8, left) + 'px';
+    pop.style.top = Math.max(8, top) + 'px';
+  }
+
   /**
    * Render each pending insert (added text / signature) as a draggable, resizable overlay
    * so the user can move it into place and size it. Dragging updates the edit's position;
@@ -2357,6 +2584,8 @@ class PDFEditorApp {
       if (edit.kind === 'image' && edit.dataUrl) {
         const box = document.createElement('div');
         box.className = 'insert-overlay insert-image';
+        box.__edit = edit;                 // lets _overlayElFor find it (scroll-into-view / activation)
+        if (edit === this.selectedInsert) box.classList.add('sig-active');
         box.style.left = (edit.x * unit) + 'px';
         box.style.top = (edit.top * unit) + 'px';
         box.style.width = (edit.width * unit) + 'px';
