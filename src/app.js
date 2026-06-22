@@ -3194,10 +3194,12 @@ class PDFEditorApp {
       sw.addEventListener('click', () => { onPick(hex); pop.hidden = true; });
       pop.appendChild(sw);
     });
-    // A "custom" native picker for anything outside the palette.
+    // A "custom" native picker for anything outside the palette. The input keeps a per-popover id
+    // (tt-color-custom for the text toolbar, ann-color-custom for annotations) so it stays scriptable.
+    const customId = popId.replace('-pop', '-custom');
     const custom = document.createElement('label');
     custom.className = 'tt-sw tt-sw-custom'; custom.title = 'Custom colour';
-    custom.innerHTML = 'Custom <input type="color" value="#000000" title="Custom colour" aria-label="Custom colour">';
+    custom.innerHTML = `Custom <input type="color" id="${customId}" value="#000000" title="Custom colour" aria-label="Custom colour">`;
     custom.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
     pop.appendChild(custom);
     custom.querySelector('input').addEventListener('input', (e) => onPick(e.target.value));
