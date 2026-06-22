@@ -8,13 +8,20 @@
  *
  * Coordinate convention
  * ---------------------
- * Fabric works in *canvas CSS pixels* (already scaled by CSS max-width).
- * For save, we convert to PDF points (72 dpi, bottom-left origin):
+ * All Fabric objects are stored in INTRINSIC canvas pixel coordinates
+ * (i.e. the raw PDF.js render resolution, = PDF points × app.scale).
  *
- *   pdfX = fabricX / (renderScale * displayScale)
- *   pdfY = pageHeightPt - fabricY / (renderScale * displayScale)
+ * The Fabric canvas backstore stays at intrinsic resolution.  On resize,
+ * _syncScales() uses setDimensions({ cssOnly: true }) to CSS-shrink the
+ * canvas elements to match the PDF canvas display size.  Fabric's
+ * _getPointerImpl automatically applies cssScale = backstore / CSS-bounds,
+ * so scenePoint is always in intrinsic pixels — no manual zoom needed.
  *
- * where renderScale = app.scale (1.5) and displayScale = canvas.clientWidth/canvas.width.
+ * For save, intrinsic pixels → PDF points:
+ *   pdfX = fabricX / app.scale
+ *   pdfY = pageHeightPt - fabricY / app.scale
+ *
+ * where app.scale is the PDF.js render scale (typically 1.5).
  */
 
 import {
@@ -56,21 +63,23 @@ export class AnnotationManager {
     this._unmountPage(pv.pageNum);
 
     const wrapper = pv.wrapper;
-    const w = pv.canvas.width;
+    const w = pv.canvas.width;   // intrinsic canvas pixels
     const h = pv.canvas.height;
 
-    // Outer container so Fabric's own generated elements are contained
+    // Container sits exactly over the PDF canvas (same top/left inside wrapper).
+    // It is sized to the CSS display dimensions and keeps transform:none because
+    // Fabric's own zoom handles the visual scaling of all objects.
     const container = document.createElement('div');
     container.className = 'fabric-layer-container';
     container.style.cssText =
       `position:absolute;top:0;left:0;width:${w}px;height:${h}px;` +
-      `transform-origin:top left;z-index:200;pointer-events:none;` +
-      // CSS display scale matching the page-canvas max-width behaviour
-      `transform:scale(${pv.canvas.clientWidth / w || 1});`;
+      `transform:none;z-index:200;pointer-events:none;`;
     wrapper.appendChild(container);
 
+    // Fabric canvas element — starts at intrinsic size; _syncScales resizes it
+    // to the CSS display size and sets the zoom factor accordingly.
     const canvasEl = document.createElement('canvas');
-    canvasEl.width = w;
+    canvasEl.width  = w;
     canvasEl.height = h;
     container.appendChild(canvasEl);
 
@@ -81,7 +90,7 @@ export class AnnotationManager {
       renderOnAddRemove: true,
     });
 
-    // Block panning so Fabric events don't bubble and accidentally scroll the stage
+    // Prevent accidental stage-pan when the mouse wheel fires over the layer.
     fc.on('mouse:wheel', (opt) => opt.e.stopPropagation());
 
     const entry = { pageIndex: pv.pageNum, fabricCanvas: fc, pv, container };
@@ -90,16 +99,19 @@ export class AnnotationManager {
     // Apply the current tool to this newly-mounted page
     if (this.activeTool) this._applyToolToPage(entry);
 
-    // Update CSS scale whenever the window resizes (page-canvas is max-width responsive)
-    this._resizeObs = new ResizeObserver(() => this._syncScales());
-    this._resizeObs.observe(pv.canvas);
+    // _syncScales fires immediately after first browser layout (clientWidth > 0)
+    // and again on every subsequent viewport resize.
+    const obs = new ResizeObserver(() => this._syncScales());
+    obs.observe(pv.canvas);
+    entry._resizeObs = obs;
   }
 
   /** Destroy & remove the Fabric canvas for one page (by pageIndex). */
   _unmountPage(pageIndex) {
     const i = this.pages.findIndex(p => p.pageIndex === pageIndex);
     if (i === -1) return;
-    const { fabricCanvas, container } = this.pages[i];
+    const { fabricCanvas, container, _resizeObs } = this.pages[i];
+    try { if (_resizeObs) _resizeObs.disconnect(); } catch (_) {}
     try { fabricCanvas.dispose(); } catch (_) {}
     container.remove();
     this.pages.splice(i, 1);
@@ -108,7 +120,8 @@ export class AnnotationManager {
   /** Destroy all Fabric canvases (called when a new PDF is loaded). */
   unmountAll() {
     if (this._resizeObs) { this._resizeObs.disconnect(); this._resizeObs = null; }
-    for (const { fabricCanvas, container } of this.pages) {
+    for (const { fabricCanvas, container, _resizeObs } of this.pages) {
+      try { if (_resizeObs) _resizeObs.disconnect(); } catch (_) {}
       try { fabricCanvas.dispose(); } catch (_) {}
       container.remove();
     }
@@ -283,71 +296,37 @@ export class AnnotationManager {
     const { fabricCanvas, pageIndex, pv } = entry;
 
     fabricCanvas.on('mouse:down', (opt) => {
-      // If the click landed on an existing object (moving a highlight), skip
       if (opt.target) return;
 
-      // Coordinate mapping:
-      // The Fabric canvas element has intrinsic dimensions equal to the full
-      // canvas pixel size. Its container div is CSS-scaled down via
-      // transform:scale(displayScale) to fit the viewport. Fabric 6 reads the
-      // canvas's getBoundingClientRect (which returns rendered/CSS dimensions)
-      // and accounts for the transform internally, so opt.scenePoint is already
-      // expressed in INTRINSIC canvas pixels — no further division needed.
-      //
-      // The absolutePointer fallback (Fabric <6 or edge cases) returns raw CSS
-      // pixels, so it still needs the / displayScale conversion.
-      const displayScale = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
-      let canvasX, canvasY;
-      if (opt.scenePoint) {
-        // scenePoint: already in intrinsic canvas px — use as-is.
-        canvasX = opt.scenePoint.x;
-        canvasY = opt.scenePoint.y;
-      } else {
-        // absolutePointer: CSS px → intrinsic canvas px.
-        canvasX = opt.absolutePointer.x / displayScale;
-        canvasY = opt.absolutePointer.y / displayScale;
-      }
+      // scenePoint is in the Fabric scene plane.  Because we keep the
+      // backstore at the intrinsic PDF canvas resolution and only CSS-
+      // scale the element down, Fabric's cssScale factor inside
+      // _getPointerImpl maps the mouse position back to intrinsic
+      // pixels automatically.  No manual zoom or displayScale math
+      // is needed — scenePoint already matches extractedTextItems.
+      const canvasX = opt.scenePoint.x;
+      const canvasY = opt.scenePoint.y;
 
-      // Find the text item whose bounding box contains the click.
-      // extractedTextItems coords are intrinsic canvas pixels (app.scale applied).
-      // Expand the hit zone slightly vertically so clicking near cap-height or
-      // descender still registers — text items include both ascent and descent.
-      const HIT_EXPAND = 4; // px, intrinsic canvas space
       const items = this.app.extractedTextItems.filter(i => i.pageIndex === pageIndex);
       let hit = null;
       for (const item of items) {
         if (canvasX >= item.left && canvasX <= item.right &&
-            canvasY >= (item.top - HIT_EXPAND) && canvasY <= (item.bottom + HIT_EXPAND)) {
+            canvasY >= item.top && canvasY <= item.bottom) {
           hit = item;
           break;
         }
       }
-
       if (!hit) return;
 
-      // Tighten the highlight box so it hugs the visual glyph bounds.
-      // PDF.js sets top  = baseline - ascent  (≈80% of fontHeight above baseline)
-      //               bottom = baseline + descent (≈20% of fontHeight below baseline)
-      // The visible cap-height is roughly 70% of the em, so we trim ~10% off the
-      // top of the ascent zone to avoid the highlight floating above the letters,
-      // and keep the descent zone intact (for descenders like g, p, y).
-      const capTrim = hit.height * 0.10; // trim ~10% from the top to align with cap-height
-      const hlTop    = hit.top    + capTrim;
-      const hlBottom = hit.bottom;        // keep descent zone so descenders are covered
-
-      // Place the highlight rect in intrinsic canvas pixel space so it aligns
-      // exactly with the text bounding box regardless of the display scale.
       const hl = new Rect({
-        left:   hit.left,
-        top:    hlTop,
-        width:  hit.right - hit.left,
-        height: hlBottom - hlTop,
+        left: hit.left,
+        top: hit.top,
+        width: hit.right - hit.left,
+        height: hit.bottom - hit.top,
         fill: this._hexToRgba(this.highlightColor, this.highlightOpacity),
         stroke: 'transparent',
         selectable: true,
         hasControls: true,
-        // Use multiply blend mode so the highlight tints the text rather than
-        // covering it. Fabric respects globalCompositeOperation during renderAll().
         globalCompositeOperation: 'multiply',
       });
       hl._annotationType = 'highlight';
@@ -476,13 +455,24 @@ export class AnnotationManager {
 
   _serializePage(entry) {
     const { fabricCanvas, pageIndex, pv } = entry;
-    const scale = this.app.scale;
-    const ds = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
-    const totalScale = scale * ds;          // canvas-px ÷ totalScale = PDF points
     const pageH = pv.page.view[3];          // page height in PDF points (for y-flip)
-
-    const toPdfX = (x) => x / totalScale;
-    const toPdfY = (y) => pageH - y / totalScale; // flip to bottom-left origin
+    // Fabric objects are stored in INTRINSIC canvas pixel coordinates.
+    // The backstore is never resized (cssOnly:true), so obj.left/top
+    // and getBoundingRect(true) return intrinsic pixel values directly.
+    //
+    // Intrinsic pixel → PDF point:
+    //   pdfPt = intrinsicPx / app.scale
+    //
+    // (app.scale = PDF.js render scale, e.g. 1.5)
+    const appScale = this.app.scale;
+    const toPdfX   = (x) => x / appScale;
+    const toPdfY   = (y) => pageH - y / appScale;   // flip to bottom-left origin
+    const toPdfLen = (v) => v / appScale;
+    // ds is kept for the ann-path descriptor so the path consumer can replicate
+    // the coordinate mapping when it rebuilds the SVG path in PDF-point space.
+    const ds = pv.canvas.width
+      ? (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width
+      : 1;
 
     const result = [];
 
@@ -498,11 +488,14 @@ export class AnnotationManager {
           svgPath: path,
           matrix: m,
           stroke: obj.stroke,
-          strokeWidth: (obj.strokeWidth || 2) / totalScale,
+          strokeWidth: toPdfLen(obj.strokeWidth || 2),
           opacity: obj.opacity ?? 1,
           isHighlight: !!(obj._annotationType === 'highlight' || obj.globalCompositeOperation === 'multiply'),
           pageH,
-          totalScale,
+          // Pass the scale factors so the ann-path consumer can map SVG path
+          // coordinates (which are in Fabric/display pixels) to PDF points.
+          displayScale: ds,
+          appScale,
         });
 
       } else if (obj.type === 'line') {
@@ -514,7 +507,7 @@ export class AnnotationManager {
           x2: toPdfX(obj.left + Math.max(obj.x1, obj.x2) + obj.strokeWidth),
           y2: toPdfY(obj.top + Math.max(obj.y1, obj.y2) + obj.strokeWidth),
           stroke: obj.stroke,
-          strokeWidth: (obj.strokeWidth || 2) / totalScale,
+          strokeWidth: toPdfLen(obj.strokeWidth || 2),
         });
 
       } else if (obj.type === 'rect') {
@@ -525,10 +518,10 @@ export class AnnotationManager {
           pageIndex,
           x: toPdfX(bndg.left),
           y: toPdfY(bndg.top + bndg.height),
-          width: bndg.width / totalScale,
-          height: bndg.height / totalScale,
+          width:  toPdfLen(bndg.width),
+          height: toPdfLen(bndg.height),
           stroke: obj.stroke,
-          strokeWidth: isHl ? 0 : (obj.strokeWidth || 2) / totalScale,
+          strokeWidth: isHl ? 0 : toPdfLen(obj.strokeWidth || 2),
           fill: obj.fill,
           opacity: obj.opacity ?? 1,
         });
@@ -540,10 +533,10 @@ export class AnnotationManager {
           pageIndex,
           x: toPdfX(bndg.left + bndg.width / 2),
           y: toPdfY(bndg.top + bndg.height / 2),
-          rx: (bndg.width / 2) / totalScale,
-          ry: (bndg.height / 2) / totalScale,
+          rx: toPdfLen(bndg.width  / 2),
+          ry: toPdfLen(bndg.height / 2),
           stroke: obj.stroke,
-          strokeWidth: (obj.strokeWidth || 2) / totalScale,
+          strokeWidth: toPdfLen(obj.strokeWidth || 2),
         });
 
       } else if (obj.type === 'group' && obj._annotationType === 'table') {
@@ -554,8 +547,8 @@ export class AnnotationManager {
           pageIndex,
           x: toPdfX(bndg.left),
           y: toPdfY(bndg.top + bndg.height),
-          width: bndg.width / totalScale,
-          height: bndg.height / totalScale,
+          width:  toPdfLen(bndg.width),
+          height: toPdfLen(bndg.height),
           rows: obj._rows || 3,
           cols: obj._cols || 3,
           stroke: '#2d3a5c',
@@ -569,11 +562,51 @@ export class AnnotationManager {
 
   // ─── Utilities ────────────────────────────────────────────────────────────────
 
-  /** Sync CSS scale transforms of all container divs (called on window resize). */
+  /**
+   * Synchronise every Fabric canvas to the current CSS display size of its
+   * PDF page canvas.  Called by each page's ResizeObserver so it fires both
+   * on first layout and on every subsequent viewport / DevTools resize.
+   *
+   * Strategy
+   * --------
+   * • The Fabric canvas backstore stays at INTRINSIC resolution (set once
+   *   in mountPage).  All Fabric objects are stored in intrinsic pixels.
+   * • We CSS-scale the Fabric <canvas> elements (and container) to the
+   *   current CSS display size of the PDF canvas using cssOnly: true.
+   *   Fabric's _getPointerImpl applies a cssScale factor =
+   *   (backstore width / CSS bounding-rect width) to map the mouse
+   *   position back to intrinsic pixels, so scenePoint is automatically
+   *   in the same space as extractedTextItems.
+   * • No setZoom is needed — there is no viewport transform.  Objects
+   *   render 1:1 into the backstore and the browser downscales the
+   *   canvas element via CSS, exactly like the PDF page canvas.
+   */
   _syncScales() {
-    for (const { container, pv } of this.pages) {
-      const ds = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
-      container.style.transform = `scale(${ds})`;
+    for (const { fabricCanvas, pv, container } of this.pages) {
+      const currentClientW = pv.canvas.clientWidth;
+      const currentClientH = pv.canvas.clientHeight;
+      if (!currentClientW || !currentClientH) continue;   // not laid out yet
+
+      // Position the container precisely over the PDF canvas (handles centring
+      // offsets inside the page-wrap).
+      const offL = pv.canvas.offsetLeft || 0;
+      const offT = pv.canvas.offsetTop  || 0;
+      container.style.left      = `${offL}px`;
+      container.style.top       = `${offT}px`;
+      container.style.width     = `${currentClientW}px`;
+      container.style.height    = `${currentClientH}px`;
+      container.style.transform = 'none';
+
+      // CSS-only resize: changes the CSS width/height of the lower canvas,
+      // upper canvas, and Fabric's own wrapper div — but does NOT touch the
+      // backstore resolution.  Fabric's pointer math divides by the
+      // CSS→backstore ratio automatically.
+      fabricCanvas.setDimensions(
+        { width: currentClientW, height: currentClientH },
+        { cssOnly: true }
+      );
+      fabricCanvas.calcOffset();       // re-measure element position
+      fabricCanvas.requestRenderAll();
     }
   }
 
