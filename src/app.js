@@ -658,6 +658,11 @@ class PDFEditorApp {
     this.pageWidth = this.pageViews[0] ? this.pageViews[0].page.view[2] : 612;
     this.pageHeight = this.pageViews[0] ? this.pageViews[0].page.view[3] : 792;
     this.currentPage = 0;
+    // Keep the annotation layer interactive across page (re)builds — e.g. the post-save reload remounts
+    // the Fabric canvases, which otherwise leaves them pointer-events:none and unable to take new
+    // annotations until the user toggles modes. Re-activate + re-arm the current tool when in annotate mode.
+    this.annotationManager.setActive(this.mode === 'annotate');
+    if (this.mode === 'annotate' && this._lastAnnotateTool) this.annotationManager.setTool(this._lastAnnotateTool);
     await this.refresh();
     this.updatePageInfo();
   }
@@ -1318,15 +1323,17 @@ class PDFEditorApp {
       if (stampBtn) stampBtn.classList.add('active');
     } else if (mode === 'annotate') {
       if (annotateBtn) annotateBtn.classList.add('active');
-      // Activate the last-used sub-tool (or default to draw)
-      const lastTool = this._lastAnnotateTool || 'draw';
+      // Activate the last-used sub-tool (default to the text highlighter — Draw was removed).
+      const lastTool = this._lastAnnotateTool || 'highlight';
       this._activateAnnotateTool(lastTool);
-      this.showStatus('Pick an annotation tool, then draw or click on the page.', 'info');
+      this.showStatus('Pick a highlight tool, then highlight or click on the page.', 'info');
     }
 
     // Rebuild overlays for the new mode (edit boxes vs. painted edits) on every page.
     if (previousMode !== mode) this.refresh();
     this.updateModeIndicator();
+    // The shared Undo/Redo buttons reflect annotation history in Highlight mode, edit history elsewhere.
+    this.updateHistoryButtons();
   }
 
   /**
@@ -1369,7 +1376,7 @@ class PDFEditorApp {
       indicator.textContent = 'Stamp';
       indicator.classList.add('active');
     } else if (this.mode === 'annotate') {
-      indicator.textContent = 'Annotate';
+      indicator.textContent = 'Highlight';
       indicator.classList.add('active');
     } else {
       indicator.textContent = 'Pick a tool';
@@ -1381,7 +1388,7 @@ class PDFEditorApp {
 
   /** Wire up all the annotation sub-tool buttons and option inputs. */
   _initAnnotateToolbar() {
-    const SUB_TOOLS = ['draw', 'freeHighlight', 'highlight', 'line', 'rect', 'circle', 'table'];
+    const SUB_TOOLS = ['freeHighlight', 'highlight', 'line', 'rect', 'circle', 'table'];
 
     // Sub-tool buttons
     for (const tool of SUB_TOOLS) {
@@ -1391,52 +1398,42 @@ class PDFEditorApp {
       });
     }
 
-    // Colour picker
-    document.getElementById('ann-color')?.addEventListener('input', (e) => {
-      this.annotationManager.strokeColor = e.target.value;
-      this.annotationManager.highlightColor = e.target.value;
-      if (this.mode === 'annotate') {
-        this.annotationManager.setTool(this._lastAnnotateTool || 'draw', {
-          strokeColor: e.target.value,
-          highlightColor: e.target.value,
-        });
-      }
+    // Colour: the SAME swatch popover as the text floating toolbar. One colour drives both shape
+    // strokes and highlight fills; it persists (lives on annotationManager) across tool switches.
+    const am = this.annotationManager;
+    this._setColorSwatch(am.strokeColor, 'ann-color-sw');
+    this._buildColorPopover('ann-color-btn', 'ann-color-pop', (hex) => {
+      am.strokeColor = hex; am.highlightColor = hex;
+      this._setColorSwatch(hex, 'ann-color-sw');
+      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'highlight', { strokeColor: hex, highlightColor: hex });
     });
 
-    // Stroke width
+    // Stroke width — persists on the manager.
     document.getElementById('ann-width')?.addEventListener('input', (e) => {
       const w = parseInt(e.target.value, 10);
-      this.annotationManager.strokeWidth = w;
-      if (this.mode === 'annotate') {
-        this.annotationManager.setTool(this._lastAnnotateTool || 'draw', { strokeWidth: w });
-      }
+      am.strokeWidth = w;
+      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'rect', { strokeWidth: w });
     });
 
-    // Highlight opacity
+    // Highlight opacity — persists on the manager.
     document.getElementById('ann-opacity')?.addEventListener('input', (e) => {
       const op = parseInt(e.target.value, 10) / 100;
-      this.annotationManager.highlightOpacity = op;
-      if (this.mode === 'annotate') {
-        this.annotationManager.setTool(this._lastAnnotateTool || 'freeHighlight', { highlightOpacity: op });
-      }
+      am.highlightOpacity = op;
+      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'highlight', { highlightOpacity: op });
     });
 
-    // Delete selected object
-    document.getElementById('ann-delete')?.addEventListener('click', () => {
-      for (const { fabricCanvas } of this.annotationManager.pages) {
-        const active = fabricCanvas.getActiveObjects();
-        if (active.length) {
-          active.forEach(o => fabricCanvas.remove(o));
-          fabricCanvas.discardActiveObject();
-          fabricCanvas.renderAll();
-        }
-      }
-    });
+    // Delete selected object (records an undo step via the manager's history).
+    document.getElementById('ann-delete')?.addEventListener('click', () => am.deleteSelected());
+
+    // Undo / redo use the SHARED top toolbar buttons (#undoBtn/#redoBtn) — see undo()/redo(), which
+    // route to the annotation layer while in annotate mode. Keep those buttons' enabled state in sync.
+    am.onHistoryChange = () => { if (this.mode === 'annotate') this.updateHistoryButtons(); };
   }
 
   /**
    * Mark one sub-tool button as active, activate it on all Fabric canvases,
-   * and show/hide the opacity slider (only for highlight tools).
+   * and show/hide the opacity slider (only for highlight tools). Colour/width/opacity come from the
+   * manager (persisted), NOT reset to defaults — so switching tools keeps the user's settings.
    */
   _activateAnnotateTool(tool) {
     this._lastAnnotateTool = tool;
@@ -1446,12 +1443,25 @@ class PDFEditorApp {
     // Show opacity slider only for highlight tools
     const opWrap = document.getElementById('ann-opacity-wrap');
     if (opWrap) opWrap.style.display = (tool === 'highlight' || tool === 'freeHighlight') ? 'inline-flex' : 'none';
-    // Tell the AnnotationManager
-    this.annotationManager.setTool(tool, {
-      strokeColor: document.getElementById('ann-color')?.value || '#e53935',
-      strokeWidth: parseInt(document.getElementById('ann-width')?.value || '3', 10),
-      highlightColor: document.getElementById('ann-color')?.value || '#FFD600',
-      highlightOpacity: parseInt(document.getElementById('ann-opacity')?.value || '40', 10) / 100,
+    // Size (stroke width) has no effect for the word-snap Text Highlight or the fixed-line Table —
+    // show it dimmed + inert there so it's clear it doesn't apply (it still persists for other tools).
+    const sizeWrap = document.getElementById('ann-size-wrap');
+    const sizeOff = (tool === 'highlight' || tool === 'table');
+    if (sizeWrap) {
+      sizeWrap.classList.toggle('ann-off', sizeOff);
+      const wInput = document.getElementById('ann-width'); if (wInput) wInput.disabled = sizeOff;
+    }
+    // Keep the sliders in sync with the persisted values.
+    const am = this.annotationManager;
+    const wEl = document.getElementById('ann-width'); if (wEl) wEl.value = am.strokeWidth;
+    const oEl = document.getElementById('ann-opacity'); if (oEl) oEl.value = Math.round(am.highlightOpacity * 100);
+    this._setColorSwatch(am.strokeColor, 'ann-color-sw');
+    // Activate the tool with the persisted settings.
+    am.setTool(tool, {
+      strokeColor: am.strokeColor,
+      strokeWidth: am.strokeWidth,
+      highlightColor: am.highlightColor,
+      highlightOpacity: am.highlightOpacity,
     });
   }
 
@@ -2954,9 +2964,22 @@ class PDFEditorApp {
 
   /** Build the Sejda-style swatch palette popover and wire it to applyTextStyle('color', …). */
   _initColorPalette() {
-    const btn = document.getElementById('tt-color-btn');
-    const pop = document.getElementById('tt-color-pop');
-    if (!btn || !pop) return;
+    this._buildColorPopover('tt-color-btn', 'tt-color-pop', (hex) => {
+      this.applyTextStyle('color', this._hexToRgb(hex));
+      this._setColorSwatch(hex, 'tt-color-sw');
+    });
+  }
+
+  /**
+   * Build the shared Sejda-style swatch palette popover on (btnId, popId): a grid of preset swatches
+   * plus a native "Custom" picker. `onPick(hex)` fires on any selection. Reused by BOTH the text
+   * floating toolbar and the annotation toolbar so they share one identical colour control.
+   */
+  _buildColorPopover(btnId, popId, onPick) {
+    const btn = document.getElementById(btnId);
+    const pop = document.getElementById(popId);
+    if (!btn || !pop || pop._built) return;
+    pop._built = true;
     // A compact, well-rounded palette (greys + 6 shade rows across the hues).
     const PALETTE = [
       '#000000', '#434343', '#666666', '#999999', '#b7b7b7', '#cccccc', '#d9d9d9', '#efefef', '#f3f3f3', '#ffffff',
@@ -2970,25 +2993,28 @@ class PDFEditorApp {
     PALETTE.forEach(hex => {
       const sw = document.createElement('button');
       sw.type = 'button'; sw.className = 'tt-sw'; sw.style.background = hex; sw.title = hex;
-      sw.addEventListener('mousedown', (e) => e.preventDefault());   // keep the editor focused
-      sw.addEventListener('click', () => { this.applyTextStyle('color', this._hexToRgb(hex)); this._setColorSwatch(hex); pop.hidden = true; });
+      sw.addEventListener('mousedown', (e) => e.preventDefault());   // keep the editor/canvas focused
+      sw.addEventListener('click', () => { onPick(hex); pop.hidden = true; });
       pop.appendChild(sw);
     });
     // A "custom" native picker for anything outside the palette.
     const custom = document.createElement('label');
     custom.className = 'tt-sw tt-sw-custom'; custom.title = 'Custom colour';
-    custom.innerHTML = 'Custom <input type="color" id="tt-color-custom" value="#000000" title="Custom colour" aria-label="Custom colour">';
+    custom.innerHTML = 'Custom <input type="color" value="#000000" title="Custom colour" aria-label="Custom colour">';
     custom.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
     pop.appendChild(custom);
-    custom.querySelector('input').addEventListener('input', (e) => { this.applyTextStyle('color', this._hexToRgb(e.target.value)); this._setColorSwatch(e.target.value); });
+    custom.querySelector('input').addEventListener('input', (e) => onPick(e.target.value));
 
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', () => { pop.hidden = !pop.hidden; });
-    // Close on a click outside the colour control.
-    document.addEventListener('mousedown', (e) => { if (!pop.hidden && !e.target.closest('.tt-color-wrap')) pop.hidden = true; }, true);
+    // Close on a click outside THIS colour control's own wrap.
+    const wrap = btn.closest('.tt-color-wrap');
+    document.addEventListener('mousedown', (e) => {
+      if (!pop.hidden && (!wrap || !wrap.contains(e.target))) pop.hidden = true;
+    }, true);
   }
 
-  _setColorSwatch(hex) { const sw = document.getElementById('tt-color-sw'); if (sw) sw.style.background = hex; }
+  _setColorSwatch(hex, id = 'tt-color-sw') { const sw = document.getElementById(id); if (sw) sw.style.background = hex; }
 
   /** Wire the hyperlink popover: open on the Link button (prefilled with the current URL), Apply sets
    *  the link, Remove clears it, close on outside-click / Esc. Tracks the clickable area only — it
@@ -3433,6 +3459,8 @@ class PDFEditorApp {
   }
 
   undo() {
+    // In Highlight (annotate) mode the shared Undo button drives the annotation layer's own history.
+    if (this.mode === 'annotate') { this.annotationManager.undo(); this.updateHistoryButtons(); this.showStatus('Undo', 'info'); return; }
     if (this.historyIndex <= 0) return;
     this.historyIndex--;
     this.edits = this.history[this.historyIndex].map(e => ({ ...e }));
@@ -3442,6 +3470,7 @@ class PDFEditorApp {
   }
 
   redo() {
+    if (this.mode === 'annotate') { this.annotationManager.redo(); this.updateHistoryButtons(); this.showStatus('Redo', 'info'); return; }
     if (this.historyIndex >= this.history.length - 1) return;
     this.historyIndex++;
     this.edits = this.history[this.historyIndex].map(e => ({ ...e }));
@@ -3453,6 +3482,13 @@ class PDFEditorApp {
   updateHistoryButtons() {
     const u = document.getElementById('undoBtn');
     const r = document.getElementById('redoBtn');
+    // In Highlight mode the buttons reflect the annotation layer's history; otherwise the edit history.
+    if (this.mode === 'annotate') {
+      const am = this.annotationManager;
+      if (u) u.disabled = !am.canUndo();
+      if (r) r.disabled = !am.canRedo();
+      return;
+    }
     if (u) u.disabled = this.historyIndex <= 0;
     if (r) r.disabled = this.historyIndex >= this.history.length - 1;
   }
