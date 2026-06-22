@@ -9,6 +9,7 @@ import { hexToRgb, rgbCss, rgbToHex } from './util/color.js';
 import { readRegion, sampleLineColors, trimCanvas, roundRectPath } from './util/canvas.js';
 import { confirmDialog } from './util/dialog.js';
 import { fontStyleFromPdfjs, familyKeyFromFont } from './util/fonts.js';
+import { NavigationMethods } from './render/navigation.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
 // No external network request is made, so the app works fully offline and never reaches
@@ -221,36 +222,6 @@ class PDFEditorApp {
     });
     document.getElementById('insertBlankBtn')?.addEventListener('click', () => this.insertBlankPage());
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closePagesPanel(); });
-  }
-
-  previousPage() { this.scrollToPage(this.currentPage - 1); }
-  nextPage() { this.scrollToPage(this.currentPage + 1); }
-
-  scrollToPage(i) {
-    const pv = this.pageViews[i];
-    if (!pv) return;
-    pv.wrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    this.currentPage = i;
-    this.updatePageInfo();
-  }
-
-  /** Update the current-page indicator from the scroll position. */
-  updateCurrentPageFromScroll() {
-    const stage = document.getElementById('stage');
-    if (!stage || !this.pageViews.length) return;
-    const mid = stage.scrollTop + stage.clientHeight / 2;
-    let best = 0;
-    for (let i = 0; i < this.pageViews.length; i++) {
-      if (this.pageViews[i].wrapper.offsetTop <= mid) best = i;
-    }
-    if (best !== this.currentPage) { this.currentPage = best; this.updatePageInfo(); }
-  }
-
-  updatePageInfo() {
-    const pageInfo = document.getElementById('pageInfo');
-    if (pageInfo && this.pdfJsDoc) {
-      pageInfo.textContent = `Page ${this.currentPage + 1} of ${this.pdfJsDoc.numPages}`;
-    }
   }
 
   /** Enable all the tools/controls that require a loaded PDF. */
@@ -4446,6 +4417,9 @@ class PDFEditorApp {
     }, kind === 'error' ? 6000 : 4000);
   }
 }
+
+
+Object.assign(PDFEditorApp.prototype, NavigationMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
