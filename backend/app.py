@@ -468,6 +468,76 @@ def _is_latex_subset_font(basefont):
     return bool(_LATEX_FONT_RE.match((basefont or '').split('+')[-1].lower()))
 
 
+# Open, LaTeX-compatible fallback faces (bundled OTF) for re-drawing edited text whose original
+# embedded LaTeX/TeX font can't be reused — so the edit blends with the surrounding LaTeX text
+# instead of dropping to Arial/Times. Latin Modern = the open Computer Modern; TeX Gyre
+# Termes/Heros/Cursor = open Times/Helvetica/Courier (for LaTeX docs that use those families).
+_LATEX_FILES = {
+    'cm': {   # Computer Modern / Latin Modern -> Latin Modern (serif / sans / mono)
+        'serif': {(False, False): 'LMRoman-Regular.otf', (True, False): 'LMRoman-Bold.otf',
+                  (False, True): 'LMRoman-Italic.otf',  (True, True): 'LMRoman-BoldItalic.otf'},
+        'sans':  {(False, False): 'LMSans-Regular.otf',  (True, False): 'LMSans-Bold.otf',
+                  (False, True): 'LMSans-Regular.otf',   (True, True): 'LMSans-Bold.otf'},
+        'mono':  {(False, False): 'LMMono-Regular.otf',  (True, False): 'LMMono-Regular.otf',
+                  (False, True): 'LMMono-Regular.otf',   (True, True): 'LMMono-Regular.otf'},
+    },
+    'times':     {(False, False): 'TeXGyreTermes-Regular.otf', (True, False): 'TeXGyreTermes-Bold.otf',
+                  (False, True): 'TeXGyreTermes-Italic.otf',   (True, True): 'TeXGyreTermes-BoldItalic.otf'},
+    'helvetica': {(False, False): 'TeXGyreHeros-Regular.otf',  (True, False): 'TeXGyreHeros-Bold.otf',
+                  (False, True): 'TeXGyreHeros-Regular.otf',   (True, True): 'TeXGyreHeros-Bold.otf'},
+    'courier':   {(False, False): 'TeXGyreCursor-Regular.otf', (True, False): 'TeXGyreCursor-Regular.otf',
+                  (False, True): 'TeXGyreCursor-Regular.otf',  (True, True): 'TeXGyreCursor-Regular.otf'},
+}
+_LATEX_BOLD_HINTS = ('cmbx', 'cmb', 'bx', 'bold', 'black', 'heavy', 'semibold')
+_LATEX_ITALIC_HINTS = ('cmti', 'cmsl', 'cmmi', 'cmssi', 'cmitt', 'cmsltt', 'italic', 'oblique', 'slanted')
+
+
+def _latex_font_profile(basefont):
+    """If `basefont` is a LaTeX/TeX family, return (shape, family, bold, italic):
+      shape in {'cm','times','helvetica','courier'} chooses the open fallback;
+      family in {'serif','sans','mono'} picks the Latin Modern face.
+    Recognises Computer Modern (CMR/CMBX/CMTI/CMSY/CMMI/CMSS/CMTT…), Latin Modern (LMRoman/LMSans/
+    LMMono…), TeX Gyre (Termes/Heros/Cursor…) and the classic mathptmx/helvet/courier substitutes,
+    including subset names like 'ABCDEF+CMR10' or 'XYZABC+LMRoman10-Regular'. None if not LaTeX/TeX."""
+    raw = (basefont or '').split('+')[-1].lower()
+    nm = raw.replace(' ', '').replace('-', '')
+    cm_lm = bool(_LATEX_FONT_RE.match(raw)) or 'latinmodern' in nm or 'computermodern' in nm \
+        or nm.startswith(('lmroman', 'lmsans', 'lmmono'))
+    times = any(k in nm for k in ('texgyretermes', 'termes', 'nimbusrom', 'pagella', 'bonum', 'schola'))
+    helv = any(k in nm for k in ('texgyreheros', 'heros', 'nimbussans', 'adventor'))
+    cour = any(k in nm for k in ('texgyrecursor', 'cursor', 'nimbusmono'))
+    if not (cm_lm or times or helv or cour):
+        return None
+    bold = any(k in nm for k in _LATEX_BOLD_HINTS)
+    italic = any(k in nm for k in _LATEX_ITALIC_HINTS)
+    if times:
+        return ('times', 'serif', bold, italic)
+    if helv:
+        return ('helvetica', 'sans', bold, italic)
+    if cour:
+        return ('courier', 'mono', bold, italic)
+    if any(k in nm for k in ('cmss', 'lmsans', 'lmss')):
+        fam = 'sans'
+    elif any(k in nm for k in ('cmtt', 'cmitt', 'cmsltt', 'lmmono', 'lmtt')):
+        fam = 'mono'
+    else:
+        fam = 'serif'
+    return ('cm', fam, bold, italic)
+
+
+def _latex_fallback_kwargs(profile, bold, italic):
+    """insert_text kwargs (stable fontname + bundled OTF path) for the open LaTeX-compatible face
+    matching `profile`'s shape/family and the requested weight/slant. None if the file is missing."""
+    shape, family = profile[0], profile[1]
+    key = (bool(bold), bool(italic))
+    table = _LATEX_FILES['cm'][family] if shape == 'cm' else _LATEX_FILES[shape]
+    fname = table.get(key) or table[(False, False)]
+    path = _bundled(fname)
+    if not os.path.exists(path):
+        return None
+    return dict(fontname='lx_%s_%s_%d%d' % (shape, family, int(key[0]), int(key[1])), fontfile=path)
+
+
 def _is_embedded_type1(ext, ftype):
     """An embedded PostScript Type1 / CIDFontType0 outline font (ext 'pfa'/'pfb', or type 'Type1').
 
@@ -666,8 +736,20 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
                     options.insert(0, (dict(fontname=builtin), b14, b14_charset, True))
             except Exception:
                 pass
-    kw = _edit_font_kwargs(want_serif, want_bold, want_italic)   # full fallback (covers Latin)
-    fb = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
+    # Catch-all fallback. For an unreusable LaTeX/TeX original (Computer Modern / Latin Modern /
+    # TeX Gyre) with no explicit dropdown font, redraw with the matching OPEN LaTeX-compatible face
+    # (Latin Modern / TeX Gyre) so the edit blends with the surrounding LaTeX text, instead of
+    # dropping to the generic Arial/Times. A user-chosen toolbar font (handled above) still wins.
+    latex_kw = None
+    if span and _fam_key not in _TOOLBAR_FONTS:
+        prof = _latex_font_profile(span.get('font', ''))
+        if prof:
+            latex_kw = _latex_fallback_kwargs(prof, want_bold or prof[2], want_italic or prof[3])
+    if latex_kw:
+        kw, fb = latex_kw, fitz.Font(fontfile=latex_kw['fontfile'])
+    else:
+        kw = _edit_font_kwargs(want_serif, want_bold, want_italic)   # full fallback (covers Latin)
+        fb = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
     options.append((kw, fb, None, True))          # charset None == catch-all
     return options, size
 
@@ -783,27 +865,48 @@ def _runs_to_segments(runs, base_size, base_bold, base_italic):
     return out if any(parts for parts in out) else None
 
 
-def _detect_align(page, span):
-    """Best-effort alignment of `span`'s line so a replacement of a different length keeps it:
+def _detect_align(page, span, line_left=None, line_right=None):
+    """Best-effort alignment of the edited LINE so a replacement of a different length keeps it:
     'right' for a right-aligned column (several rows end at the SAME x while starting at varying x —
     e.g. résumé dates), 'center' for a line centred in the content area and indented from both
-    margins (e.g. a name title), else 'left'. Conservative: anything unclear stays 'left'."""
+    margins (e.g. a name title), else 'left'. Conservative: anything unclear stays 'left'.
+
+    line_left/line_right (the edit's actual line box) are preferred over the matched span's bbox so
+    the full-width guard sees the WHOLE line. A line spanning most of the content width is body /
+    justified text — and LaTeX justifies paragraphs, so every full line shares the right margin,
+    which otherwise looks like a right-aligned column and shifts the replacement rightward (the
+    'extra space before the text' bug)."""
     if not span:
         return 'left'
-    sx0, _, sx1, _ = span['bbox']
-    boxes = [sp['bbox'] for b in page.get_text("dict").get("blocks", [])
-             for line in b.get("lines", []) for sp in line.get("spans", []) if sp.get('text', '').strip()]
-    if len(boxes) < 3:
+    sx0 = line_left if line_left is not None else span['bbox'][0]
+    sx1 = line_right if line_right is not None else span['bbox'][2]
+    # Per-LINE bounds (merge each text line's spans into one bbox) are far more reliable than raw span
+    # bboxes: a single body line holds many span fragments whose right edges scatter near the margin and
+    # falsely look like a right-aligned column. Collapsing to one bbox per line removes that noise.
+    lines_bb = []
+    for b in page.get_text("dict").get("blocks", []):
+        for line in b.get("lines", []):
+            sp = [s['bbox'] for s in line.get("spans", []) if s.get('text', '').strip()]
+            if sp:
+                lines_bb.append((min(x[0] for x in sp), max(x[2] for x in sp)))
+    if len(lines_bb) < 3:
         return 'left'
-    margin_left = min(b[0] for b in boxes)
-    content_right = max(b[2] for b in boxes)
+    margin_left = min(b[0] for b in lines_bb)
+    content_right = max(b[1] for b in lines_bb)
+    if content_right - margin_left > 1 and (sx1 - sx0) > 0.6 * (content_right - margin_left):
+        return 'left'      # near-full-width line -> body/justified text, never a right column/centre
+    # A line whose left edge sits on a COMMON left margin (shared by several other lines) is left-anchored
+    # text — keep it LEFT even when its right edge happens to align with other lines (a wrapped/justified
+    # body line that ends near a column's right edge). This is the 'gap before the text' fix.
+    if sum(1 for L, _ in lines_bb if abs(L - sx0) < 1.5) >= 3:
+        return 'left'
     indent = sx0 - margin_left
-    # right-aligned column: >=3 rows whose right edge matches this one, lining up tighter on the
-    # right than on the left (so it's a right-aligned column, not a justified/left block).
-    same_right = [b for b in boxes if abs(b[2] - sx1) < 1.5]
-    if len(same_right) >= 3 and indent > 30:
-        l_spread = max(b[0] for b in same_right) - min(b[0] for b in same_right)
-        r_spread = max(b[2] for b in same_right) - min(b[2] for b in same_right)
+    # right-aligned column: >=2 LINES whose right edge matches this one, lining up tighter on the right
+    # than on the left (so it's a right-aligned column — e.g. résumé dates — not a justified/left block).
+    same_right = [(L, R) for L, R in lines_bb if abs(R - sx1) < 1.5]
+    if len(same_right) >= 2 and indent > 30:
+        l_spread = max(L for L, _ in same_right) - min(L for L, _ in same_right)
+        r_spread = max(R for _, R in same_right) - min(R for _, R in same_right)
         if l_spread > r_spread + 1.0:
             return 'right'
     # centred: midpoint near the content centre, clearly indented on both sides.
@@ -1095,7 +1198,9 @@ def edit_pdf():
                     float(edit.get('right', x)), float(edit.get('bottom', 0))))
                 # Detected alignment, so a different-length replacement keeps a right-aligned date
                 # column or a centred title aligned (re-anchored on re-insert), not left-shifted.
-                edit['_align'] = _detect_align(page, edit['_span'])
+                # Pass the line's real box so a full-width (justified) line is recognised and stays
+                # left instead of being re-anchored right.
+                edit['_align'] = _detect_align(page, edit['_span'], x, float(edit.get('right', x)))
 
             # 1) Redact the original text of REPLACE edits, then re-insert the new text.
             #    Insert-only edits (added text / signatures) set redact=False.
@@ -1130,6 +1235,29 @@ def edit_pdf():
                 if hasattr(fitz, 'PDF_REDACT_LINE_ART_NONE'):
                     red_kwargs['graphics'] = fitz.PDF_REDACT_LINE_ART_NONE
                 page.apply_redactions(**red_kwargs)
+
+            # 1b) An UNDERLINED replaced line is re-drawn with a fresh underline at the new text width;
+            #     keeping line art (above) means the ORIGINAL underline survives too, so cover its
+            #     sub-baseline strip with the line's own background before re-inserting. The new text +
+            #     underline are painted on top next, so only one underline (the right width) remains.
+            for edit in page_edits:
+                if not edit.get('redact', True) or edit.get('kind') in ('image', 'erase'):
+                    continue
+                has_ul = bool(edit.get('underline')) or any(
+                    isinstance(r, dict) and r.get('underline')
+                    for ln in (edit.get('runs') or []) for r in (ln or []))
+                if not has_ul:
+                    continue
+                ex = float(edit.get('x', 0)); er = float(edit.get('right', ex))
+                eb = float(edit.get('baseline', 0)); ebot = float(edit.get('bottom', eb))
+                fs = float(edit.get('fontSize', 12) or 12)
+                strip = fitz.Rect(max(0, ex - 1), eb + fs * 0.02,
+                                  min(pw, er + 1), min(ph, max(ebot, eb + fs * 0.30) + 1))
+                if strip.is_empty or strip.is_infinite:
+                    continue
+                bgc = edit.get('bgColor')
+                bg = tuple(max(0.0, min(1.0, c / 255.0)) for c in bgc[:3]) if isinstance(bgc, (list, tuple)) and len(bgc) >= 3 else (1, 1, 1)
+                page.draw_rect(strip, fill=bg, color=None)
 
             # 2) Insert images (signatures/stamps) and re-insert edited text at its baseline.
             for edit in page_edits:

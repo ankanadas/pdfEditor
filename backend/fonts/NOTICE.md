@@ -47,6 +47,26 @@ Palatino, Brush Script) are **never** bundled or embedded.
 | Pacifico          | Pacifico            | OFL-1.1    | Regular weight only |
 | Comic Neue        | Comic Neue          | OFL-1.1    | |
 
+### LaTeX / TeX fallback faces (`.otf`)
+
+Used only to redraw edited *existing* text from LaTeX-generated PDFs, whose embedded subset fonts
+(Computer Modern / Latin Modern / TeX Gyre) can't be safely re-embedded — so the edit blends in
+instead of dropping to Arial/Times. All are GUST e-foundry releases under the **GUST Font License
+(GFL)**, a free, LPPL-based, OFL-compatible licence permitting unrestricted use and redistribution.
+
+| Family            | Files (stem)        | Licence    | Open look-alike for |
+|-------------------|---------------------|------------|---------------------|
+| Latin Modern Roman| LMRoman             | GFL (GUST) | Computer Modern Roman (CMR/CMBX/CMTI) |
+| Latin Modern Sans | LMSans              | GFL (GUST) | Computer Modern Sans (CMSS) |
+| Latin Modern Mono | LMMono              | GFL (GUST) | Computer Modern Typewriter (CMTT) |
+| TeX Gyre Termes   | TeXGyreTermes       | GFL (GUST) | Times-like LaTeX text |
+| TeX Gyre Heros    | TeXGyreHeros        | GFL (GUST) | Helvetica-like LaTeX text |
+| TeX Gyre Cursor   | TeXGyreCursor       | GFL (GUST) | Courier-like LaTeX text |
+
+Fetched from CTAN (`mirrors.ctan.org/fonts/lm`, `.../fonts/tex-gyre`). These carry GUST's own
+internal names ("Latin Modern Roman", "TeX Gyre Termes", …) — never the proprietary originals — and
+no embedded font is ever extracted from a user's PDF into reusable app assets.
+
 Most families ship Regular / Bold / Italic / Bold-Italic; a few publish fewer weights upstream
 (Fira Code has no italic, Pacifico is Regular-only) and reuse their own Regular for the missing
 weights rather than a foreign substitute.
