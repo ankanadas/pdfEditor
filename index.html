@@ -165,8 +165,8 @@
     }
     .tool svg { width: 22px; height: 22px; }
     /* Sticker icons (fun-ui): raster PNGs with transparent backgrounds. */
-    .tool .tool-ico { width: 32px; height: 32px; object-fit: contain; display: block; transition: transform .15s ease; }
-    .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 36px; height: 36px; }
+    .tool .tool-ico { width: 38px; height: 38px; object-fit: contain; display: block; transition: transform .15s ease; }
+    .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 42px; height: 42px; }
     .tool:hover:not(:disabled) .tool-ico { transform: scale(1.08); }
     .tool:disabled .tool-ico { filter: grayscale(.2); }
     .tool:hover:not(:disabled) { background: #f4f4fb; color: var(--ink); }
@@ -221,6 +221,9 @@
       display: none; align-items: center; gap: 10px;
       padding: 12px 16px; background: #f3f1ff; border-bottom: 1px solid #e2dcff;
       flex: 0 0 auto; animation: abIn .15s ease;
+      /* stack above the page canvases (incl. the Fabric annotation layer, z-index 200) so the toolbar's
+         colour popover overlays the page and is clickable rather than sitting behind the canvas */
+      position: relative; z-index: 300;
     }
     @keyframes abIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
     body[data-mode="auto"] .action-bar,
@@ -228,7 +231,9 @@
     body[data-mode="text"] .action-bar,
     body[data-mode="signature"] .action-bar,
     body[data-mode="erase"] .action-bar,
-    body[data-mode="stamp"] .action-bar { display: flex; }
+    body[data-mode="stamp"] .action-bar,
+    body[data-mode="annotate"] .action-bar,
+    body[data-mode="annotate"] .action-bar { display: flex; }
     .ab-step {
       width: 22px; height: 22px; flex: 0 0 auto; border-radius: 50%;
       background: var(--brand); color: #fff; font-size: 12px; font-weight: 700;
@@ -237,6 +242,14 @@
     .ab-label { font-weight: 700; color: var(--brand-dark); font-size: 14px; }
     .ab-hint { font-size: 13px; color: #6a5acd; }
     .ab-or { font-size: 12px; font-weight: 700; color: #8a7fdb; letter-spacing: .5px; }
+    #addFont { padding: 8px 10px; }
+    .ab-toggle {
+      width: 34px; height: 34px; border: 1px solid #c9bfff; background: #fff; color: var(--ink);
+      border-radius: 8px; cursor: pointer; font-size: 14px;
+    }
+    .ab-toggle:hover { background: #efecff; }
+    .ab-toggle.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .ab-toggle i { font-family: Georgia, serif; }
 
     .ctx { display: none; align-items: center; gap: 10px; }
     /* Stamp picker chips (each sets its own --c colour inline) */
@@ -529,7 +542,6 @@
       position: absolute; color: #000; white-space: pre; cursor: move;
       padding: 1px 2px; border: 1px solid transparent; border-radius: 3px;
       z-index: 250; user-select: none;
-      touch-action: none;   /* let pointer-drag move/resize/rotate work on touch (no page scroll/zoom) */
     }
     .insert-overlay:hover { border-color: #6d5efc; background: rgba(109, 94, 252, .06); }
     /* The selected added-text box (toolbar Size resizes it) */
@@ -546,9 +558,6 @@
     }
     .insert-overlay:hover .insert-handle, .insert-overlay:hover .insert-del,
     .insert-overlay:hover .insert-rotate { display: block; }
-    /* Touch has no :hover — show the handles when the overlay is active/selected (set on tap). */
-    .insert-overlay.sig-active .insert-handle, .insert-overlay.sig-active .insert-del,
-    .insert-overlay.sig-active .insert-rotate { display: block; }
     .insert-overlay.insert-image { padding: 0; }
     .insert-overlay.insert-image img { display: block; width: 100%; height: 100%; pointer-events: none; }
     /* Rotation handle: a wide, transparent hit-strip that bridges from the knob (above the
@@ -566,45 +575,6 @@
       background: #6d5efc;
     }
     .insert-rotate:active { cursor: grabbing; }
-
-    /* Ghost signature preview that follows the cursor/finger before placement (Sejda-style).
-       Semi-transparent, no border, click-through (pointer-events:none), GPU-friendly transform. */
-    .sig-ghost {
-      position: fixed; left: 0; top: 0; z-index: 1200; pointer-events: none;
-      opacity: .55; border: none; object-fit: contain; will-change: transform;
-    }
-    body.placing-signature .page-canvas { cursor: crosshair; }
-
-    /* Saved-signatures picker popover (appears beside the Sign tool) */
-    .sign-picker {
-      position: fixed; z-index: 1100; width: 232px; max-width: 88vw;
-      background: #fff; border: 1px solid #d9d4ff; border-radius: 12px; padding: 10px;
-      box-shadow: 0 14px 40px rgba(20, 22, 40, .26);
-    }
-    .sign-picker[hidden] { display: none; }
-    .sign-picker-title {
-      font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase;
-      letter-spacing: .4px; margin: 2px 2px 8px;
-    }
-    .sign-picker-list { display: flex; flex-direction: column; gap: 8px; max-height: 256px; overflow-y: auto; }
-    .sign-pick-item { position: relative; display: flex; }
-    .sign-pick-thumb {
-      flex: 1; min-height: 48px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 9px;
-      background: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    }
-    .sign-pick-thumb:hover { border-color: var(--brand); background: #f6f5ff; }
-    .sign-pick-thumb img { max-width: 100%; max-height: 46px; object-fit: contain; pointer-events: none; }
-    .sign-pick-del {
-      position: absolute; top: -7px; right: -7px; width: 22px; height: 22px; border-radius: 50%;
-      border: 2px solid #fff; background: #e5484d; color: #fff; font-size: 14px; line-height: 1;
-      cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.25);
-    }
-    .sign-picker-add {
-      width: 100%; margin-top: 10px; padding: 11px 12px; border: 1px dashed var(--brand);
-      border-radius: 9px; background: #efecff; color: var(--brand-dark); font-weight: 700;
-      font-size: 13.5px; cursor: pointer;
-    }
-    .sign-picker-add:hover { background: #e6e1ff; }
 
     /* Draw-your-signature pad */
     .signpad-backdrop {
@@ -1005,90 +975,101 @@
     .pw-actions { display: flex; gap: 10px; margin-top: 18px; }
     .pw-actions .btn { flex: 1; justify-content: center; padding: 11px 14px; font-weight: 700; }
 
-    /* =====================================================================================
-       MOBILE / PHONE LAYOUT  (≤767px)
-       Tablet & desktop (≥768px) are intentionally untouched — every rule below is scoped to
-       this media query and only REPOSITIONS existing elements (no new DOM, no JS, no scale
-       transforms). The page canvas keeps max-width:100% and the app's getBoundingClientRect
-       based coordinate mapping, so editing stays pixel-accurate at any width and scroll.
-       ===================================================================================== */
-    @media (max-width: 767px) {
-      /* ---- Header (app bar) + Open/Save/pager toolbar: compact, touch-friendly, wraps ---- */
-      .promobar { font-size: 12px; padding: 6px 12px; }
-      .appbar { padding: 8px 12px; gap: 8px; }
-      .logo { font-size: 15px; }
-      .logo .mark { width: 26px; height: 26px; font-size: 14px; }
-      .icon-btn { width: 44px; height: 44px; }            /* Help — 44×44 touch target */
-
-      .toolbar { padding: 8px 10px; gap: 8px; }           /* .toolbar is already flex-wrap:wrap */
-      .toolbar .btn { min-height: 44px; padding: 10px 12px; }
-      .toolbar .divider { display: none; }                /* dividers add noise once wrapped */
-      #fileName { max-width: 120px; }
-      .mode-indicator { display: none; }                  /* reclaim horizontal space */
-
-      /* Contextual action bar: keep the controls, drop the long helper sentences */
-      #actionBar { flex-wrap: wrap; padding: 6px 10px; gap: 8px; }
-      #actionBar .ab-hint { display: none; }
-
-      /* ---- Workspace: stack vertically — PDF on top (scrolls), tools docked at the bottom ---- */
-      .workspace { flex-direction: column; min-height: 0; }
-      .main { order: 0; flex: 1 1 auto; min-height: 0; }
-
-      /* Side rails -> a horizontal, full-width, horizontally-scrollable tool dock below the PDF.
-         Two compact rows (primary tools, then document tools); each scrolls if it overflows. */
-      .sidebar, .rightbar {
-        order: 1; flex: 0 0 auto; width: 100%; max-width: 100%;
-        flex-direction: row; align-items: stretch; justify-content: flex-start;
-        gap: 6px; padding: 6px 8px; border: none; border-top: 1px solid var(--line);
-        overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
-      }
-      .rightbar { order: 2; border-top: none; }           /* sits flush under the first dock row */
-      .sidebar .sep { display: none; }
-      .sidebar .tool, .rightbar .tool {
-        flex: 0 0 auto; width: auto; min-width: 60px; min-height: 48px;   /* ≥44px touch targets */
-        padding: 6px 10px; gap: 3px; font-size: 11px;
-      }
-      .sidebar .tool .tool-ico, .rightbar .tool .tool-ico { width: 26px; height: 26px; }
-      .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 28px; height: 28px; }
-      /* Keep the landing clean: only show the (disabled) dock once a PDF is open. */
-      body:not(.has-pdf) .sidebar, body:not(.has-pdf) .rightbar { display: none; }
-
-      /* ---- PDF workspace: almost full width, minimal margins, natural vertical scroll ---- */
-      .stage { padding: 8px 6px 14px; }
-      .landing { padding: 0 6px; }
-      .landing h1 { font-size: 24px; }
-
-      /* ---- Footer: compact; never overlaps (it is the last in-flow flex item) ---- */
-      .appfoot { padding: 6px 10px; gap: 4px 12px; font-size: 11px; }
-      .appfoot .foot-badge { display: none; }
-
-      /* ---- Floating text toolbar: pin in-bounds at the bottom, swipe horizontally ---- */
-      #textToolbar.show {
-        left: 6px !important; right: 6px !important; top: auto !important;
-        bottom: calc(env(safe-area-inset-bottom, 0px) + 6px) !important;
-        width: auto !important; max-width: calc(100vw - 12px);
-        flex-wrap: nowrap; overflow-x: auto; overflow-y: visible;
-        -webkit-overflow-scrolling: touch; padding: 6px;
-      }
-      #textToolbar.show > * { flex: 0 0 auto; }            /* don't squash controls; scroll instead */
-      .tt-btn { min-width: 40px; height: 40px; }
-      .tt-num { width: 52px; height: 40px; }
-      .tt-sel, .tt-font-btn { height: 40px; }
-      .tt-font-btn { min-width: 118px; max-width: 150px; }
-      /* Popups become bottom sheets so a horizontally-scrolling toolbar can never clip them. */
-      .tt-font-pop, .tt-color-pop, .tt-link-pop {
-        position: fixed; left: 8px; right: 8px; top: auto; bottom: 58px;
-        transform: none; width: auto; max-width: calc(100vw - 16px);
-        max-height: 50vh; overflow: auto;
-      }
-      .tt-color-pop { grid-template-columns: repeat(8, 1fr); justify-items: center; }
-
-      /* Bigger signature-overlay handles so they're tappable with a finger. */
-      .insert-handle { width: 22px; height: 22px; right: -11px; bottom: -11px; }
-      .insert-del { width: 28px; height: 28px; line-height: 24px; font-size: 16px; right: -13px; top: -15px; }
-      .insert-rotate { width: 46px; height: 46px; top: -42px; margin-left: -23px; }
-      .insert-rotate::after { width: 18px; height: 18px; margin-left: -9px; }
+    /* ===================== Annotation tool suite (Phase 3) ===================== */
+    /* Fabric.js canvas container — sits over each page canvas */
+    .fabric-layer-container {
+      position: absolute; top: 0; left: 0;
+      transform-origin: top left;
+      z-index: 200; pointer-events: none;
+      /* Fabric generates two <canvas> elements inside here */
     }
+    body[data-mode="annotate"] .fabric-layer-container { pointer-events: all; }
+    /* Fabric's upper canvas must show on top */
+    .fabric-layer-container canvas { display: block; position: absolute; top: 0; left: 0; }
+    .fabric-layer-container canvas:first-child { position: static; }
+
+    /* Annotation contextual toolbar shown in the action-bar */
+    body[data-mode="annotate"] .ctx-annotate { display: flex; }
+    /* Keep the whole toolbar on ONE row (never wrap to a 2nd line). NO overflow clipping here, so the
+       colour popover can drop below the bar; the controls are compact enough to fit at common widths. */
+    .ctx-annotate { flex-wrap: nowrap; gap: 6px; align-items: center; flex: 1 1 auto; min-width: 0; }
+    .ctx-annotate > * { flex: 0 0 auto; }
+    /* push Delete to the right so leftover space sits between Opacity and Delete (fills wide screens, collapses on narrow) */
+    #ann-delete { margin-left: auto; }
+    /* faint, softly-faded vertical dividers between groups (Tools | Color | Size | Opacity | Delete) */
+    .ctx-annotate .ann-sep {
+      width: 1px; height: 26px; margin: 0 2px; border: none; align-self: center;
+      background: linear-gradient(to bottom, transparent, #d9d2ff 16%, #d9d2ff 84%, transparent);
+    }
+    .ann-tool-btn {
+      display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+      border: 1px solid var(--line); background: #fff; color: var(--ink);
+      padding: 6px 10px; border-radius: 9px; font-size: 13px; font-weight: 600;
+      transition: all .14s ease; white-space: nowrap;
+    }
+    .ann-tool-btn svg { width: 16px; height: 16px; flex: 0 0 auto; }
+    #ann-freeHighlight, #ann-highlight { padding-left: 13px; padding-right: 13px; }
+    .ann-tool-btn:hover { background: #f1eeff; border-color: #c9bfff; }
+    .ann-tool-btn.active {
+      background: var(--brand); border-color: var(--brand); color: #fff;
+      box-shadow: 0 3px 10px rgba(109,94,252,.32);
+    }
+    /* Delete: small, compact button kept inline on the same row as the rest of the controls */
+    #ann-delete { padding: 5px 9px; gap: 4px; }
+    #ann-delete svg { width: 13px; height: 13px; }
+    /* Color / Size / Opacity sit in soft rounded pastel cards so they read as distinct, premium
+       controls. Cosmetic only — scoped to the annotation toolbar (the shared text-toolbar swatch,
+       .tt-color-sw, is untouched). */
+    .ann-color-wrap, .ann-slider-wrap {
+      display: inline-flex; align-items: center;
+      background: #f6f4ff; border: 1px solid #e7e2ff; border-radius: 11px;
+      margin: 0 1px; transition: background .14s ease, border-color .14s ease;
+    }
+    .ann-color-wrap { gap: 6px; padding: 4px 7px; }
+    .ann-slider-wrap { gap: 7px; padding: 4px 8px; }
+    .ann-color-wrap:hover, .ann-slider-wrap:hover { background: #efeaff; border-color: #cdc2ff; }
+    /* a control that doesn't apply to the active tool (e.g. Size for Text-HL) is shown dimmed + inert */
+    .ann-slider-wrap.ann-off { opacity: .42; pointer-events: none; filter: grayscale(.5); }
+    .ann-color-label, .ann-slider-label { font-size: 12.5px; color: #3f3678; font-weight: 700; letter-spacing: .01em; }
+    /* prominent colour swatch in its card */
+    #ann-color-btn { padding: 0; border: none; background: none; height: auto; line-height: 0; }
+    #ann-color-sw {
+      width: 22px; height: 22px; border-radius: 6px; border: 2px solid #fff;
+      box-shadow: 0 0 0 1px rgba(60,40,120,.22), 0 1px 3px rgba(60,40,120,.22);
+      transition: transform .12s ease, box-shadow .12s ease;
+    }
+    #ann-color-btn:hover #ann-color-sw { transform: scale(1.06); box-shadow: 0 0 0 1px rgba(109,94,252,.5), 0 2px 6px rgba(109,94,252,.3); }
+    /* Themed sliders: the USED (filled) portion + thumb render purple, the rest grey — via the browser's
+       native accent-color (a custom track can't follow the value without JS). Slightly taller for weight. */
+    .ann-slider { width: 76px; height: 18px; cursor: pointer; accent-color: var(--brand); }
+
+    /* Table insert dialog */
+    #ann-table-dlg {
+      display: none; position: fixed; inset: 0; z-index: 1300;
+      align-items: center; justify-content: center;
+      background: rgba(20,22,40,.45);
+    }
+    .ann-dlg-box {
+      background: #fff; border-radius: 16px; padding: 24px 26px 20px;
+      box-shadow: 0 20px 60px rgba(20,22,40,.32); width: 280px;
+    }
+    .ann-dlg-title { font-weight: 700; font-size: 16px; margin-bottom: 14px; color: var(--ink); }
+    .ann-dlg-row { display: flex; gap: 16px; margin-bottom: 18px; }
+    .ann-dlg-row label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 600; color: var(--muted); flex: 1; }
+    .ann-dlg-num {
+      padding: 8px 10px; border: 1px solid #c9bfff; border-radius: 8px; font-size: 15px;
+      outline: none; width: 100%; box-sizing: border-box;
+    }
+    .ann-dlg-num:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(109,94,252,.18); }
+    .ann-dlg-actions { display: flex; gap: 10px; }
+    .ann-dlg-btn {
+      flex: 1; padding: 9px 14px; border: 1px solid var(--line); border-radius: 9px;
+      background: #fff; cursor: pointer; font-size: 13.5px; font-weight: 700; color: var(--ink);
+      transition: all .14s ease;
+    }
+    .ann-dlg-btn:hover { background: #f6f7fb; }
+    .ann-dlg-btn-primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .ann-dlg-btn-primary:hover { background: var(--brand-dark); }
   </style>
 </head>
 <body>
@@ -1119,6 +1100,10 @@
       <button class="tool" id="textModeBtn" disabled title="Add new text">
         <img class="tool-ico" src="/assets/fun-ui/add.png" alt="" aria-hidden="true">
         Add
+      </button>
+      <button class="tool" id="annotateModeBtn" disabled title="Highlight: highlight text, insert shapes and tables">
+        <img class="tool-ico" src="/assets/fun-ui/Highlight.png" alt="" aria-hidden="true">
+        Highlight
       </button>
       <button class="tool featured" id="signatureModeBtn" disabled title="Most useful: type, draw or upload a signature">
         <img class="tool-ico" src="/assets/fun-ui/sign.png" alt="" aria-hidden="true">
@@ -1156,9 +1141,11 @@
 
         <button class="btn" id="undoBtn" disabled title="Undo (Cmd/Ctrl+Z)" aria-label="Undo">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-1"/></svg>
+          Undo
         </button>
         <button class="btn" id="redoBtn" disabled title="Redo (Cmd/Ctrl+Shift+Z)" aria-label="Redo">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h1"/></svg>
+          Redo
         </button>
 
         <div class="divider"></div>
@@ -1188,9 +1175,16 @@
           <span class="ab-hint">Click any line on the page and type to change it.</span>
         </div>
         <div class="ctx ctx-text">
-          <!-- Label doubles as the instruction. Click the page to drop a text box, then style it
-               (font, size, B/I/U, colour, alignment, link, …) in the floating text toolbar. -->
-          <span class="ab-label">Add Text • Click anywhere on the page to place new text</span>
+          <span class="ab-label">Add text</span>
+          <select id="addFont" class="field" title="Font" aria-label="Font family for added text">
+            <option value="sans">Sans</option>
+            <option value="serif">Serif</option>
+            <option value="mono">Mono</option>
+          </select>
+          <input type="number" id="addSize" class="field" min="4" max="200" step="1" value="14" title="Font size (applies to the selected text)" aria-label="Font size in points" />
+          <button class="ab-toggle" id="addBold" type="button" title="Bold (applies to the selected text)"><b>B</b></button>
+          <button class="ab-toggle" id="addItalic" type="button" title="Italic (applies to the selected text)"><i>I</i></button>
+          <span class="ab-hint">→ click the page &amp; type · Enter = new line · select text, then set size / B / I here</span>
         </div>
         <div class="ctx ctx-erase">
           <span class="ab-label">Erase</span>
@@ -1211,6 +1205,62 @@
             Upload stamp
           </label>
           <span class="ab-hint">→ pick a stamp, then click on the page to place it</span>
+        </div>
+
+        <!-- Annotation sub-tool bar (Phase 3) -->
+        <div class="ctx ctx-annotate">
+          <span class="ab-label">Highlight</span>
+          <!-- Sub-tools -->
+          <button class="ann-tool-btn" id="ann-freeHighlight" type="button" title="Freehand highlighter">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l-6 6v3h3l6-6"/><path d="M22 4a2.83 2.83 0 0 0-4 0l-5 5 4 4 5-5a2.83 2.83 0 0 0 0-4Z"/></svg>
+            Highlight
+          </button>
+          <button class="ann-tool-btn" id="ann-highlight" type="button" title="Highlight PDF text">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="14" width="18" height="7" rx="1"/><path d="M7 14V7a5 5 0 0 1 10 0v7"/></svg>
+            Text HL
+          </button>
+          <span class="ann-sep"></span>
+          <button class="ann-tool-btn" id="ann-line" type="button" title="Draw a line">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="19" x2="19" y2="5"/></svg>
+            Line
+          </button>
+          <button class="ann-tool-btn" id="ann-rect" type="button" title="Draw a rectangle">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/></svg>
+            Rect
+          </button>
+          <button class="ann-tool-btn" id="ann-circle" type="button" title="Draw a circle / ellipse">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/></svg>
+            Circle
+          </button>
+          <button class="ann-tool-btn" id="ann-table" type="button" title="Insert a table grid">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>
+            Table
+          </button>
+          <span class="ann-sep"></span>
+          <!-- Pen / stroke colour — same swatch popover as the text floating toolbar (built by app.js). -->
+          <div class="ann-color-wrap">
+            <span class="ann-color-label">Color</span>
+            <div class="tt-color-wrap">
+              <button class="tt-btn tt-color-btn" id="ann-color-btn" type="button" title="Highlight colour" aria-label="Highlight colour"><span class="tt-color-sw" id="ann-color-sw"></span></button>
+              <div class="tt-color-pop" id="ann-color-pop" hidden></div>
+            </div>
+          </div>
+          <span class="ann-sep"></span>
+          <!-- Stroke width (persists across tools; not applicable to Text-HL / Table → shown disabled) -->
+          <div class="ann-slider-wrap" id="ann-size-wrap">
+            <span class="ann-slider-label">Size</span>
+            <input type="range" id="ann-width" class="ann-slider" min="1" max="20" value="3" title="Stroke width" aria-label="Stroke width">
+          </div>
+          <span class="ann-sep"></span>
+          <!-- Highlight opacity (persists across tools) -->
+          <div class="ann-slider-wrap" id="ann-opacity-wrap">
+            <span class="ann-slider-label">Opacity</span>
+            <input type="range" id="ann-opacity" class="ann-slider" min="10" max="90" value="40" title="Highlight opacity" aria-label="Highlight opacity">
+          </div>
+          <button class="ann-tool-btn" id="ann-delete" type="button" title="Delete selected annotation" style="color:#e5484d;border-color:#f6cecf">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+            Delete
+          </button>
         </div>
       </div>
 
@@ -1235,7 +1285,7 @@
             <div class="big">Drag &amp; drop your PDF here</div>
             <div class="or">or</div>
             <span class="btn primary" style="pointer-events:none">Upload PDF</span>
-            <div class="or" style="margin-top:14px">PDF files up to 30 MB</div>
+            <div class="or" style="margin-top:14px">PDF files up to 100 MB</div>
           </label>
         </div>
 
@@ -1435,15 +1485,6 @@
         <button class="btn primary" id="signPadAdd" type="button">Add to page</button>
       </div>
     </div>
-  </div>
-
-  <!-- Signature picker: a small popover beside the Sign tool listing the user's saved signatures
-       (tap a thumbnail to place it) plus "Add new signature" (opens the dialog above). Saved
-       signatures live in localStorage only — nothing leaves the device. Positioned by app.js. -->
-  <div id="signPicker" class="sign-picker" hidden role="dialog" aria-label="Your saved signatures">
-    <div class="sign-picker-title">Your signatures</div>
-    <div class="sign-picker-list" id="signPickerList"></div>
-    <button class="sign-picker-add" id="signPickerAdd" type="button">+ Add new signature</button>
   </div>
 
   <!-- Pages manager: drag thumbnails to reorder, hover to delete, insert blank pages -->
