@@ -4,6 +4,9 @@ import * as pdfjsLib from 'pdfjs-dist';
 import { confirmDialog } from '../util/dialog.js';
 import { PDFBackendService } from '../services/pdfBackendService.js';
 
+const MAX_FILE_MB = 30;
+const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
+
 export const FileIOMethods = {
   /** Enable all the tools/controls that require a loaded PDF. */
   enableUiAfterLoad() {
