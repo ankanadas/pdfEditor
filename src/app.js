@@ -5,6 +5,7 @@ import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { AnnotationManager } from './annotationManager.js';
 import { loadImage, imageRatio } from './util/image.js';
+import { hexToRgb, rgbCss, rgbToHex } from './util/color.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
 // No external network request is made, so the app works fully offline and never reaches
@@ -859,7 +860,7 @@ class PDFEditorApp {
         if (b > a) {
           const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           div.innerHTML = esc(shownText.slice(0, a))
-            + `<span class="tt-has-link" style="color:${this._rgbCss(PDFEditorApp.LINK_BLUE)};text-decoration:underline">${esc(shownText.slice(a, b))}</span>`
+            + `<span class="tt-has-link" style="color:${rgbCss(PDFEditorApp.LINK_BLUE)};text-decoration:underline">${esc(shownText.slice(a, b))}</span>`
             + esc(shownText.slice(b));
         }
       } else if (line.styleRuns && line.styleRuns.length) {
@@ -1736,7 +1737,7 @@ class PDFEditorApp {
       else if (kind === 'bold') { span.setAttribute('data-bold', value ? '1' : '0'); span.style.fontWeight = value ? 'bold' : 'normal'; }
       else if (kind === 'italic') { span.setAttribute('data-italic', value ? '1' : '0'); span.style.fontStyle = value ? 'italic' : 'normal'; }
       else if (kind === 'underline') { if (value) { span.setAttribute('data-underline', '1'); span.style.textDecoration = 'underline'; } else { span.removeAttribute('data-underline'); span.style.textDecoration = 'none'; } }
-      else if (kind === 'color') { const hex = this._rgbToHex(value); span.setAttribute('data-color', hex); span.style.color = this._rgbCss(value); }
+      else if (kind === 'color') { const hex = rgbToHex(value); span.setAttribute('data-color', hex); span.style.color = rgbCss(value); }
       else if (kind === 'link') { if (value) { span.setAttribute('data-link', value); span.classList.add('tt-has-link'); } else { span.removeAttribute('data-link'); span.classList.remove('tt-has-link'); } }
     };
     const styledSpan = (st) => {
@@ -1811,7 +1812,7 @@ class PDFEditorApp {
         if (!fB && node.hasAttribute('data-bold')) { st.bold = node.getAttribute('data-bold') === '1'; fB = true; }
         if (!fI && node.hasAttribute('data-italic')) { st.italic = node.getAttribute('data-italic') === '1'; fI = true; }
         if (!fU && node.hasAttribute('data-underline')) { st.underline = node.getAttribute('data-underline') === '1'; fU = true; }
-        if (!fC && node.hasAttribute('data-color')) { st.color = this._hexToRgb(node.getAttribute('data-color')); fC = true; }
+        if (!fC && node.hasAttribute('data-color')) { st.color = hexToRgb(node.getAttribute('data-color')); fC = true; }
         if (!fL && node.hasAttribute('data-link')) { st.link = node.getAttribute('data-link'); fL = true; }
         node = node.parentNode;
       }
@@ -2052,7 +2053,7 @@ class PDFEditorApp {
         const b = child.getAttribute('data-bold'); if (b !== null) st.bold = b === '1';
         const i = child.getAttribute('data-italic'); if (i !== null) st.italic = i === '1';
         if (child.hasAttribute('data-underline')) st.underline = child.getAttribute('data-underline') === '1';
-        const c = child.getAttribute('data-color'); if (c) st.color = this._hexToRgb(c);
+        const c = child.getAttribute('data-color'); if (c) st.color = hexToRgb(c);
         const lk = child.getAttribute('data-link'); if (lk !== null) st.link = lk;
       }
       return st;
@@ -2821,7 +2822,7 @@ class PDFEditorApp {
         div.innerHTML = edit.runs.map(line =>
           line.map(r => {
             const css = `font-size:${r.size * unit}px;font-weight:${r.bold ? 'bold' : 'normal'};font-style:${r.italic ? 'italic' : 'normal'}`
-              + (r.underline || r.link ? ';text-decoration:underline' : '') + (r.color ? `;color:${this._rgbCss(r.color)}` : '');
+              + (r.underline || r.link ? ';text-decoration:underline' : '') + (r.color ? `;color:${rgbCss(r.color)}` : '');
             return `<span style="${css}">${esc(r.text)}</span>`;
           }).join('')
         ).join('<br>');
@@ -2847,7 +2848,7 @@ class PDFEditorApp {
         div.style.fontFamily = this._familyCss(edit.fontFamily);
         // Whole-box styles set via the floating toolbar (color / underline / opacity / alignment)
         // must survive the commit + static re-render, exactly as the live editor showed them.
-        if (edit.color != null) div.style.color = this._rgbCss(edit.color);
+        if (edit.color != null) div.style.color = rgbCss(edit.color);
         if (edit.underline) div.style.textDecoration = 'underline';
         if (edit.opacity != null) div.style.opacity = edit.opacity;
         if (edit.align) div.style.textAlign = edit.align;
@@ -2932,9 +2933,6 @@ class PDFEditorApp {
   }
 
   _overlayElFor(edit) { return this.insertOverlays.find(o => o.__edit === edit) || null; }
-  _hexToRgb(h) { h = (h || '').replace('#', ''); return [parseInt(h.slice(0, 2), 16) || 0, parseInt(h.slice(2, 4), 16) || 0, parseInt(h.slice(4, 6), 16) || 0]; }
-  _rgbCss(c) { return Array.isArray(c) ? `rgb(${c[0]},${c[1]},${c[2]})` : (c || '#000'); }
-  _rgbToHex(c) { return Array.isArray(c) ? '#' + c.map(x => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('') : '#000000'; }
   /** The full font catalogue shown in the picker: { key, name, tag, css }. `css` is the on-screen
    *  PREVIEW / editor font-family — the proprietary name first (so a user who has it installed sees
    *  it), then the bundled open `pf-*` face (always available, what the PDF actually embeds), then a
@@ -3149,7 +3147,7 @@ class PDFEditorApp {
   /** Build the Sejda-style swatch palette popover and wire it to applyTextStyle('color', …). */
   _initColorPalette() {
     this._buildColorPopover('tt-color-btn', 'tt-color-pop', (hex) => {
-      this.applyTextStyle('color', this._hexToRgb(hex));
+      this.applyTextStyle('color', hexToRgb(hex));
       this._setColorSwatch(hex, 'tt-color-sw');
     });
   }
@@ -3317,7 +3315,7 @@ class PDFEditorApp {
     // (LaTeX/Computer-Modern, etc.) shows "Original" (the editor preserves it — not an Arial default);
     // otherwise the "Select a Font Style" placeholder (added text).
     this._setFontPickerValue(s.family || '', s.fontOriginal ? 'Original' : undefined);
-    this._setColorSwatch(s.color ? this._rgbToHex(s.color) : '#000000');
+    this._setColorSwatch(s.color ? rgbToHex(s.color) : '#000000');
     set('tt-opacity', Math.round((s.opacity == null ? 1 : s.opacity) * 100));
   }
 
@@ -3388,7 +3386,7 @@ class PDFEditorApp {
     this._setLink(l, uri);
     div.classList.toggle('tt-has-link', !!l.link);
     if (uri) {
-      if (l.color == null) { l.color = BLUE; div.style.color = this._rgbCss(BLUE); }
+      if (l.color == null) { l.color = BLUE; div.style.color = rgbCss(BLUE); }
       l.underline = true; div.style.textDecoration = 'underline';
     }
     this.trackEdit(this.lineToEdit(l, text));
@@ -3411,7 +3409,7 @@ class PDFEditorApp {
 
   /** Default a whole text object's link look to blue + underline, unless a colour is already set. */
   _defaultLinkStyle(edit, el) {
-    if (edit.color == null) { edit.color = PDFEditorApp.LINK_BLUE; if (el) el.style.color = this._rgbCss(edit.color); }
+    if (edit.color == null) { edit.color = PDFEditorApp.LINK_BLUE; if (el) el.style.color = rgbCss(edit.color); }
     edit.underline = true; if (el) el.style.textDecoration = 'underline';
   }
 
@@ -3458,7 +3456,7 @@ class PDFEditorApp {
   _restyleEditorDiv(div, kind, value) {
     if (!div) return;
     if (kind === 'underline') div.style.textDecoration = value ? 'underline' : 'none';
-    else if (kind === 'color') div.style.color = this._rgbCss(value);
+    else if (kind === 'color') div.style.color = rgbCss(value);
     else if (kind === 'opacity') div.style.opacity = value;
     else if (kind === 'align') div.style.textAlign = value;
     else if (kind === 'family') div.style.fontFamily = this._familyCss(value);
@@ -3502,7 +3500,7 @@ class PDFEditorApp {
     else if (kind === 'italic') { l.italic = !!value; div.style.fontStyle = value ? 'italic' : 'normal'; }
     else if (kind === 'underline') { l.underline = !!value; div.style.textDecoration = value ? 'underline' : 'none'; }
     else if (kind === 'size') { l.fontSizePx = value * this.scale; l.sizeOverridden = true; div.style.fontSize = (value * this.scale * (div.__displayScale || 1)) + 'px'; }
-    else if (kind === 'color') { l.color = value; div.style.color = this._rgbCss(value); }
+    else if (kind === 'color') { l.color = value; div.style.color = rgbCss(value); }
     else if (kind === 'opacity') { l.opacity = value; div.style.opacity = value; }
     else if (kind === 'align') { l.align = value; div.style.textAlign = value; }
     else if (kind === 'family') { l.fontFamily = value; div.style.fontFamily = this._familyCss(value); }
