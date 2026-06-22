@@ -1,14 +1,18 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
+# pyrefly: ignore [missing-import]
 from flask_limiter.util import get_remote_address
+# pyrefly: ignore [missing-import]
 from werkzeug.middleware.proxy_fix import ProxyFix
+# pyrefly: ignore [missing-import]
 import fitz  # PyMuPDF
 import base64
 import io
 import math
 import os
 import re
+# pyrefly: ignore [missing-import]
 from PIL import Image
 
 app = Flask(__name__)
@@ -1378,13 +1382,22 @@ def edit_pdf():
                     # Convert back to PyMuPDF rect: (x0, y0, x1, y1) in page top-left space.
                     rect = fitz.Rect(x, ph - y - h, x + w, ph - y)
                     try:
-                        hl = page.add_highlight_annot(rect)
-                        hl.set_colors(stroke=fill_color)
+                        # add_highlight_annot prefers an explicit fitz.Quad so the quad
+                        # array in the annotation /QuadPoints entry is correct in all
+                        # PyMuPDF versions (passing a bare Rect can produce a 1-point
+                        # default quad in older builds, giving an invisible annotation).
+                        quad = rect.quad
+                        hl = page.add_highlight_annot(quad)
+                        # PDF highlight annotations use "stroke" as the ink colour key.
+                        # We also set "fill" so viewers that use either field render it.
+                        hl.set_colors(stroke=fill_color, fill=fill_color)
                         hl.set_opacity(opacity)
                         hl.update()
                     except Exception:
-                        # Fallback: draw a semi-transparent filled rect if add_highlight_annot fails
-                        page.draw_rect(rect, color=None, fill=fill_color, fill_opacity=opacity)
+                        # Fallback: draw a semi-transparent filled rect if
+                        # add_highlight_annot fails (e.g. very old PyMuPDF).
+                        page.draw_rect(rect, color=None, fill=fill_color,
+                                       fill_opacity=opacity)
 
                 elif kind == 'ann-rect':
                     x = float(ann.get('x', 0))

@@ -286,28 +286,38 @@ export class AnnotationManager {
       // If the click landed on an existing object (moving a highlight), skip
       if (opt.target) return;
 
-      // The Fabric canvas lives inside a CSS-scaled container
-      // (transform:scale(displayScale)). Fabric reads the canvas element's
-      // getBoundingClientRect() which, for a CSS-transformed element, returns
-      // the *rendered* (CSS-display) dimensions — i.e. intrinsic × displayScale.
-      // Fabric therefore maps mouse offsets into canvas-space correctly, but only
-      // when scenePoint is available (Fabric 6+). The absolutePointer fallback can
-      // return raw CSS pixels. To be safe, we always normalise by displayScale.
+      // Coordinate mapping:
+      // The Fabric canvas element has intrinsic dimensions equal to the full
+      // canvas pixel size. Its container div is CSS-scaled down via
+      // transform:scale(displayScale) to fit the viewport. Fabric 6 reads the
+      // canvas's getBoundingClientRect (which returns rendered/CSS dimensions)
+      // and accounts for the transform internally, so opt.scenePoint is already
+      // expressed in INTRINSIC canvas pixels — no further division needed.
+      //
+      // The absolutePointer fallback (Fabric <6 or edge cases) returns raw CSS
+      // pixels, so it still needs the / displayScale conversion.
       const displayScale = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
-      const p = opt.scenePoint ?? opt.absolutePointer;
-      // scenePoint is already in intrinsic canvas pixels when Fabric accounts for the
-      // CSS scale correctly; if not (older Fabric / fallback), dividing by displayScale
-      // converts CSS pixels → intrinsic canvas pixels.
-      const canvasX = p.x / displayScale;
-      const canvasY = p.y / displayScale;
+      let canvasX, canvasY;
+      if (opt.scenePoint) {
+        // scenePoint: already in intrinsic canvas px — use as-is.
+        canvasX = opt.scenePoint.x;
+        canvasY = opt.scenePoint.y;
+      } else {
+        // absolutePointer: CSS px → intrinsic canvas px.
+        canvasX = opt.absolutePointer.x / displayScale;
+        canvasY = opt.absolutePointer.y / displayScale;
+      }
 
       // Find the text item whose bounding box contains the click.
-      // extractedTextItems coords are intrinsic canvas pixels (this.scale applied).
+      // extractedTextItems coords are intrinsic canvas pixels (app.scale applied).
+      // Expand the hit zone slightly vertically so clicking near cap-height or
+      // descender still registers — text items include both ascent and descent.
+      const HIT_EXPAND = 4; // px, intrinsic canvas space
       const items = this.app.extractedTextItems.filter(i => i.pageIndex === pageIndex);
       let hit = null;
       for (const item of items) {
         if (canvasX >= item.left && canvasX <= item.right &&
-            canvasY >= item.top  && canvasY <= item.bottom) {
+            canvasY >= (item.top - HIT_EXPAND) && canvasY <= (item.bottom + HIT_EXPAND)) {
           hit = item;
           break;
         }
@@ -315,13 +325,23 @@ export class AnnotationManager {
 
       if (!hit) return;
 
+      // Tighten the highlight box so it hugs the visual glyph bounds.
+      // PDF.js sets top  = baseline - ascent  (≈80% of fontHeight above baseline)
+      //               bottom = baseline + descent (≈20% of fontHeight below baseline)
+      // The visible cap-height is roughly 70% of the em, so we trim ~10% off the
+      // top of the ascent zone to avoid the highlight floating above the letters,
+      // and keep the descent zone intact (for descenders like g, p, y).
+      const capTrim = hit.height * 0.10; // trim ~10% from the top to align with cap-height
+      const hlTop    = hit.top    + capTrim;
+      const hlBottom = hit.bottom;        // keep descent zone so descenders are covered
+
       // Place the highlight rect in intrinsic canvas pixel space so it aligns
       // exactly with the text bounding box regardless of the display scale.
       const hl = new Rect({
-        left: hit.left,
-        top: hit.top,
-        width: hit.right - hit.left,
-        height: hit.bottom - hit.top,
+        left:   hit.left,
+        top:    hlTop,
+        width:  hit.right - hit.left,
+        height: hlBottom - hlTop,
         fill: this._hexToRgba(this.highlightColor, this.highlightOpacity),
         stroke: 'transparent',
         selectable: true,
