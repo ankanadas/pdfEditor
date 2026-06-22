@@ -1,8 +1,9 @@
 import { EditorController } from './core/EditorController.js';
 import { PDFBackendService } from './services/pdfBackendService.js';
 import { initMerge } from './merge.js';
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
+import { AnnotationManager } from './annotationManager.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
 // No external network request is made, so the app works fully offline and never reaches
@@ -47,6 +48,8 @@ class PDFEditorApp {
     this._ttTarget = null;      // Active target of the shared floating text toolbar (editor/overlay/line)
     this._lastInsertSize = 14;  // Remembered font size for the next "Add text" box
     
+    this.annotationManager = new AnnotationManager(this);
+
     this.initializeEventListeners();
     this.setupControllerEvents();
     
@@ -97,6 +100,10 @@ class PDFEditorApp {
 
     document.getElementById('stampModeBtn')?.addEventListener('click', () => {
       this.setMode('stamp');
+    });
+
+    document.getElementById('annotateModeBtn')?.addEventListener('click', () => {
+      this.setMode('annotate');
     });
     // Editing-restriction gate: on a document with owner permissions that forbid modification, the
     // FIRST click that would start an edit on a page asks the user to confirm they're authorised.
@@ -198,6 +205,9 @@ class PDFEditorApp {
     document.getElementById('signPadAdd')?.addEventListener('click', () => this.signPadAdd());
     this.initSignatureDialog();
 
+    // Annotation toolbar wiring
+    this._initAnnotateToolbar();
+
     // Pages manager (reorder / delete / insert blank pages)
     document.getElementById('pagesPanelBtn')?.addEventListener('click', () => this.togglePagesPanel());
     document.getElementById('pagesPanelClose')?.addEventListener('click', () => this.closePagesPanel());
@@ -241,7 +251,8 @@ class PDFEditorApp {
   /** Enable all the tools/controls that require a loaded PDF. */
   enableUiAfterLoad() {
     ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn', 'pagesPanelBtn',
-     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'clearSignatureBtn']
+     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn',
+     'annotateModeBtn', 'clearSignatureBtn']
       .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
     // Warm the edit backend now (free hosts sleep when idle) so it's awake by the time the
     // user saves — avoids the first save silently falling back to client-side. Fire-and-forget.
@@ -269,8 +280,10 @@ class PDFEditorApp {
     if (pageInfo) pageInfo.textContent = 'No PDF loaded';
     const modeIndicator = document.getElementById('modeIndicator');
     if (modeIndicator) modeIndicator.textContent = 'No PDF loaded';
+    this.annotationManager.unmountAll();
     ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn', 'pagesPanelBtn',
-     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'clearSignatureBtn']
+     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn',
+     'annotateModeBtn', 'clearSignatureBtn']
       .forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = true; });
     document.querySelectorAll('.tool.active').forEach((el) => el.classList.remove('active'));
   }
@@ -638,11 +651,18 @@ class PDFEditorApp {
       canvas.addEventListener('click', (e) => this.handleCanvasClick(e, pv));
       canvas.addEventListener('mousedown', (e) => this.onEraseStart(e, pv));
       this.pageViews.push(pv);
+      // Mount Fabric.js annotation layer over this page
+      this.annotationManager.mountPage(pv);
     }
 
     this.pageWidth = this.pageViews[0] ? this.pageViews[0].page.view[2] : 612;
     this.pageHeight = this.pageViews[0] ? this.pageViews[0].page.view[3] : 792;
     this.currentPage = 0;
+    // Keep the annotation layer interactive across page (re)builds — e.g. the post-save reload remounts
+    // the Fabric canvases, which otherwise leaves them pointer-events:none and unable to take new
+    // annotations until the user toggles modes. Re-activate + re-arm the current tool when in annotate mode.
+    this.annotationManager.setActive(this.mode === 'annotate');
+    if (this.mode === 'annotate' && this._lastAnnotateTool) this.annotationManager.setTool(this._lastAnnotateTool);
     await this.refresh();
     this.updatePageInfo();
   }
@@ -1277,11 +1297,15 @@ class PDFEditorApp {
     const sigBtn = document.getElementById('signatureModeBtn');
     const eraseBtn = document.getElementById('eraseModeBtn');
     const stampBtn = document.getElementById('stampModeBtn');
+    const annotateBtn = document.getElementById('annotateModeBtn');
 
     // Highlight the active tool and expose the mode on <body> so the UI (CSS) can
     // show the relevant inputs / cursor for that tool.
-    [textBtn, editBtn, sigBtn, eraseBtn, stampBtn].forEach(btn => btn && btn.classList.remove('active'));
+    [textBtn, editBtn, sigBtn, eraseBtn, stampBtn, annotateBtn].forEach(btn => btn && btn.classList.remove('active'));
     document.body.dataset.mode = mode || '';
+
+    // Enable / disable the Fabric layers based on whether Annotate is active
+    this.annotationManager.setActive(mode === 'annotate');
 
     if (mode === 'text') {
       textBtn.classList.add('active');
@@ -1297,11 +1321,19 @@ class PDFEditorApp {
       if (eraseBtn) eraseBtn.classList.add('active');
     } else if (mode === 'stamp') {
       if (stampBtn) stampBtn.classList.add('active');
+    } else if (mode === 'annotate') {
+      if (annotateBtn) annotateBtn.classList.add('active');
+      // Activate the last-used sub-tool (default to the text highlighter — Draw was removed).
+      const lastTool = this._lastAnnotateTool || 'highlight';
+      this._activateAnnotateTool(lastTool);
+      this.showStatus('Pick a highlight tool, then highlight or click on the page.', 'info');
     }
 
     // Rebuild overlays for the new mode (edit boxes vs. painted edits) on every page.
     if (previousMode !== mode) this.refresh();
     this.updateModeIndicator();
+    // The shared Undo/Redo buttons reflect annotation history in Highlight mode, edit history elsewhere.
+    this.updateHistoryButtons();
   }
 
   /**
@@ -1343,10 +1375,94 @@ class PDFEditorApp {
     } else if (this.mode === 'stamp') {
       indicator.textContent = 'Stamp';
       indicator.classList.add('active');
+    } else if (this.mode === 'annotate') {
+      indicator.textContent = 'Highlight';
+      indicator.classList.add('active');
     } else {
       indicator.textContent = 'Pick a tool';
       indicator.classList.remove('active');
     }
+  }
+
+  // ─── Annotation toolbar wiring ────────────────────────────────────────────────
+
+  /** Wire up all the annotation sub-tool buttons and option inputs. */
+  _initAnnotateToolbar() {
+    const SUB_TOOLS = ['freeHighlight', 'highlight', 'line', 'rect', 'circle', 'table'];
+
+    // Sub-tool buttons
+    for (const tool of SUB_TOOLS) {
+      document.getElementById(`ann-${tool}`)?.addEventListener('click', () => {
+        if (this.mode !== 'annotate') this.setMode('annotate');
+        this._activateAnnotateTool(tool);
+      });
+    }
+
+    // Colour: the SAME swatch popover as the text floating toolbar. One colour drives both shape
+    // strokes and highlight fills; it persists (lives on annotationManager) across tool switches.
+    const am = this.annotationManager;
+    this._setColorSwatch(am.strokeColor, 'ann-color-sw');
+    this._buildColorPopover('ann-color-btn', 'ann-color-pop', (hex) => {
+      am.strokeColor = hex; am.highlightColor = hex;
+      this._setColorSwatch(hex, 'ann-color-sw');
+      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'highlight', { strokeColor: hex, highlightColor: hex });
+    });
+
+    // Stroke width — persists on the manager.
+    document.getElementById('ann-width')?.addEventListener('input', (e) => {
+      const w = parseInt(e.target.value, 10);
+      am.strokeWidth = w;
+      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'rect', { strokeWidth: w });
+    });
+
+    // Highlight opacity — persists on the manager.
+    document.getElementById('ann-opacity')?.addEventListener('input', (e) => {
+      const op = parseInt(e.target.value, 10) / 100;
+      am.highlightOpacity = op;
+      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'highlight', { highlightOpacity: op });
+    });
+
+    // Delete selected object (records an undo step via the manager's history).
+    document.getElementById('ann-delete')?.addEventListener('click', () => am.deleteSelected());
+
+    // Undo / redo use the SHARED top toolbar buttons (#undoBtn/#redoBtn) — see undo()/redo(), which
+    // route to the annotation layer while in annotate mode. Keep those buttons' enabled state in sync.
+    am.onHistoryChange = () => { if (this.mode === 'annotate') this.updateHistoryButtons(); };
+  }
+
+  /**
+   * Mark one sub-tool button as active, activate it on all Fabric canvases,
+   * and show/hide the opacity slider (only for highlight tools). Colour/width/opacity come from the
+   * manager (persisted), NOT reset to defaults — so switching tools keeps the user's settings.
+   */
+  _activateAnnotateTool(tool) {
+    this._lastAnnotateTool = tool;
+    // Toggle active class
+    document.querySelectorAll('.ann-tool-btn').forEach(btn => btn.classList.remove('active'));
+    document.getElementById(`ann-${tool}`)?.classList.add('active');
+    // Show opacity slider only for highlight tools
+    const opWrap = document.getElementById('ann-opacity-wrap');
+    if (opWrap) opWrap.style.display = (tool === 'highlight' || tool === 'freeHighlight') ? 'inline-flex' : 'none';
+    // Size (stroke width) has no effect for the word-snap Text Highlight or the fixed-line Table —
+    // show it dimmed + inert there so it's clear it doesn't apply (it still persists for other tools).
+    const sizeWrap = document.getElementById('ann-size-wrap');
+    const sizeOff = (tool === 'highlight' || tool === 'table');
+    if (sizeWrap) {
+      sizeWrap.classList.toggle('ann-off', sizeOff);
+      const wInput = document.getElementById('ann-width'); if (wInput) wInput.disabled = sizeOff;
+    }
+    // Keep the sliders in sync with the persisted values.
+    const am = this.annotationManager;
+    const wEl = document.getElementById('ann-width'); if (wEl) wEl.value = am.strokeWidth;
+    const oEl = document.getElementById('ann-opacity'); if (oEl) oEl.value = Math.round(am.highlightOpacity * 100);
+    this._setColorSwatch(am.strokeColor, 'ann-color-sw');
+    // Activate the tool with the persisted settings.
+    am.setTool(tool, {
+      strokeColor: am.strokeColor,
+      strokeWidth: am.strokeWidth,
+      highlightColor: am.highlightColor,
+      highlightOpacity: am.highlightOpacity,
+    });
   }
 
   handleCanvasClick(event, pv) {
@@ -2848,9 +2964,22 @@ class PDFEditorApp {
 
   /** Build the Sejda-style swatch palette popover and wire it to applyTextStyle('color', …). */
   _initColorPalette() {
-    const btn = document.getElementById('tt-color-btn');
-    const pop = document.getElementById('tt-color-pop');
-    if (!btn || !pop) return;
+    this._buildColorPopover('tt-color-btn', 'tt-color-pop', (hex) => {
+      this.applyTextStyle('color', this._hexToRgb(hex));
+      this._setColorSwatch(hex, 'tt-color-sw');
+    });
+  }
+
+  /**
+   * Build the shared Sejda-style swatch palette popover on (btnId, popId): a grid of preset swatches
+   * plus a native "Custom" picker. `onPick(hex)` fires on any selection. Reused by BOTH the text
+   * floating toolbar and the annotation toolbar so they share one identical colour control.
+   */
+  _buildColorPopover(btnId, popId, onPick) {
+    const btn = document.getElementById(btnId);
+    const pop = document.getElementById(popId);
+    if (!btn || !pop || pop._built) return;
+    pop._built = true;
     // A compact, well-rounded palette (greys + 6 shade rows across the hues).
     const PALETTE = [
       '#000000', '#434343', '#666666', '#999999', '#b7b7b7', '#cccccc', '#d9d9d9', '#efefef', '#f3f3f3', '#ffffff',
@@ -2864,25 +2993,28 @@ class PDFEditorApp {
     PALETTE.forEach(hex => {
       const sw = document.createElement('button');
       sw.type = 'button'; sw.className = 'tt-sw'; sw.style.background = hex; sw.title = hex;
-      sw.addEventListener('mousedown', (e) => e.preventDefault());   // keep the editor focused
-      sw.addEventListener('click', () => { this.applyTextStyle('color', this._hexToRgb(hex)); this._setColorSwatch(hex); pop.hidden = true; });
+      sw.addEventListener('mousedown', (e) => e.preventDefault());   // keep the editor/canvas focused
+      sw.addEventListener('click', () => { onPick(hex); pop.hidden = true; });
       pop.appendChild(sw);
     });
     // A "custom" native picker for anything outside the palette.
     const custom = document.createElement('label');
     custom.className = 'tt-sw tt-sw-custom'; custom.title = 'Custom colour';
-    custom.innerHTML = 'Custom <input type="color" id="tt-color-custom" value="#000000" title="Custom colour" aria-label="Custom colour">';
+    custom.innerHTML = 'Custom <input type="color" value="#000000" title="Custom colour" aria-label="Custom colour">';
     custom.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
     pop.appendChild(custom);
-    custom.querySelector('input').addEventListener('input', (e) => { this.applyTextStyle('color', this._hexToRgb(e.target.value)); this._setColorSwatch(e.target.value); });
+    custom.querySelector('input').addEventListener('input', (e) => onPick(e.target.value));
 
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', () => { pop.hidden = !pop.hidden; });
-    // Close on a click outside the colour control.
-    document.addEventListener('mousedown', (e) => { if (!pop.hidden && !e.target.closest('.tt-color-wrap')) pop.hidden = true; }, true);
+    // Close on a click outside THIS colour control's own wrap.
+    const wrap = btn.closest('.tt-color-wrap');
+    document.addEventListener('mousedown', (e) => {
+      if (!pop.hidden && (!wrap || !wrap.contains(e.target))) pop.hidden = true;
+    }, true);
   }
 
-  _setColorSwatch(hex) { const sw = document.getElementById('tt-color-sw'); if (sw) sw.style.background = hex; }
+  _setColorSwatch(hex, id = 'tt-color-sw') { const sw = document.getElementById(id); if (sw) sw.style.background = hex; }
 
   /** Wire the hyperlink popover: open on the Link button (prefilled with the current URL), Apply sets
    *  the link, Remove clears it, close on outside-click / Esc. Tracks the clickable area only — it
@@ -3327,6 +3459,8 @@ class PDFEditorApp {
   }
 
   undo() {
+    // In Highlight (annotate) mode the shared Undo button drives the annotation layer's own history.
+    if (this.mode === 'annotate') { this.annotationManager.undo(); this.updateHistoryButtons(); this.showStatus('Undo', 'info'); return; }
     if (this.historyIndex <= 0) return;
     this.historyIndex--;
     this.edits = this.history[this.historyIndex].map(e => ({ ...e }));
@@ -3336,6 +3470,7 @@ class PDFEditorApp {
   }
 
   redo() {
+    if (this.mode === 'annotate') { this.annotationManager.redo(); this.updateHistoryButtons(); this.showStatus('Redo', 'info'); return; }
     if (this.historyIndex >= this.history.length - 1) return;
     this.historyIndex++;
     this.edits = this.history[this.historyIndex].map(e => ({ ...e }));
@@ -3347,6 +3482,13 @@ class PDFEditorApp {
   updateHistoryButtons() {
     const u = document.getElementById('undoBtn');
     const r = document.getElementById('redoBtn');
+    // In Highlight mode the buttons reflect the annotation layer's history; otherwise the edit history.
+    if (this.mode === 'annotate') {
+      const am = this.annotationManager;
+      if (u) u.disabled = !am.canUndo();
+      if (r) r.disabled = !am.canRedo();
+      return;
+    }
     if (u) u.disabled = this.historyIndex <= 0;
     if (r) r.disabled = this.historyIndex >= this.history.length - 1;
   }
@@ -3779,7 +3921,10 @@ class PDFEditorApp {
 
     try {
       if (await PDFBackendService.checkHealth()) {
-        editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits);
+        // Serialize Fabric annotations (highlights, shapes, etc.) so the backend can
+        // burn them in as native PDF annotations (real /Highlight with fill_opacity).
+        const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
+        editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits, fabricAnnotations);
         viaBackend = true;
       }
     } catch (e) { console.warn('Backend save failed, trying client-side:', e); }
@@ -4090,6 +4235,124 @@ class PDFEditorApp {
         });
       });
     }
+
+    // ── Burn in Fabric.js annotations ──────────────────────────────────────────
+    const annotations = this.annotationManager ? this.annotationManager.serialize() : [];
+    for (const ann of annotations) {
+      const page = pages[ann.pageIndex];
+      if (!page) continue;
+
+      // Helper: parse an rgb/rgba/hex colour string to a pdf-lib rgb(). Defaults to black.
+      const parsePdfColor = (colorStr, fallbackR = 0, fallbackG = 0, fallbackB = 0) => {
+        if (!colorStr) return rgb(fallbackR, fallbackG, fallbackB);
+        // hex #rrggbb
+        const hexM = colorStr.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+        if (hexM) return rgb(parseInt(hexM[1], 16) / 255, parseInt(hexM[2], 16) / 255, parseInt(hexM[3], 16) / 255);
+        // rgb(r,g,b) or rgba(r,g,b,a)
+        const rgbM = colorStr.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (rgbM) return rgb(+rgbM[1] / 255, +rgbM[2] / 255, +rgbM[3] / 255);
+        return rgb(fallbackR, fallbackG, fallbackB);
+      };
+
+      if (ann.kind === 'ann-line') {
+        try {
+          page.drawLine({
+            start: { x: ann.x1, y: ann.y1 },
+            end: { x: ann.x2, y: ann.y2 },
+            thickness: Math.max(0.5, ann.strokeWidth),
+            color: parsePdfColor(ann.stroke),
+          });
+        } catch (_) {}
+
+      } else if (ann.kind === 'ann-rect') {
+        try {
+          page.drawRectangle({
+            x: ann.x, y: ann.y, width: ann.width, height: ann.height,
+            borderColor: parsePdfColor(ann.stroke),
+            borderWidth: Math.max(0.5, ann.strokeWidth),
+            color: undefined,  // transparent fill
+          });
+        } catch (_) {}
+
+      } else if (ann.kind === 'ann-highlight') {
+        // Semi-transparent highlight rectangle drawn with Multiply blend mode so the
+        // ink tints the text underneath rather than covering it — exactly like a real
+        // highlighter. BlendMode.Multiply darkens where colours overlap and is
+        // transparent-effective on white backgrounds, preventing text from being hidden.
+        try {
+          page.drawRectangle({
+            x: ann.x, y: ann.y, width: ann.width, height: ann.height,
+            color: parsePdfColor(ann.fill || '#FFD600'),
+            opacity: ann.opacity ?? 0.4,
+            blendMode: BlendMode.Multiply,
+          });
+        } catch (_) {}
+
+      } else if (ann.kind === 'ann-ellipse') {
+        try {
+          page.drawEllipse({
+            x: ann.x, y: ann.y, xScale: ann.rx, yScale: ann.ry,
+            borderColor: parsePdfColor(ann.stroke),
+            borderWidth: Math.max(0.5, ann.strokeWidth),
+          });
+        } catch (_) {}
+
+      } else if (ann.kind === 'ann-table') {
+        // Draw the table grid as individual lines
+        try {
+          const { x, y, width, height, rows, cols, strokeWidth } = ann;
+          const cellW = width / cols;
+          const cellH = height / rows;
+          const strokeColor = parsePdfColor(ann.stroke || '#2d3a5c');
+          const lw = Math.max(0.5, strokeWidth);
+          // Horizontal lines (y is bottom-left: table goes UP from y)
+          for (let r = 0; r <= rows; r++) {
+            const ly = y + r * cellH;
+            page.drawLine({ start: { x, y: ly }, end: { x: x + width, y: ly }, thickness: lw, color: strokeColor });
+          }
+          // Vertical lines
+          for (let c = 0; c <= cols; c++) {
+            const lx = x + c * cellW;
+            page.drawLine({ start: { x: lx, y }, end: { x: lx, y: y + height }, thickness: lw, color: strokeColor });
+          }
+        } catch (_) {}
+
+      } else if (ann.kind === 'ann-path') {
+        // Freehand draw / freehand highlight: render to an off-screen canvas then embed as image.
+        // (pdf-lib's drawSvgPath is limited; this approach preserves every brush stroke faithfully.)
+        // The entire Fabric annotation layer for the page is rasterised once as a transparent PNG,
+        // then stamped with BlendMode.Multiply so:
+        //   • pure-white pixels (background) multiply to white  → fully transparent / pass-through
+        //   • coloured pixels (strokes, highlights) multiply the PDF text → tinting, not covering
+        // Without Multiply the PNG composites as normal alpha and semi-transparent yellow appears
+        // as a milky opaque film that hides the text underneath.
+        try {
+          const { fabricCanvas } = this.annotationManager.pages.find(p => p.pageIndex === ann.pageIndex) || {};
+          if (fabricCanvas) {
+            // Embed once per page — all paths on the same page share one PNG layer.
+            if (!this._embeddedAnnPages) this._embeddedAnnPages = new Set();
+            if (!this._embeddedAnnPages.has(ann.pageIndex)) {
+              this._embeddedAnnPages.add(ann.pageIndex);
+              const dataUrl = fabricCanvas.toDataURL({ format: 'png', multiplier: 1 });
+              if (dataUrl && dataUrl !== 'data:,') {
+                const imgBytes = await fetch(dataUrl).then(r => r.arrayBuffer());
+                const pngImg = await pdfDoc.embedPng(imgBytes);
+                const ph = page.getHeight();
+                const pw = page.getWidth();
+                // BlendMode.Multiply: imported at the top of this file from pdf-lib.
+                page.drawImage(pngImg, {
+                  x: 0, y: 0, width: pw, height: ph,
+                  opacity: 1,
+                  blendMode: BlendMode.Multiply,
+                });
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    // Clean up per-save state
+    delete this._embeddedAnnPages;
 
     return pdfDoc.save();
   }
