@@ -4053,13 +4053,18 @@ class PDFEditorApp {
         } catch (_) {}
 
       } else if (ann.kind === 'ann-path') {
-        // Freehand draw / freehand highlight: render to an off-screen canvas then embed as image
-        // (pdf-lib's drawSvgPath is limited; this approach preserves every brush stroke faithfully)
+        // Freehand draw / freehand highlight: render to an off-screen canvas then embed as image.
+        // (pdf-lib's drawSvgPath is limited; this approach preserves every brush stroke faithfully.)
+        // The entire Fabric annotation layer for the page is rasterised once as a transparent PNG,
+        // then stamped with BlendMode.Multiply so:
+        //   • pure-white pixels (background) multiply to white  → fully transparent / pass-through
+        //   • coloured pixels (strokes, highlights) multiply the PDF text → tinting, not covering
+        // Without Multiply the PNG composites as normal alpha and semi-transparent yellow appears
+        // as a milky opaque film that hides the text underneath.
         try {
           const { fabricCanvas } = this.annotationManager.pages.find(p => p.pageIndex === ann.pageIndex) || {};
           if (fabricCanvas) {
-            // We'll embed the entire annotation layer for this page as a transparent PNG
-            // only on the first ann-path for this page (all paths go together)
+            // Embed once per page — all paths on the same page share one PNG layer.
             if (!this._embeddedAnnPages) this._embeddedAnnPages = new Set();
             if (!this._embeddedAnnPages.has(ann.pageIndex)) {
               this._embeddedAnnPages.add(ann.pageIndex);
@@ -4069,7 +4074,12 @@ class PDFEditorApp {
                 const pngImg = await pdfDoc.embedPng(imgBytes);
                 const ph = page.getHeight();
                 const pw = page.getWidth();
-                page.drawImage(pngImg, { x: 0, y: 0, width: pw, height: ph, opacity: 1 });
+                // BlendMode.Multiply: imported at the top of this file from pdf-lib.
+                page.drawImage(pngImg, {
+                  x: 0, y: 0, width: pw, height: ph,
+                  opacity: 1,
+                  blendMode: BlendMode.Multiply,
+                });
               }
             }
           }
