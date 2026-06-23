@@ -892,6 +892,61 @@ class FontLicensingTests(unittest.TestCase):
                             f"{fam}: did not resolve to a bundled TTF (got {opt[0]!r})")
 
 
+class LatexFidelityTests(unittest.TestCase):
+    """LaTeX existing-text edit fidelity: map an unreusable embedded LaTeX/TeX font to an OPEN
+    LaTeX-compatible face (Latin Modern / TeX Gyre) instead of Arial/Times, keep a justified
+    full-width line left-anchored (no rightward shift), and bundle only open GUST fonts."""
+
+    def test_latex_font_profile_detects_families(self):
+        prof = appmod._latex_font_profile
+        self.assertEqual(prof('SOWLVM+CMR10'), ('cm', 'serif', False, False))   # Computer Modern Roman
+        self.assertEqual(prof('BIPLRR+CMBX10'), ('cm', 'serif', True, False))   # bold extended
+        self.assertEqual(prof('LAYWOG+CMTI10'), ('cm', 'serif', False, True))   # text italic
+        self.assertEqual(prof('CMSS10'), ('cm', 'sans', False, False))
+        self.assertEqual(prof('CMTT10'), ('cm', 'mono', False, False))
+        self.assertEqual(prof('XYZABC+LMRoman10-Regular'), ('cm', 'serif', False, False))
+        self.assertEqual(prof('LMRoman10-Bold'), ('cm', 'serif', True, False))
+        self.assertEqual(prof('LMSans10-Regular')[1], 'sans')
+        self.assertEqual(prof('LMMono10-Regular')[1], 'mono')
+        self.assertEqual(prof('TeXGyreTermes-Italic')[0], 'times')
+        self.assertEqual(prof('TeXGyreHeros-Regular')[0], 'helvetica')
+        self.assertEqual(prof('TeXGyreCursor-Regular')[0], 'courier')
+        for non_latex in ('Calibri', 'ABCDEF+Arial-Bold', 'Helvetica', 'Inter', 'Roboto-Bold'):
+            self.assertIsNone(prof(non_latex), f'{non_latex} wrongly detected as LaTeX')
+
+    def test_latex_fallback_resolves_to_bundled_open_otf(self):
+        kw = appmod._latex_fallback_kwargs(('cm', 'serif', False, False), False, False)
+        self.assertIsNotNone(kw)
+        self.assertTrue(kw['fontfile'].endswith('LMRoman-Regular.otf') and os.path.exists(kw['fontfile']))
+        self.assertIn('Latin Modern', fitz.Font(fontfile=kw['fontfile']).name)
+        self.assertTrue(appmod._latex_fallback_kwargs(('cm', 'serif', True, True), True, True)['fontfile']
+                        .endswith('LMRoman-BoldItalic.otf'))
+        self.assertTrue(appmod._latex_fallback_kwargs(('cm', 'mono', False, False), False, False)['fontfile']
+                        .endswith('LMMono-Regular.otf'))
+        self.assertTrue(appmod._latex_fallback_kwargs(('times', 'serif', False, False), False, False)['fontfile']
+                        .endswith('TeXGyreTermes-Regular.otf'))
+
+    def test_justified_full_width_line_stays_left(self):
+        # A full-width (justified) line must detect 'left' so a replacement is NOT re-anchored right
+        # (the "blank space before the text" bug). Justified LaTeX paragraphs share the right margin.
+        d = fitz.open(); p = d.new_page(width=612, height=300)
+        for i in range(3):
+            p.insert_text((70, 80 + i * 16), "the quick brown fox jumps over the lazy dog again now ok", fontsize=10)
+        spans = [s for b in p.get_text('dict')['blocks'] for l in b['lines'] for s in l['spans']]
+        full = max(spans, key=lambda s: s['bbox'][2] - s['bbox'][0])
+        self.assertEqual(appmod._detect_align(p, full, full['bbox'][0], full['bbox'][2]), 'left')
+
+    def test_bundled_latex_otf_are_open_gust_fonts(self):
+        allowed = {'LMRoman', 'LMSans', 'LMMono', 'TeXGyreTermes', 'TeXGyreHeros', 'TeXGyreCursor'}
+        otfs = [f for f in os.listdir(appmod._FONTS_DIR) if f.lower().endswith('.otf')]
+        self.assertTrue(otfs, 'no LaTeX .otf fonts bundled')
+        for f in otfs:
+            self.assertIn(f.rsplit('-', 1)[0], allowed, f'unexpected .otf font {f}')
+            name = fitz.Font(fontfile=os.path.join(appmod._FONTS_DIR, f)).name.replace(' ', '').lower()
+            for p in PROPRIETARY:
+                self.assertNotIn(p.replace(' ', '').lower(), name, f'{f} internal name claims {p!r}: {name!r}')
+
+
 class MixedSizeSaveTests(unittest.TestCase):
 
     def test_small_then_large_run_keep_their_sizes(self):
@@ -1237,6 +1292,164 @@ class PyMuPDFVersionFloorTests(unittest.TestCase):
         ver = tuple(int(x) for x in fitz.VersionFitz.split(".")[:2])
         self.assertGreaterEqual(
             ver, self.MIN, f"MuPDF {fitz.VersionFitz} is below the security floor.")
+
+
+class MixedStyleAndUnderlineTests(unittest.TestCase):
+    """Editing an existing line keeps EACH run's own style (a bold label + a regular tail, an italic
+    head) via the per-run model, and an underlined line is re-drawn with a fresh underline at the new
+    text width without the original drawn underline doubling up (it gets covered first)."""
+
+    def test_mixed_runs_keep_per_run_bold(self):
+        doc = fitz.open(); page = doc.new_page(width=460, height=120)
+        page.insert_text(fitz.Point(40, 60), "Label and body text", fontsize=12, fontname="helv")
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "Label and body")
+        edit = edit_from_span(span, "Heading: regular tail")
+        edit["runs"] = [[{"text": "Heading: ", "bold": True, "italic": False},
+                         {"text": "regular tail", "bold": False, "italic": False}]]
+        res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
+        self.assertTrue([s for s in spans_with(res, "Heading") if s["flags"] & 16],
+                        "the bold run should save as a BOLD span")
+        self.assertTrue([s for s in spans_with(res, "regular tail") if not (s["flags"] & 16)],
+                        "the regular run should save as a NON-bold span")
+
+    def test_mixed_runs_keep_per_run_italic(self):
+        doc = fitz.open(); page = doc.new_page(width=460, height=120)
+        page.insert_text(fitz.Point(40, 60), "Intro and the rest", fontsize=12, fontname="helv")
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "Intro and")
+        edit = edit_from_span(span, "Slanted then upright")
+        edit["runs"] = [[{"text": "Slanted ", "bold": False, "italic": True},
+                         {"text": "then upright", "bold": False, "italic": False}]]
+        res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
+        self.assertTrue([s for s in spans_with(res, "Slanted") if s["flags"] & 2],
+                        "the italic run should save as an ITALIC span")
+        self.assertTrue([s for s in spans_with(res, "then upright") if not (s["flags"] & 2)],
+                        "the upright run should save as a NON-italic span")
+
+    def test_underline_redrawn_without_doubling(self):
+        doc = fitz.open(); page = doc.new_page(width=460, height=120)
+        page.insert_text(fitz.Point(40, 60), "Underline me here now", fontsize=12, fontname="helv")
+        f = fitz.Font("helv")
+        wide = f.text_length("Underline me here now", fontsize=12)
+        page.draw_line(fitz.Point(40, 62), fitz.Point(40 + wide, 62), width=0.8)   # original underline
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "Underline me")
+        edit = edit_from_span(span, "Short")
+        edit["underline"] = True
+        edit["bgColor"] = [255, 255, 255]
+        res = fitz.open(stream=post_edit(src, [edit]), filetype="pdf")
+        page2 = res[0]
+        new_w = f.text_length("Short", fontsize=12)
+        # A fresh underline sits under the replacement…
+        self.assertGreater(region_ink(page2, 41, 60, 66, width=max(6.0, new_w - 2)), 0,
+                           "re-drawn underline missing under the replacement text")
+        # …and the ORIGINAL wide underline beyond it was covered, not left to double up.
+        self.assertEqual(region_ink(page2, 40 + new_w + 25, 60, 66, width=20), 0,
+                         "original underline beyond the new text was left to double up")
+
+
+class InlineReflowTests(unittest.TestCase):
+    """A replaced line keeps its left x (no gap) for left/justified body text of ANY new length, while a
+    genuine right-aligned column (e.g. résumé dates) re-anchors on the right. Covers the five spec cases:
+    longer->shorter, shorter->longer, same length, a word in the middle, and a word at the end."""
+
+    def _left_para_pdf(self):
+        """A left-aligned paragraph whose wrapped lines share the SAME left margin and happen to end
+        near the same right edge — the case that used to be misread as a right-aligned column."""
+        doc = fitz.open(); pg = doc.new_page(width=460, height=200)
+        x = 80
+        for i, t in enumerate(["features for the Forward Capacity Market.",
+                               "time by twenty percent and ensuring full",
+                               "compliance across the board for teams now"]):
+            pg.insert_text(fitz.Point(x, 60 + i * 20), t, fontsize=11, fontname="helv")
+        return doc, x
+
+    def _line_x0(self, doc_bytes, needle):
+        res = fitz.open(stream=doc_bytes, filetype="pdf")
+        s = find_span(res, needle)
+        return None if s is None else round(s["bbox"][0], 1)
+
+    def _edit_line(self, doc, needle, new):
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), needle)
+        return post_edit(src, [edit_from_span(span, new)])
+
+    def test_shorter_replacement_keeps_left_x_no_gap(self):
+        doc, x = self._left_para_pdf()
+        out = self._edit_line(doc, "features for the Forward", "features for the New Capacity Market.")
+        self.assertAlmostEqual(self._line_x0(out, "New Capacity"), x, delta=2.0,
+                               msg="a shortened left/justified line shifted right (gap before the text)")
+
+    def test_longer_replacement_keeps_left_x(self):
+        doc, x = self._left_para_pdf()
+        out = self._edit_line(doc, "features for the Forward", "features for the Forward Capacity Marketplace today.")
+        self.assertAlmostEqual(self._line_x0(out, "Forward Capacity Marketplace"), x, delta=2.0)
+
+    def test_same_length_replacement_keeps_left_x(self):
+        doc, x = self._left_para_pdf()
+        out = self._edit_line(doc, "features for the Forward", "features for the Forwood Capacity Market.")
+        self.assertAlmostEqual(self._line_x0(out, "Forwood"), x, delta=2.0)
+
+    def test_word_in_middle_only_that_changes(self):
+        doc, x = self._left_para_pdf()
+        out = self._edit_line(doc, "features for the Forward", "features for the Big Capacity Market.")
+        res = fitz.open(stream=out, filetype="pdf")
+        self.assertIsNotNone(find_span(res, "Big Capacity Market"))
+        self.assertAlmostEqual(self._line_x0(out, "features for the Big"), x, delta=2.0)
+
+    def test_word_at_end_keeps_left_x(self):
+        doc, x = self._left_para_pdf()
+        out = self._edit_line(doc, "features for the Forward", "features for the Forward Capacity Zone.")
+        self.assertAlmostEqual(self._line_x0(out, "features for the Forward Capacity Zone"), x, delta=2.0)
+
+    def test_right_aligned_column_still_reanchors_right(self):
+        # Two right-aligned dates (right edges aligned, left edges varying, OFF the body left margin)
+        # plus a left paragraph. A shorter replacement must keep the RIGHT edge, not drift left.
+        doc = fitz.open(); pg = doc.new_page(width=460, height=220)
+        for i, t in enumerate(["the project ran for several quarters here",
+                               "and shipped to many customers on schedule"]):
+            pg.insert_text(fitz.Point(60, 60 + i * 18), t, fontsize=11, fontname="helv")
+        f = fitz.Font("helv")
+        for i, t in enumerate(["Oct 2022 - Dec 2025", "Sep 2018 - Sep 2022"]):
+            w = f.text_length(t, fontsize=11)
+            pg.insert_text(fitz.Point(420 - w, 120 + i * 18), t, fontsize=11, fontname="helv")
+        src = doc.tobytes()
+        before = find_span(fitz.open(stream=src, filetype="pdf"), "Oct 2022")
+        right0 = round(before["bbox"][2], 1)
+        out = post_edit(src, [edit_from_span(before, "Oct 2022")])  # same text -> right edge stable
+        after = find_span(fitz.open(stream=out, filetype="pdf"), "Oct 2022")
+        self.assertAlmostEqual(round(after["bbox"][2], 1), right0, delta=3.0,
+                               msg="right-aligned date column lost its right anchor")
+
+
+class DividerPreservationTests(unittest.TestCase):
+    """Editing text next to a horizontal divider/border must NOT break, shorten or cover that rule —
+    the false 'underline' detection used to make the save cover-and-redraw it at the text width."""
+
+    def _rules(self, page):
+        out = []
+        for dr in page.get_drawings():
+            for it in dr["items"]:
+                if it[0] == "re" and it[1].height < 3 and it[1].width > 20:
+                    out.append((round(it[1].y0, 1), round(it[1].x0, 1), round(it[1].x1, 1)))
+                elif it[0] == "l" and abs(it[1].y - it[2].y) < 0.6 and abs(it[1].x - it[2].x) > 20:
+                    out.append((round(it[1].y, 1), round(min(it[1].x, it[2].x), 1), round(max(it[1].x, it[2].x), 1)))
+        return sorted(out)
+
+    def test_divider_below_heading_survives_edit(self):
+        doc = fitz.open(); pg = doc.new_page(width=460, height=200)
+        pg.insert_text(fitz.Point(40, 50), "Jane Q. Public  |  Engineer", fontsize=14, fontname="helv")
+        pg.draw_line(fitz.Point(34, 56), fitz.Point(426, 56), width=0.7)         # full-width divider
+        pg.insert_text(fitz.Point(40, 90), "EDUCATION", fontsize=12, fontname="hebo")
+        pg.draw_line(fitz.Point(34, 96), fitz.Point(426, 96), width=0.7)
+        before = self._rules(doc[0])
+        # The edit carries underline=False (correct) — but even a stray True must not break the rule.
+        src = doc.tobytes()
+        span = find_span(fitz.open(stream=src, filetype="pdf"), "Jane Q. Public")
+        out = post_edit(src, [edit_from_span(span, "Janet Q. Public-Smith  |  Engineer")])
+        after = self._rules(fitz.open(stream=out, filetype="pdf")[0])
+        self.assertEqual(before, after, "a divider near the edited heading was altered")
 
 
 if __name__ == "__main__":
