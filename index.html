@@ -221,6 +221,9 @@
       display: none; align-items: center; gap: 10px;
       padding: 12px 16px; background: #f3f1ff; border-bottom: 1px solid #e2dcff;
       flex: 0 0 auto; animation: abIn .15s ease;
+      /* stack above the page canvases (incl. the Fabric annotation layer, z-index 200) so the toolbar's
+         colour popover overlays the page and is clickable rather than sitting behind the canvas */
+      position: relative; z-index: 300;
     }
     @keyframes abIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
     body[data-mode="auto"] .action-bar,
@@ -987,31 +990,58 @@
 
     /* Annotation contextual toolbar shown in the action-bar */
     body[data-mode="annotate"] .ctx-annotate { display: flex; }
-    .ctx-annotate { flex-wrap: wrap; gap: 6px; align-items: center; }
-    .ctx-annotate .ann-sep { width: 1px; height: 24px; background: #ddd7ff; margin: 0 2px; }
+    /* Keep the whole toolbar on ONE row (never wrap to a 2nd line). NO overflow clipping here, so the
+       colour popover can drop below the bar; the controls are compact enough to fit at common widths. */
+    .ctx-annotate { flex-wrap: nowrap; gap: 6px; align-items: center; flex: 1 1 auto; min-width: 0; }
+    .ctx-annotate > * { flex: 0 0 auto; }
+    /* push Delete to the right so leftover space sits between Opacity and Delete (fills wide screens, collapses on narrow) */
+    #ann-delete { margin-left: auto; }
+    /* faint, softly-faded vertical dividers between groups (Tools | Color | Size | Opacity | Delete) */
+    .ctx-annotate .ann-sep {
+      width: 1px; height: 26px; margin: 0 2px; border: none; align-self: center;
+      background: linear-gradient(to bottom, transparent, #d9d2ff 16%, #d9d2ff 84%, transparent);
+    }
     .ann-tool-btn {
       display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
       border: 1px solid var(--line); background: #fff; color: var(--ink);
-      padding: 6px 11px; border-radius: 9px; font-size: 13px; font-weight: 600;
+      padding: 6px 10px; border-radius: 9px; font-size: 13px; font-weight: 600;
       transition: all .14s ease; white-space: nowrap;
     }
     .ann-tool-btn svg { width: 16px; height: 16px; flex: 0 0 auto; }
+    #ann-freeHighlight, #ann-highlight { padding-left: 13px; padding-right: 13px; }
     .ann-tool-btn:hover { background: #f1eeff; border-color: #c9bfff; }
     .ann-tool-btn.active {
       background: var(--brand); border-color: var(--brand); color: #fff;
       box-shadow: 0 3px 10px rgba(109,94,252,.32);
     }
-    .ann-color-wrap { display: inline-flex; align-items: center; gap: 6px; }
-    .ann-color-label { font-size: 12.5px; color: var(--muted); font-weight: 600; }
-    .ann-color-input {
-      width: 28px; height: 28px; padding: 0; border: 2px solid var(--line);
-      border-radius: 7px; cursor: pointer; background: none; outline: none;
+    /* Delete: small, compact button kept inline on the same row as the rest of the controls */
+    #ann-delete { padding: 5px 9px; gap: 4px; }
+    #ann-delete svg { width: 13px; height: 13px; }
+    /* Color / Size / Opacity sit in soft rounded pastel cards so they read as distinct, premium
+       controls. Cosmetic only — scoped to the annotation toolbar (the shared text-toolbar swatch,
+       .tt-color-sw, is untouched). */
+    .ann-color-wrap, .ann-slider-wrap {
+      display: inline-flex; align-items: center;
+      background: #f6f4ff; border: 1px solid #e7e2ff; border-radius: 11px;
+      margin: 0 1px; transition: background .14s ease, border-color .14s ease;
     }
-    .ann-color-input::-webkit-color-swatch-wrapper { padding: 2px; border-radius: 5px; }
-    .ann-color-input::-webkit-color-swatch { border-radius: 4px; border: none; }
-    .ann-slider-wrap { display: inline-flex; align-items: center; gap: 6px; }
-    .ann-slider-label { font-size: 12.5px; color: var(--muted); font-weight: 600; }
-    .ann-slider { width: 70px; accent-color: var(--brand); }
+    .ann-color-wrap { gap: 6px; padding: 4px 7px; }
+    .ann-slider-wrap { gap: 7px; padding: 4px 8px; }
+    .ann-color-wrap:hover, .ann-slider-wrap:hover { background: #efeaff; border-color: #cdc2ff; }
+    /* a control that doesn't apply to the active tool (e.g. Size for Text-HL) is shown dimmed + inert */
+    .ann-slider-wrap.ann-off { opacity: .42; pointer-events: none; filter: grayscale(.5); }
+    .ann-color-label, .ann-slider-label { font-size: 12.5px; color: #3f3678; font-weight: 700; letter-spacing: .01em; }
+    /* prominent colour swatch in its card */
+    #ann-color-btn { padding: 0; border: none; background: none; height: auto; line-height: 0; }
+    #ann-color-sw {
+      width: 22px; height: 22px; border-radius: 6px; border: 2px solid #fff;
+      box-shadow: 0 0 0 1px rgba(60,40,120,.22), 0 1px 3px rgba(60,40,120,.22);
+      transition: transform .12s ease, box-shadow .12s ease;
+    }
+    #ann-color-btn:hover #ann-color-sw { transform: scale(1.06); box-shadow: 0 0 0 1px rgba(109,94,252,.5), 0 2px 6px rgba(109,94,252,.3); }
+    /* Themed sliders: the USED (filled) portion + thumb render purple, the rest grey — via the browser's
+       native accent-color (a custom track can't follow the value without JS). Slightly taller for weight. */
+    .ann-slider { width: 76px; height: 18px; cursor: pointer; accent-color: var(--brand); }
 
     /* Table insert dialog */
     #ann-table-dlg {
@@ -1071,6 +1101,10 @@
         <img class="tool-ico" src="/assets/fun-ui/add.png" alt="" aria-hidden="true">
         Add
       </button>
+      <button class="tool" id="annotateModeBtn" disabled title="Highlight: highlight text, insert shapes and tables">
+        <img class="tool-ico" src="/assets/fun-ui/Highlight.png" alt="" aria-hidden="true">
+        Highlight
+      </button>
       <button class="tool featured" id="signatureModeBtn" disabled title="Most useful: type, draw or upload a signature">
         <img class="tool-ico" src="/assets/fun-ui/sign.png" alt="" aria-hidden="true">
         Sign
@@ -1082,13 +1116,6 @@
       <button class="tool" id="stampModeBtn" disabled title="Stamp: place Approved, Reject, Final, Draft or Copy on the page">
         <img class="tool-ico" src="/assets/fun-ui/stamp.png" alt="" aria-hidden="true">
         Stamp
-      </button>
-      <button class="tool" id="annotateModeBtn" disabled title="Annotate: draw, highlight text, insert shapes and tables">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:28px;height:28px">
-          <path d="M12 20h9"/>
-          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>
-        </svg>
-        Annotate
       </button>
       <div class="sep"></div>
       <button class="tool danger" id="clearSignatureBtn" disabled title="Discard all of your unsaved changes (you can Undo this)">
@@ -1114,9 +1141,11 @@
 
         <button class="btn" id="undoBtn" disabled title="Undo (Cmd/Ctrl+Z)" aria-label="Undo">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-1"/></svg>
+          Undo
         </button>
         <button class="btn" id="redoBtn" disabled title="Redo (Cmd/Ctrl+Shift+Z)" aria-label="Redo">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h1"/></svg>
+          Redo
         </button>
 
         <div class="divider"></div>
@@ -1180,12 +1209,8 @@
 
         <!-- Annotation sub-tool bar (Phase 3) -->
         <div class="ctx ctx-annotate">
-          <span class="ab-label">Annotate</span>
+          <span class="ab-label">Highlight</span>
           <!-- Sub-tools -->
-          <button class="ann-tool-btn" id="ann-draw" type="button" title="Freehand draw">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22c1-1 3-3 5-5l12-12a1.5 1.5 0 0 0-2-2L5 15c-2 2-4 4-5 5Z"/></svg>
-            Draw
-          </button>
           <button class="ann-tool-btn" id="ann-freeHighlight" type="button" title="Freehand highlighter">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l-6 6v3h3l6-6"/><path d="M22 4a2.83 2.83 0 0 0-4 0l-5 5 4 4 5-5a2.83 2.83 0 0 0 0-4Z"/></svg>
             Highlight
@@ -1212,17 +1237,22 @@
             Table
           </button>
           <span class="ann-sep"></span>
-          <!-- Pen / stroke colour -->
+          <!-- Pen / stroke colour — same swatch popover as the text floating toolbar (built by app.js). -->
           <div class="ann-color-wrap">
             <span class="ann-color-label">Color</span>
-            <input type="color" id="ann-color" class="ann-color-input" value="#e53935" title="Annotation colour" aria-label="Annotation colour">
+            <div class="tt-color-wrap">
+              <button class="tt-btn tt-color-btn" id="ann-color-btn" type="button" title="Highlight colour" aria-label="Highlight colour"><span class="tt-color-sw" id="ann-color-sw"></span></button>
+              <div class="tt-color-pop" id="ann-color-pop" hidden></div>
+            </div>
           </div>
-          <!-- Stroke width -->
-          <div class="ann-slider-wrap">
+          <span class="ann-sep"></span>
+          <!-- Stroke width (persists across tools; not applicable to Text-HL / Table → shown disabled) -->
+          <div class="ann-slider-wrap" id="ann-size-wrap">
             <span class="ann-slider-label">Size</span>
             <input type="range" id="ann-width" class="ann-slider" min="1" max="20" value="3" title="Stroke width" aria-label="Stroke width">
           </div>
-          <!-- Highlight opacity -->
+          <span class="ann-sep"></span>
+          <!-- Highlight opacity (persists across tools) -->
           <div class="ann-slider-wrap" id="ann-opacity-wrap">
             <span class="ann-slider-label">Opacity</span>
             <input type="range" id="ann-opacity" class="ann-slider" min="10" max="90" value="40" title="Highlight opacity" aria-label="Highlight opacity">

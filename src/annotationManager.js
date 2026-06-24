@@ -50,6 +50,19 @@ export class AnnotationManager {
 
     // Temporary shape being drawn (for mouse-drag shapes)
     this._shapeState = null;
+
+    // Undo/redo history for the annotation layer ONLY (independent of the text-edit history).
+    // Each entry is a snapshot: [{pageIndex, objects:[…fabric JSON…]}, …]. _histIdx points at the
+    // current state. _restoring guards the object:* listeners while we re-load a snapshot.
+    this._history = [];
+    this._histIdx = -1;
+    this._restoring = false;
+    this.onHistoryChange = null;   // (canUndo, canRedo) => void — set by the app to toggle buttons
+  }
+
+  // Props beyond Fabric's defaults that must survive a toObject/loadFromJSON round-trip.
+  static get HISTORY_PROPS() {
+    return ['_annotationType', '_rows', '_cols', 'globalCompositeOperation', 'selectable', 'hasControls'];
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
@@ -92,6 +105,8 @@ export class AnnotationManager {
 
     // Prevent accidental stage-pan when the mouse wheel fires over the layer.
     fc.on('mouse:wheel', (opt) => opt.e.stopPropagation());
+    // Record an undo step when an existing object is moved/resized (creation is committed by each tool).
+    fc.on('object:modified', () => this._commit());
 
     const entry = { pageIndex: pv.pageNum, fabricCanvas: fc, pv, container };
     this.pages.push(entry);
@@ -127,6 +142,80 @@ export class AnnotationManager {
     }
     this.pages = [];
     this._shapeState = null;
+    this._history = [];
+    this._histIdx = -1;
+    this._fireHistory();
+  }
+
+  // ─── Undo / redo history (annotation layer only) ──────────────────────────────
+
+  /** Capture the current annotation state across all pages. */
+  _snapshot() {
+    return this.pages.map(({ pageIndex, fabricCanvas }) => ({
+      pageIndex,
+      objects: fabricCanvas.toObject(AnnotationManager.HISTORY_PROPS).objects || [],
+    }));
+  }
+
+  /** Push a new undo step after a committed mutation (add / move / delete). No-op while restoring. */
+  _commit() {
+    if (this._restoring) return;
+    if (this._history.length === 0) {
+      // Seed an empty baseline so the very first action can be undone back to "no annotations".
+      this._history = [this.pages.map(({ pageIndex }) => ({ pageIndex, objects: [] }))];
+      this._histIdx = 0;
+    }
+    this._history = this._history.slice(0, this._histIdx + 1);
+    this._history.push(this._snapshot());
+    if (this._history.length > 60) this._history.shift();   // cap memory
+    this._histIdx = this._history.length - 1;
+    this._fireHistory();
+  }
+
+  undo() { if (this._histIdx > 0) { this._histIdx--; this._restore(this._history[this._histIdx]); } }
+  redo() { if (this._histIdx < this._history.length - 1) { this._histIdx++; this._restore(this._history[this._histIdx]); } }
+  canUndo() { return this._histIdx > 0; }
+  canRedo() { return this._histIdx >= 0 && this._histIdx < this._history.length - 1; }
+
+  /** Re-load a snapshot onto every page's canvas (guarded so it doesn't record itself). */
+  _restore(snap) {
+    this._restoring = true;
+    let pending = this.pages.length;
+    const done = () => { if (--pending <= 0) { this._restoring = false; this._fireHistory(); } };
+    if (!this.pages.length) { this._restoring = false; this._fireHistory(); return; }
+    for (const { pageIndex, fabricCanvas } of this.pages) {
+      const entry = (snap || []).find(s => s.pageIndex === pageIndex);
+      const objects = entry ? entry.objects : [];
+      fabricCanvas.discardActiveObject();
+      Promise.resolve(fabricCanvas.loadFromJSON({ version: fabricCanvas.version, objects }))
+        .then(() => {
+          fabricCanvas.getObjects().forEach(o => { if (o.globalCompositeOperation === 'multiply') o._annotationType = o._annotationType || 'highlight'; });
+          fabricCanvas.requestRenderAll();
+          done();
+        })
+        .catch(done);
+    }
+  }
+
+  _fireHistory() {
+    if (typeof this.onHistoryChange === 'function') {
+      this.onHistoryChange(this._histIdx > 0, this._histIdx >= 0 && this._histIdx < this._history.length - 1);
+    }
+  }
+
+  /** Delete the selected object(s) on every page and record an undo step. */
+  deleteSelected() {
+    let removed = false;
+    for (const { fabricCanvas } of this.pages) {
+      const active = fabricCanvas.getActiveObjects();
+      if (active.length) {
+        active.forEach(o => fabricCanvas.remove(o));
+        fabricCanvas.discardActiveObject();
+        fabricCanvas.requestRenderAll();
+        removed = true;
+      }
+    }
+    if (removed) this._commit();
   }
 
   // ─── Tool Switching ───────────────────────────────────────────────────────────
@@ -167,32 +256,29 @@ export class AnnotationManager {
   _applyToolToPage(entry) {
     const { fabricCanvas, pageIndex, pv } = entry;
 
-    // Tear down previous mouse listeners
+    // Tear down previous tool listeners (keep object:modified — that's the history hook, not a tool).
     fabricCanvas.off('mouse:down');
     fabricCanvas.off('mouse:move');
     fabricCanvas.off('mouse:up');
+    fabricCanvas.off('path:created');
     fabricCanvas.isDrawingMode = false;
 
     const tool = this.activeTool;
 
-    if (tool === 'draw') {
-      fabricCanvas.isDrawingMode = true;
-      const brush = new PencilBrush(fabricCanvas);
-      brush.color = this.strokeColor;
-      brush.width = this.strokeWidth;
-      fabricCanvas.freeDrawingBrush = brush;
-
-    } else if (tool === 'freeHighlight') {
+    if (tool === 'freeHighlight') {
+      // Freehand highlighter (marker). The freehand DRAW tool was removed; this is the only brush tool.
       fabricCanvas.isDrawingMode = true;
       const brush = new PencilBrush(fabricCanvas);
       brush.color = this._hexToRgba(this.highlightColor, this.highlightOpacity);
-      brush.width = 22;
+      brush.width = Math.max(10, this.strokeWidth * 4);   // marker-width, scales with the thickness slider
       fabricCanvas.freeDrawingBrush = brush;
-      // Make resulting path semi-transparent
+      // Tag + style the resulting path as a translucent highlight stroke.
       fabricCanvas.on('path:created', (e) => {
-        e.path.set({ opacity: this.highlightOpacity, stroke: this.highlightColor });
+        e.path.set({ opacity: this.highlightOpacity, stroke: this.highlightColor, fill: null });
         e.path.globalCompositeOperation = 'multiply';
+        e.path._annotationType = 'highlight';
         fabricCanvas.renderAll();
+        this._commit();
       });
 
     } else if (tool === 'line' || tool === 'rect' || tool === 'circle') {
@@ -240,12 +326,12 @@ export class AnnotationManager {
         });
       } else if (this.activeTool === 'rect') {
         tempShape = new Rect({
-          left: p.x, top: p.y, width: 0, height: 0,
+          left: p.x, top: p.y, width: 0, height: 0, originX: 'left', originY: 'top',
           stroke: color, strokeWidth: w, fill: 'transparent', selectable: false,
         });
       } else if (this.activeTool === 'circle') {
         tempShape = new Ellipse({
-          left: p.x, top: p.y, rx: 0, ry: 0,
+          left: p.x, top: p.y, rx: 0, ry: 0, originX: 'left', originY: 'top',
           stroke: color, strokeWidth: w, fill: 'transparent', selectable: false,
         });
       }
@@ -280,13 +366,21 @@ export class AnnotationManager {
     });
 
     fabricCanvas.on('mouse:up', () => {
-      if (tempShape) {
-        tempShape.set({ selectable: true });
-        fabricCanvas.setActiveObject(tempShape);
+      const finished = tempShape;
+      if (finished) {
+        finished.set({ selectable: true });
+        fabricCanvas.setActiveObject(finished);
       }
       origin = null;
       tempShape = null;
       fabricCanvas.renderAll();
+      // Discard a zero-size shape (a click with no drag); otherwise record an undo step.
+      if (finished) {
+        const w = finished.width || finished.rx * 2 || 0, h = finished.height || finished.ry * 2 || 0;
+        const isLine = finished.type === 'line';
+        if (!isLine && w < 2 && h < 2) { fabricCanvas.remove(finished); fabricCanvas.requestRenderAll(); }
+        else this._commit();
+      }
     });
   }
 
@@ -321,9 +415,18 @@ export class AnnotationManager {
       const hl = new Rect({
         left: hit.left,
         top: hit.top,
+        // Fabric v6+ defaults originX/originY to 'center'; left/top here are the word's
+        // TOP-LEFT corner, so pin the origin or the highlight is drawn shifted up-left by
+        // half its size (the "highlight in the wrong place" bug).
+        originX: 'left',
+        originY: 'top',
         width: hit.right - hit.left,
         height: hit.bottom - hit.top,
-        fill: this._hexToRgba(this.highlightColor, this.highlightOpacity),
+        // Translucency lives on the OBJECT's opacity (not the fill alpha) so it serializes to the saved
+        // /Highlight annotation's opacity — otherwise the picked opacity is lost on save. The fill is the
+        // solid colour; opacity tints it. (Mirrors the freehand highlighter, which sets path.opacity.)
+        fill: this._hexToRgba(this.highlightColor, 1),
+        opacity: this.highlightOpacity,
         stroke: 'transparent',
         selectable: true,
         hasControls: true,
@@ -332,6 +435,7 @@ export class AnnotationManager {
       hl._annotationType = 'highlight';
       fabricCanvas.add(hl);
       fabricCanvas.renderAll();
+      this._commit();
     });
   }
 
@@ -383,6 +487,7 @@ export class AnnotationManager {
         group._cols = cols;
         fabricCanvas.add(group);
         fabricCanvas.renderAll();
+        this._commit();
 
         // Re-wire for the next table click
         this._wireTableInsert(entry);
@@ -478,24 +583,35 @@ export class AnnotationManager {
 
     for (const obj of fabricCanvas.getObjects()) {
       if (obj.type === 'path') {
-        // Freehand draw or freehand highlight — serialize as SVG path
-        const path = obj.path ? obj.path.map(seg => seg.join(' ')).join(' ') : '';
-        if (!path) continue;
+        // Freehand highlighter stroke. Flatten the Fabric path (M/L/Q/C) to a polyline of PDF-point
+        // vertices: take each command's on-curve point, transform by the object's matrix (minus its
+        // pathOffset) into intrinsic scene px, then to PDF points. The backend draws this as a polyline
+        // — faithful and far simpler/safer than re-parsing an SVG string + matrix on the server.
+        const cmds = obj.path || [];
+        if (!cmds.length) continue;
         const m = obj.calcTransformMatrix();
+        const off = obj.pathOffset || { x: 0, y: 0 };
+        const toScene = (lx, ly) => ({ x: m[0] * (lx - off.x) + m[2] * (ly - off.y) + m[4],
+                                       y: m[1] * (lx - off.x) + m[3] * (ly - off.y) + m[5] });
+        const qAt = (p0, cp, p1, t) => { const u = 1 - t; return { x: u * u * p0.x + 2 * u * t * cp.x + t * t * p1.x, y: u * u * p0.y + 2 * u * t * cp.y + t * t * p1.y }; };
+        const pts = [];
+        const push = (lx, ly) => { const p = toScene(lx, ly); pts.push([toPdfX(p.x), toPdfY(p.y)]); };
+        let cur = null;
+        for (const seg of cmds) {
+          const c = seg[0];
+          if (c === 'M' || c === 'L') { cur = { x: seg[1], y: seg[2] }; push(cur.x, cur.y); }
+          else if (c === 'Q') { const cp = { x: seg[1], y: seg[2] }, end = { x: seg[3], y: seg[4] }, p0 = cur || end; const mid = qAt(p0, cp, end, 0.5); push(mid.x, mid.y); push(end.x, end.y); cur = end; }
+          else if (c === 'C') { const end = { x: seg[5], y: seg[6] }; push(end.x, end.y); cur = end; }
+        }
+        if (pts.length < 2) continue;
         result.push({
           kind: 'ann-path',
           pageIndex,
-          svgPath: path,
-          matrix: m,
+          points: pts,                                   // [[x,y]…] PDF points, bottom-left origin
           stroke: obj.stroke,
-          strokeWidth: toPdfLen(obj.strokeWidth || 2),
+          strokeWidth: toPdfLen((obj.strokeWidth || 2) * (obj.scaleX || 1)),
           opacity: obj.opacity ?? 1,
           isHighlight: !!(obj._annotationType === 'highlight' || obj.globalCompositeOperation === 'multiply'),
-          pageH,
-          // Pass the scale factors so the ann-path consumer can map SVG path
-          // coordinates (which are in Fabric/display pixels) to PDF points.
-          displayScale: ds,
-          appScale,
         });
 
       } else if (obj.type === 'line') {

@@ -1431,6 +1431,43 @@ def edit_pdf():
                     page.draw_line(fitz.Point(x1, ph - y1), fitz.Point(x2, ph - y2),
                                    color=stroke, width=sw)
 
+                elif kind == 'ann-path':
+                    # Freehand (highlighter) stroke: a polyline of PDF-point vertices (bottom-left
+                    # origin). Draw with round caps/joins; a highlight stroke is translucent.
+                    pts = ann.get('points') or []
+                    poly = [fitz.Point(float(p[0]), ph - float(p[1])) for p in pts
+                            if isinstance(p, (list, tuple)) and len(p) >= 2]
+                    if len(poly) >= 2:
+                        stroke = _rgba_to_rgb(ann.get('stroke')) or (1.0, 0.84, 0.0)
+                        sw = max(0.5, float(ann.get('strokeWidth', 2)))
+                        op = _clamp_opacity(ann.get('opacity')) if ann.get('isHighlight') else 1.0
+                        sh = page.new_shape()
+                        sh.draw_polyline(poly)
+                        sh.finish(color=stroke, width=sw, stroke_opacity=op,
+                                  lineCap=1, lineJoin=1, closePath=False)
+                        sh.commit()
+
+                elif kind == 'ann-table':
+                    # Grid: rows+1 horizontal + cols+1 vertical lines over the table box.
+                    x = float(ann.get('x', 0))
+                    y = float(ann.get('y', 0))          # bottom-left corner (PDF space)
+                    w = float(ann.get('width', 0))
+                    h = float(ann.get('height', 0))
+                    rows = max(1, int(ann.get('rows', 3)))
+                    cols = max(1, int(ann.get('cols', 3)))
+                    stroke = _rgba_to_rgb(ann.get('stroke')) or (0.18, 0.23, 0.36)
+                    sw = float(ann.get('strokeWidth', 1)) or 1.0
+                    top = ph - y - h                    # top edge (PyMuPDF top-origin)
+                    sh = page.new_shape()
+                    for r in range(rows + 1):
+                        yy = top + h * r / rows
+                        sh.draw_line(fitz.Point(x, yy), fitz.Point(x + w, yy))
+                    for c in range(cols + 1):
+                        xx = x + w * c / cols
+                        sh.draw_line(fitz.Point(xx, top), fitz.Point(xx, top + h))
+                    sh.finish(color=stroke, width=sw)
+                    sh.commit()
+
             except Exception as _ann_err:
                 print(f"  annotation draw error ({ann.get('kind','')}): {_ann_err}")
 
