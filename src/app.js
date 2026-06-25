@@ -34,8 +34,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 // Note: very large PDFs are slower to render/save since everything runs in the browser.
 // Mirrors the backend MAX_PDF_MB so an oversized file is rejected here with a friendly
 // message instead of bouncing off the server with a 413.
-const MAX_FILE_MB = 30;
-const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 
 class PDFEditorApp {
   constructor() {
