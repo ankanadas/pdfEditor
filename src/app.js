@@ -4,6 +4,7 @@ import { initMerge } from './merge.js';
 import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { AnnotationManager } from './annotationManager.js';
+import { loadImage, imageRatio } from './util/image.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
 // No external network request is made, so the app works fully offline and never reaches
@@ -2097,7 +2098,7 @@ class PDFEditorApp {
     const reader = new FileReader();
     reader.onload = async () => {
       const dataUrl = reader.result;
-      const ratio = await this.imageRatio(dataUrl);
+      const ratio = await imageRatio(dataUrl);
       const chips = document.getElementById('stampChips');
       if (!chips) return;
 
@@ -2496,7 +2497,7 @@ class PDFEditorApp {
     } else if (this.signTab === 'image') {
       if (!this.signImageData) { this.showStatus('Choose an image first', 'error'); return; }
       dataUrl = this.signImageData;
-      ratio = await this.imageRatio(dataUrl);
+      ratio = await imageRatio(dataUrl);
     }
     if (!dataUrl) return;
 
@@ -2526,10 +2527,6 @@ class PDFEditorApp {
   }
 
   /** Natural height/width ratio of an image data-URL. */
-  imageRatio(src) {
-    return this.loadImage(src).then(im => (im.naturalHeight / im.naturalWidth) || 0.4).catch(() => 0.4);
-  }
-
   /** Crop a canvas to its non-transparent content; returns a trimmed PNG data URL + size. */
   trimCanvas(canvas) {
     const ctx = canvas.getContext('2d');
@@ -2554,16 +2551,6 @@ class PDFEditorApp {
     out.width = tw; out.height = th;
     out.getContext('2d').drawImage(canvas, minX, minY, tw, th, 0, 0, tw, th);
     return { dataUrl: out.toDataURL('image/png'), w: tw, h: th };
-  }
-
-  /** Load a data-URL into an HTMLImageElement (used by the flatten fallback). */
-  loadImage(src) {
-    return new Promise((resolve, reject) => {
-      const im = new Image();
-      im.onload = () => resolve(im);
-      im.onerror = reject;
-      im.src = src;
-    });
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -4243,7 +4230,7 @@ class PDFEditorApp {
       // Paint this page's edits (coords are PDF points, top-left origin -> * S px).
       for (const e of edits.filter(e => e.pageIndex === p)) {
         if (e.kind === 'image' && e.dataUrl) {
-          const im = await this.loadImage(e.dataUrl);
+          const im = await loadImage(e.dataUrl);
           cx.drawImage(im, e.x * S, e.top * S, e.width * S, e.height * S);
           continue;
         }
