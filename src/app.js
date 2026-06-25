@@ -4,6 +4,7 @@ import { initMerge } from './merge.js';
 import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { AnnotationManager } from './annotationManager.js';
+import { SIGN_FONTS, FONT_CATALOG, FONT_BY_KEY, TOOLBAR_FONT_KEYS, LINK_BLUE } from './util/fontCatalog.js';
 import { loadImage, imageRatio } from './util/image.js';
 import { hexToRgb, rgbCss, rgbToHex } from './util/color.js';
 import { readRegion, sampleLineColors, trimCanvas, roundRectPath } from './util/canvas.js';
@@ -397,84 +398,23 @@ class PDFEditorApp {
 
   // ─── Annotation toolbar wiring ────────────────────────────────────────────────
 
-  // ----- Signature dialog: Draw / Type / Image -----
-  // Fonts offered on the Type tab. Each typed signature is rasterised to an image in the
-  // chosen font, so the saved result looks EXACTLY like the preview (no font substitution).
-  static get SIGN_FONTS() {
-    return [
-      '"Snell Roundhand","Savoye LET",cursive',
-      '"Brush Script MT","Bradley Hand",cursive',
-      '"Apple Chancery","Segoe Script",cursive',
-      '"Savoye LET","Snell Roundhand",cursive',
-    ];
-  }
 
-  /** The full font catalogue shown in the picker: { key, name, tag, css }. `css` is the on-screen
-   *  PREVIEW / editor font-family — the proprietary name first (so a user who has it installed sees
-   *  it), then the bundled open `pf-*` face (always available, what the PDF actually embeds), then a
-   *  generic. The first 10 are the originally-implemented fonts (unchanged); the rest are new. */
-  static get FONT_CATALOG() {
-    return [
-      { key: 'arial', name: 'Arial', tag: 'Sans', css: 'Arial, "pf-arimo", sans-serif' },
-      { key: 'helvetica', name: 'Helvetica', tag: 'Sans', css: 'Helvetica, "pf-arimo", Arial, sans-serif' },
-      { key: 'times', name: 'Times New Roman', tag: 'Serif', css: '"Times New Roman", "pf-tinos", Times, serif' },
-      { key: 'georgia', name: 'Georgia', tag: 'Serif', css: 'Georgia, "pf-gelasio", serif' },
-      { key: 'verdana', name: 'Verdana', tag: 'Sans', css: 'Verdana, "pf-arimo", Geneva, sans-serif' },
-      { key: 'courier', name: 'Courier New', tag: 'Mono', css: '"Courier New", "pf-cousine", Courier, monospace' },
-      { key: 'roboto', name: 'Roboto', tag: 'Sans', css: 'Roboto, "pf-roboto", Arial, sans-serif' },
-      { key: 'opensans', name: 'Open Sans', tag: 'Sans', css: '"Open Sans", "pf-open-sans", Arial, sans-serif' },
-      { key: 'montserrat', name: 'Montserrat', tag: 'Sans', css: 'Montserrat, "pf-montserrat", Arial, sans-serif' },
-      { key: 'comicsans', name: 'Comic Sans MS', tag: 'Script', css: '"Comic Sans MS", "pf-comic-neue", cursive' },
-      { key: 'calibri', name: 'Calibri', tag: 'Sans', css: 'Calibri, "pf-carlito", sans-serif' },
-      { key: 'tahoma', name: 'Tahoma', tag: 'Sans', css: 'Tahoma, "pf-arimo", sans-serif' },
-      { key: 'trebuchet', name: 'Trebuchet MS', tag: 'Sans', css: '"Trebuchet MS", "pf-arimo", sans-serif' },
-      { key: 'inter', name: 'Inter', tag: 'Sans', css: 'Inter, "pf-inter", sans-serif' },
-      { key: 'lato', name: 'Lato', tag: 'Sans', css: 'Lato, "pf-lato", sans-serif' },
-      { key: 'poppins', name: 'Poppins', tag: 'Sans', css: 'Poppins, "pf-poppins", sans-serif' },
-      { key: 'nunito', name: 'Nunito', tag: 'Sans', css: 'Nunito, "pf-nunito", sans-serif' },
-      { key: 'sourcesans', name: 'Source Sans Pro', tag: 'Sans', css: '"Source Sans Pro", "Source Sans 3", "pf-source-sans-3", sans-serif' },
-      { key: 'ubuntu', name: 'Ubuntu', tag: 'Sans', css: 'Ubuntu, "pf-ubuntu", sans-serif' },
-      { key: 'ptsans', name: 'PT Sans', tag: 'Sans', css: '"PT Sans", "pf-pt-sans", sans-serif' },
-      { key: 'garamond', name: 'Garamond', tag: 'Serif', css: 'Garamond, "pf-eb-garamond", serif' },
-      { key: 'cambria', name: 'Cambria', tag: 'Serif', css: 'Cambria, "pf-caladea", serif' },
-      { key: 'baskerville', name: 'Baskerville', tag: 'Serif', css: 'Baskerville, "pf-libre-baskerville", serif' },
-      { key: 'palatino', name: 'Palatino', tag: 'Serif', css: 'Palatino, "Palatino Linotype", "pf-noto-serif", serif' },
-      { key: 'merriweather', name: 'Merriweather', tag: 'Serif', css: 'Merriweather, "pf-merriweather", serif' },
-      { key: 'librebaskerville', name: 'Libre Baskerville', tag: 'Serif', css: '"Libre Baskerville", "pf-libre-baskerville", serif' },
-      { key: 'playfair', name: 'Playfair Display', tag: 'Serif', css: '"Playfair Display", "pf-playfair-display", serif' },
-      { key: 'notoserif', name: 'Noto Serif', tag: 'Serif', css: '"Noto Serif", "pf-noto-serif", serif' },
-      { key: 'consolas', name: 'Consolas', tag: 'Mono', css: 'Consolas, "pf-cousine", monospace' },
-      { key: 'firacode', name: 'Fira Code', tag: 'Mono', css: '"Fira Code", "pf-fira-code", monospace' },
-      { key: 'jetbrainsmono', name: 'JetBrains Mono', tag: 'Mono', css: '"JetBrains Mono", "pf-jetbrains-mono", monospace' },
-      { key: 'sourcecodepro', name: 'Source Code Pro', tag: 'Mono', css: '"Source Code Pro", "pf-source-code-pro", monospace' },
-      { key: 'ibmplexmono', name: 'IBM Plex Mono', tag: 'Mono', css: '"IBM Plex Mono", "pf-ibm-plex-mono", monospace' },
-      { key: 'brushscript', name: 'Brush Script', tag: 'Script', css: '"Brush Script MT", "pf-pacifico", cursive' },
-      { key: 'pacifico', name: 'Pacifico', tag: 'Script', css: 'Pacifico, "pf-pacifico", cursive' },
-      { key: 'comicneue', name: 'Comic Neue', tag: 'Script', css: '"Comic Neue", "pf-comic-neue", cursive' },
-    ];
-  }
 
-  static get _FONT_BY_KEY() {
-    if (!PDFEditorApp.__fbk) PDFEditorApp.__fbk = Object.fromEntries(PDFEditorApp.FONT_CATALOG.map(f => [f.key, f]));
-    return PDFEditorApp.__fbk;
-  }
 
   /** The on-screen font-family for a stored key (editor text + dropdown preview). */
   _familyCss(f) {
-    const e = PDFEditorApp._FONT_BY_KEY[(f || '').toLowerCase()];
+    const e = FONT_BY_KEY[(f || '').toLowerCase()];
     if (e) return e.css;
     return ({ serif: '"Times New Roman", "pf-tinos", serif', mono: '"Courier New", "pf-cousine", monospace' })[f]
       || 'Arial, "pf-arimo", sans-serif';
   }
 
-  // Every font-family key the picker offers.
-  static get TOOLBAR_FONT_KEYS() { return PDFEditorApp.FONT_CATALOG.map(f => f.key); }
 
   /** Normalise a stored fontFamily to a catalogue key. Catalogue keys pass through; the legacy
    *  sans/serif/mono map to their nearest entry; anything else -> '' (unknown). */
   _normFamilyKey(fam) {
     const f = (fam || '').toLowerCase();
-    if (PDFEditorApp._FONT_BY_KEY[f]) return f;
+    if (FONT_BY_KEY[f]) return f;
     return ({ sans: 'arial', serif: 'times', mono: 'courier' })[f] || '';
   }
 
@@ -505,11 +445,11 @@ class PDFEditorApp {
 
   // ----- Searchable font picker (built once; the toolbar shows/reuses it) ---------------------------
   _recentFonts() {
-    try { return JSON.parse(localStorage.getItem('qpe_recent_fonts') || '[]').filter(k => PDFEditorApp._FONT_BY_KEY[k]); }
+    try { return JSON.parse(localStorage.getItem('qpe_recent_fonts') || '[]').filter(k => FONT_BY_KEY[k]); }
     catch (_) { return []; }
   }
   _pushRecentFont(key) {
-    if (!PDFEditorApp._FONT_BY_KEY[key]) return;
+    if (!FONT_BY_KEY[key]) return;
     const list = [key, ...this._recentFonts().filter(k => k !== key)].slice(0, 5);
     try { localStorage.setItem('qpe_recent_fonts', JSON.stringify(list)); } catch (_) {}
   }
@@ -569,10 +509,10 @@ class PDFEditorApp {
     const match = (f) => !q || f.name.toLowerCase().includes(q) || f.tag.toLowerCase().includes(q);
     let html = '';
     if (!q) {
-      const recent = this._recentFonts().map(k => PDFEditorApp._FONT_BY_KEY[k]).filter(Boolean);
+      const recent = this._recentFonts().map(k => FONT_BY_KEY[k]).filter(Boolean);
       if (recent.length) html += `<div class="tt-font-group">Recently used</div>` + recent.map(optHTML).join('') + `<div class="tt-font-group">All fonts</div>`;
     }
-    const shown = PDFEditorApp.FONT_CATALOG.filter(match);
+    const shown = FONT_CATALOG.filter(match);
     html += shown.map(optHTML).join('');
     list.innerHTML = html;
     if (empty) empty.hidden = shown.length > 0;
@@ -584,7 +524,7 @@ class PDFEditorApp {
     const k = (key || '').toLowerCase();
     const hidden = document.getElementById('tt-font');
     const label = document.getElementById('tt-font-label');
-    const e = PDFEditorApp._FONT_BY_KEY[k];
+    const e = FONT_BY_KEY[k];
     if (hidden) hidden.value = e ? k : '';
     if (label) {
       label.textContent = e ? e.name : (labelOverride || 'Select a Font Style');
@@ -592,8 +532,6 @@ class PDFEditorApp {
     }
   }
 
-  // Standard hyperlink blue (classic browser link colour).
-  static get LINK_BLUE() { return [0, 0, 238]; }
 
   // ----- Undo / redo (snapshots of this.edits) -----
 

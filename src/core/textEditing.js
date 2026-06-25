@@ -4,6 +4,7 @@ import { rgb } from 'pdf-lib';
 import { sampleLineColors } from '../util/canvas.js';
 import { rgbCss } from '../util/color.js';
 import { fontStyleFromPdfjs } from '../util/fonts.js';
+import { LINK_BLUE } from '../util/fontCatalog.js';
 
 export const TextEditingMethods = {
   /**
@@ -118,7 +119,7 @@ export const TextEditingMethods = {
         if (b > a) {
           const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           div.innerHTML = esc(shownText.slice(0, a))
-            + `<span class="tt-has-link" style="color:${rgbCss(this.constructor.LINK_BLUE)};text-decoration:underline">${esc(shownText.slice(a, b))}</span>`
+            + `<span class="tt-has-link" style="color:${rgbCss(LINK_BLUE)};text-decoration:underline">${esc(shownText.slice(a, b))}</span>`
             + esc(shownText.slice(b));
         }
       } else if (line.styleRuns && line.styleRuns.length) {
@@ -281,7 +282,7 @@ export const TextEditingMethods = {
       if (b > a) {
         const seg = [];
         if (a > 0) seg.push({ text: t.slice(0, a) });
-        seg.push({ text: t.slice(a, b), color: this.constructor.LINK_BLUE, underline: true, link: line.linkRange.uri });
+        seg.push({ text: t.slice(a, b), color: LINK_BLUE, underline: true, link: line.linkRange.uri });
         if (b < t.length) seg.push({ text: t.slice(b) });
         edit.runs = [seg.filter(r => r.text)];
         edit.linkRange = line.linkRange;     // kept so the partial style re-renders on rebuild

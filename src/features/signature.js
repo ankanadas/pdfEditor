@@ -2,6 +2,7 @@
 // placement. Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js.
 import { imageRatio } from '../util/image.js';
 import { trimCanvas } from '../util/canvas.js';
+import { SIGN_FONTS } from '../util/fontCatalog.js';
 
 const SIG_STORE_KEY = 'qpe_signatures';
 const SIG_STORE_MAX = 8;
@@ -11,7 +12,7 @@ export const SignatureMethods = {
     this.signTab = 'draw';
     this.signColor = '#111318';
     this.signPenWidth = 2.8;
-    this.signTypeFont = this.constructor.SIGN_FONTS[0];
+    this.signTypeFont = SIGN_FONTS[0];
     this.signImageData = null;
 
     // Tabs
@@ -85,7 +86,7 @@ export const SignatureMethods = {
     if (!list) return;
     const name = (document.getElementById('signTypeInput')?.value || '').trim();
     list.innerHTML = '';
-    this.constructor.SIGN_FONTS.forEach((font) => {
+    SIGN_FONTS.forEach((font) => {
       const opt = document.createElement('div');
       opt.className = 'sign-font' + (font === this.signTypeFont ? ' active' : '');
       opt.style.fontFamily = font;
