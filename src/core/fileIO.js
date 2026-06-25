@@ -1,0 +1,190 @@
+// File I/O — open/parse a PDF, enable UI after load, close the document.
+// Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js (this = the app).
+import * as pdfjsLib from 'pdfjs-dist';
+import { confirmDialog } from '../util/dialog.js';
+import { PDFBackendService } from '../services/pdfBackendService.js';
+
+export const FileIOMethods = {
+  /** Enable all the tools/controls that require a loaded PDF. */
+  enableUiAfterLoad() {
+    ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn', 'pagesPanelBtn',
+     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn',
+     'annotateModeBtn', 'clearSignatureBtn']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+    // Warm the edit backend now (free hosts sleep when idle) so it's awake by the time the
+    // user saves — avoids the first save silently falling back to client-side. Fire-and-forget.
+    PDFBackendService.checkHealth().catch(() => {});
+  },
+  /** Clear the loaded PDF and return to the empty upload state. Used by the Merge panel
+   *  when the user removes the current document (the one open here). */
+  closeDocument() {
+    this.pdfJsDoc = null;
+    this.originalFile = null;
+    this.originalFileData = null;
+    this.edits = [];
+    this.currentPage = 0;
+    if (typeof this.resetHistory === 'function') this.resetHistory();
+    document.body.classList.remove('has-pdf');
+    document.body.removeAttribute('data-mode');
+    const container = document.getElementById('canvasContainer');
+    if (container) container.innerHTML = '';
+    const fileNameEl = document.getElementById('fileName');
+    if (fileNameEl) fileNameEl.textContent = '';
+    const fileInput = document.getElementById('fileInput');
+    if (fileInput) fileInput.value = '';
+    const pageInfo = document.getElementById('pageInfo');
+    if (pageInfo) pageInfo.textContent = 'No PDF loaded';
+    const modeIndicator = document.getElementById('modeIndicator');
+    if (modeIndicator) modeIndicator.textContent = 'No PDF loaded';
+    this.annotationManager.unmountAll();
+    ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn', 'pagesPanelBtn',
+     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn',
+     'annotateModeBtn', 'clearSignatureBtn']
+      .forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = true; });
+    document.querySelectorAll('.tool.active').forEach((el) => el.classList.remove('active'));
+  },
+  async handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    // Opening a new PDF replaces the current one — warn if there are unsaved edits.
+    if (this.edits.length > 0) {
+      const proceed = await confirmDialog(
+        'Opening a new PDF will discard your unsaved edits. To revert changes instead, use Undo.'
+      );
+      if (!proceed) { event.target.value = ''; return; }
+    }
+
+    // Enforce the size limit before doing any work.
+    if (file.size > MAX_FILE_BYTES) {
+      const mb = (file.size / (1024 * 1024)).toFixed(1);
+      this.showStatus(`That PDF is ${mb} MB — please choose a file under ${MAX_FILE_MB} MB.`, 'error');
+      document.body.classList.remove('has-pdf');  // keep the upload screen showing
+      event.target.value = '';                     // allow re-selecting after picking a smaller file
+      return;
+    }
+    // Size OK — reveal the editor.
+    document.body.classList.add('has-pdf');
+
+    try {
+      console.log('File selected:', file.name);
+      this.showStatus('Loading PDF...', 'info');
+
+      const fileNameEl = document.getElementById('fileName');
+      if (fileNameEl) fileNameEl.textContent = file.name;
+
+      // Store original file; start with a clean edit/undo history for the new document
+      this.originalFile = file;
+      this.edits = [];
+      this.resetHistory();
+
+      // Read file as ArrayBuffer and clone it to prevent detachment
+      const arrayBuffer = await file.arrayBuffer();
+
+      // Load into PDF.js for rendering. If the PDF is encrypted, PDF.js invokes onPassword;
+      // we prompt the user and capture the working password so the backend can produce a
+      // decrypted (unlocked) working copy. Empty-password / permission-only files never trigger
+      // onPassword (PDF.js opens them automatically) and behave exactly as before.
+      let enteredPassword = '';
+      let userCancelledPw = false;
+      const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }); // Clone for PDF.js
+      loadingTask.onPassword = (updatePassword, reason) => {
+        const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
+        this.promptPassword(incorrect).then((pw) => {
+          if (pw == null) { userCancelledPw = true; try { loadingTask.destroy(); } catch (_) {} }
+          else { enteredPassword = pw; updatePassword(pw); }
+        });
+      };
+      try {
+        this.pdfJsDoc = await loadingTask.promise;
+      } catch (err) {
+        // Cancelled password prompt (task destroyed) -> quietly back out of loading.
+        if (userCancelledPw || this._isPasswordError(err)) {
+          document.body.classList.remove('has-pdf');
+          const fn = document.getElementById('fileName'); if (fn) fn.textContent = '';
+          this.showStatus('Opening cancelled — the PDF is password-protected.', 'info');
+          return;
+        }
+        throw err;
+      }
+      console.log('PDF.js loaded PDF');
+
+      // Detect owner editing restrictions on the ORIGINAL document now, before the decrypt step
+      // below reloads PDF.js from a permission-free copy (which would otherwise hide the restriction).
+      // This covers both permission-only PDFs (open without a password) and password-protected PDFs
+      // that ALSO restrict modification — both get the authorisation confirmation before editing.
+      const editRestricted = await this._detectEditRestriction();
+
+      // If the user supplied a real password, fetch an unlocked copy from the backend so the
+      // edit/save pipeline works on plain bytes (the saved copy is unlocked, by design). If the
+      // backend can't be reached, we keep the viewable PDF.js doc and the save chain flattens.
+      let workingData = arrayBuffer.slice(0);
+      if (enteredPassword) {
+        this.showStatus('Unlocking PDF…', 'info');
+        try {
+          const res = await PDFBackendService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
+          if (res.bytes) {
+            const dec = res.bytes;
+            workingData = dec.buffer.slice(dec.byteOffset, dec.byteOffset + dec.byteLength);
+            this.pdfJsDoc = await pdfjsLib.getDocument({ data: dec.slice(0) }).promise;
+          } else {
+            console.warn('Backend could not unlock the PDF; it will save as a flattened copy.');
+          }
+        } catch (e) {
+          console.warn('Backend decrypt unavailable; protected PDF will save as a flattened copy:', e);
+        }
+      }
+      this.originalFileData = workingData; // Clone the (possibly decrypted) ArrayBuffer
+
+      // Owner/editing-restriction gate: ask the user to confirm they're authorised before their FIRST
+      // edit (see _confirmEditAllowed / the stage mousedown gate). Reset the confirmation per document.
+      this._editRestricted = editRestricted;
+      this._restrictionConfirmed = false;
+      
+      // Try to load into controller (pdf-lib) for editing - but don't fail if it doesn't work
+      try {
+        await this.controller.loadPDF(file);
+        console.log('Controller loaded PDF');
+      } catch (controllerError) {
+        console.warn('pdf-lib failed to load PDF, but we can still view and edit:', controllerError);
+        // Mark as loaded anyway so we can use text editing
+        this.controller.isLoaded = true;
+        // Don't show error - backend editing will work fine
+        console.log('Using backend-only mode for this PDF');
+        
+        // Manually enable controls since controller won't emit 'loaded' event
+        this.enableUiAfterLoad();
+        this.showStatus(`PDF loaded successfully! ${this.pdfJsDoc.numPages} page(s)`, 'success');
+      }
+      
+      // Extract text geometry with PDF.js — the same engine that renders the canvas —
+      // so the editable overlays align exactly. The backend is used only when saving.
+      await this.extractTextFromPDFjs();
+
+      this.currentPage = 0;
+      // Smart default: don't force a tool choice. Set it BEFORE buildPages so the pages render
+      // the editable line boxes straight away (the page is immediately interactive — clicking
+      // existing text edits it, clicking a blank area adds new text; see setMode/handleCanvasClick).
+      // Setting it up front also means a fast tool click during load can't be clobbered by a late
+      // mode switch.
+      this.setMode('auto');
+      await this.buildPages();
+      document.getElementById('stage')?.scrollTo({ top: 0 });
+
+    } catch (error) {
+      console.error('Error loading PDF:', error);
+      
+      // Provide more specific error messages
+      let errorMessage = 'Failed to load PDF';
+      if (error.message.includes('Invalid') || error.message.includes('corrupted')) {
+        errorMessage = 'This PDF file appears to be corrupted or in an unsupported format';
+      } else if (error.message.includes('password') || error.message.includes('encrypted')) {
+        errorMessage = 'This PDF is protected and could not be opened.';
+      } else {
+        errorMessage = `Failed to load PDF: ${error.message}`;
+      }
+      
+      this.showStatus(errorMessage, 'error');
+    }
+  },
+};
