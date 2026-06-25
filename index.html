@@ -165,8 +165,8 @@
     }
     .tool svg { width: 22px; height: 22px; }
     /* Sticker icons (fun-ui): raster PNGs with transparent backgrounds. */
-    .tool .tool-ico { width: 38px; height: 38px; object-fit: contain; display: block; transition: transform .15s ease; }
-    .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 42px; height: 42px; }
+    .tool .tool-ico { width: 32px; height: 32px; object-fit: contain; display: block; transition: transform .15s ease; }
+    .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 36px; height: 36px; }
     .tool:hover:not(:disabled) .tool-ico { transform: scale(1.08); }
     .tool:disabled .tool-ico { filter: grayscale(.2); }
     .tool:hover:not(:disabled) { background: #f4f4fb; color: var(--ink); }
@@ -242,14 +242,6 @@
     .ab-label { font-weight: 700; color: var(--brand-dark); font-size: 14px; }
     .ab-hint { font-size: 13px; color: #6a5acd; }
     .ab-or { font-size: 12px; font-weight: 700; color: #8a7fdb; letter-spacing: .5px; }
-    #addFont { padding: 8px 10px; }
-    .ab-toggle {
-      width: 34px; height: 34px; border: 1px solid #c9bfff; background: #fff; color: var(--ink);
-      border-radius: 8px; cursor: pointer; font-size: 14px;
-    }
-    .ab-toggle:hover { background: #efecff; }
-    .ab-toggle.on { background: var(--brand); border-color: var(--brand); color: #fff; }
-    .ab-toggle i { font-family: Georgia, serif; }
 
     .ctx { display: none; align-items: center; gap: 10px; }
     /* Stamp picker chips (each sets its own --c colour inline) */
@@ -558,6 +550,8 @@
     }
     .insert-overlay:hover .insert-handle, .insert-overlay:hover .insert-del,
     .insert-overlay:hover .insert-rotate { display: block; }
+    .insert-overlay.sig-active .insert-handle, .insert-overlay.sig-active .insert-del,
+    .insert-overlay.sig-active .insert-rotate { display: block; }
     .insert-overlay.insert-image { padding: 0; }
     .insert-overlay.insert-image img { display: block; width: 100%; height: 100%; pointer-events: none; }
     /* Rotation handle: a wide, transparent hit-strip that bridges from the knob (above the
@@ -575,6 +569,43 @@
       background: #6d5efc;
     }
     .insert-rotate:active { cursor: grabbing; }
+
+    .sig-ghost {
+      position: fixed; left: 0; top: 0; z-index: 1200; pointer-events: none;
+      opacity: .55; border: none; object-fit: contain; will-change: transform;
+    }
+    body.placing-signature .page-canvas { cursor: crosshair; }
+
+    /* Saved-signatures picker popover (appears beside the Sign tool) */
+    .sign-picker {
+      position: fixed; z-index: 1100; width: 232px; max-width: 88vw;
+      background: #fff; border: 1px solid #d9d4ff; border-radius: 12px; padding: 10px;
+      box-shadow: 0 14px 40px rgba(20, 22, 40, .26);
+    }
+    .sign-picker[hidden] { display: none; }
+    .sign-picker-title {
+      font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+      letter-spacing: .4px; margin: 2px 2px 8px;
+    }
+    .sign-picker-list { display: flex; flex-direction: column; gap: 8px; max-height: 256px; overflow-y: auto; }
+    .sign-pick-item { position: relative; display: flex; }
+    .sign-pick-thumb {
+      flex: 1; min-height: 48px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 9px;
+      background: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .sign-pick-thumb:hover { border-color: var(--brand); background: #f6f5ff; }
+    .sign-pick-thumb img { max-width: 100%; max-height: 46px; object-fit: contain; pointer-events: none; }
+    .sign-pick-del {
+      position: absolute; top: -7px; right: -7px; width: 22px; height: 22px; border-radius: 50%;
+      border: 2px solid #fff; background: #e5484d; color: #fff; font-size: 14px; line-height: 1;
+      cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.25);
+    }
+    .sign-picker-add {
+      width: 100%; margin-top: 10px; padding: 11px 12px; border: 1px dashed var(--brand);
+      border-radius: 9px; background: #efecff; color: var(--brand-dark); font-weight: 700;
+      font-size: 13.5px; cursor: pointer;
+    }
+    .sign-picker-add:hover { background: #e6e1ff; }
 
     /* Draw-your-signature pad */
     .signpad-backdrop {
@@ -975,6 +1006,91 @@
     .pw-actions { display: flex; gap: 10px; margin-top: 18px; }
     .pw-actions .btn { flex: 1; justify-content: center; padding: 11px 14px; font-weight: 700; }
 
+    /* =====================================================================================
+       MOBILE / PHONE LAYOUT  (≤767px)
+       Tablet & desktop (≥768px) are intentionally untouched — every rule below is scoped to
+       this media query and only REPOSITIONS existing elements (no new DOM, no JS, no scale
+       transforms). The page canvas keeps max-width:100% and the app's getBoundingClientRect
+       based coordinate mapping, so editing stays pixel-accurate at any width and scroll.
+       ===================================================================================== */
+    @media (max-width: 767px) {
+      /* ---- Header (app bar) + Open/Save/pager toolbar: compact, touch-friendly, wraps ---- */
+      .promobar { font-size: 12px; padding: 6px 12px; }
+      .appbar { padding: 8px 12px; gap: 8px; }
+      .logo { font-size: 15px; }
+      .logo .mark { width: 26px; height: 26px; font-size: 14px; }
+      .icon-btn { width: 44px; height: 44px; }            /* Help — 44×44 touch target */
+
+      .toolbar { padding: 8px 10px; gap: 8px; }           /* .toolbar is already flex-wrap:wrap */
+      .toolbar .btn { min-height: 44px; padding: 10px 12px; }
+      .toolbar .divider { display: none; }                /* dividers add noise once wrapped */
+      #fileName { max-width: 120px; }
+      .mode-indicator { display: none; }                  /* reclaim horizontal space */
+
+      /* Contextual action bar: keep the controls, drop the long helper sentences */
+      #actionBar { flex-wrap: wrap; padding: 6px 10px; gap: 8px; }
+      #actionBar .ab-hint { display: none; }
+
+      /* ---- Workspace: stack vertically — PDF on top (scrolls), tools docked at the bottom ---- */
+      .workspace { flex-direction: column; min-height: 0; }
+      .main { order: 0; flex: 1 1 auto; min-height: 0; }
+
+      /* Side rails -> a horizontal, full-width, horizontally-scrollable tool dock below the PDF.
+         Two compact rows (primary tools, then document tools); each scrolls if it overflows. */
+      .sidebar, .rightbar {
+        order: 1; flex: 0 0 auto; width: 100%; max-width: 100%;
+        flex-direction: row; align-items: stretch; justify-content: flex-start;
+        gap: 6px; padding: 6px 8px; border: none; border-top: 1px solid var(--line);
+        overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+      }
+      .rightbar { order: 2; border-top: none; }           /* sits flush under the first dock row */
+      .sidebar .sep { display: none; }
+      .sidebar .tool, .rightbar .tool {
+        flex: 0 0 auto; width: auto; min-width: 60px; min-height: 48px;   /* ≥44px touch targets */
+        padding: 6px 10px; gap: 3px; font-size: 11px;
+      }
+      .sidebar .tool .tool-ico, .rightbar .tool .tool-ico { width: 26px; height: 26px; }
+      .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 28px; height: 28px; }
+      /* Keep the landing clean: only show the (disabled) dock once a PDF is open. */
+      body:not(.has-pdf) .sidebar, body:not(.has-pdf) .rightbar { display: none; }
+
+      /* ---- PDF workspace: almost full width, minimal margins, natural vertical scroll ---- */
+      .stage { padding: 8px 6px 14px; }
+      .landing { padding: 0 6px; }
+      .landing h1 { font-size: 24px; }
+
+      /* ---- Footer: compact; never overlaps (it is the last in-flow flex item) ---- */
+      .appfoot { padding: 6px 10px; gap: 4px 12px; font-size: 11px; }
+      .appfoot .foot-badge { display: none; }
+
+      /* ---- Floating text toolbar: pin in-bounds at the bottom, swipe horizontally ---- */
+      #textToolbar.show {
+        left: 6px !important; right: 6px !important; top: auto !important;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 6px) !important;
+        width: auto !important; max-width: calc(100vw - 12px);
+        flex-wrap: nowrap; overflow-x: auto; overflow-y: visible;
+        -webkit-overflow-scrolling: touch; padding: 6px;
+      }
+      #textToolbar.show > * { flex: 0 0 auto; }            /* don't squash controls; scroll instead */
+      .tt-btn { min-width: 40px; height: 40px; }
+      .tt-num { width: 52px; height: 40px; }
+      .tt-sel, .tt-font-btn { height: 40px; }
+      .tt-font-btn { min-width: 118px; max-width: 150px; }
+      /* Popups become bottom sheets so a horizontally-scrolling toolbar can never clip them. */
+      .tt-font-pop, .tt-color-pop, .tt-link-pop {
+        position: fixed; left: 8px; right: 8px; top: auto; bottom: 58px;
+        transform: none; width: auto; max-width: calc(100vw - 16px);
+        max-height: 50vh; overflow: auto;
+      }
+      .tt-color-pop { grid-template-columns: repeat(8, 1fr); justify-items: center; }
+
+      /* Bigger signature-overlay handles so they're tappable with a finger. */
+      .insert-handle { width: 22px; height: 22px; right: -11px; bottom: -11px; }
+      .insert-del { width: 28px; height: 28px; line-height: 24px; font-size: 16px; right: -13px; top: -15px; }
+      .insert-rotate { width: 46px; height: 46px; top: -42px; margin-left: -23px; }
+      .insert-rotate::after { width: 18px; height: 18px; margin-left: -9px; }
+    }
+
     /* ===================== Annotation tool suite (Phase 3) ===================== */
     /* Fabric.js canvas container — sits over each page canvas */
     .fabric-layer-container {
@@ -1175,16 +1291,9 @@
           <span class="ab-hint">Click any line on the page and type to change it.</span>
         </div>
         <div class="ctx ctx-text">
-          <span class="ab-label">Add text</span>
-          <select id="addFont" class="field" title="Font" aria-label="Font family for added text">
-            <option value="sans">Sans</option>
-            <option value="serif">Serif</option>
-            <option value="mono">Mono</option>
-          </select>
-          <input type="number" id="addSize" class="field" min="4" max="200" step="1" value="14" title="Font size (applies to the selected text)" aria-label="Font size in points" />
-          <button class="ab-toggle" id="addBold" type="button" title="Bold (applies to the selected text)"><b>B</b></button>
-          <button class="ab-toggle" id="addItalic" type="button" title="Italic (applies to the selected text)"><i>I</i></button>
-          <span class="ab-hint">→ click the page &amp; type · Enter = new line · select text, then set size / B / I here</span>
+          <!-- Label doubles as the instruction. Click the page to drop a text box, then style it
+               (font, size, B/I/U, colour, alignment, link, …) in the floating text toolbar. -->
+          <span class="ab-label">Add Text • Click anywhere on the page to place new text</span>
         </div>
         <div class="ctx ctx-erase">
           <span class="ab-label">Erase</span>
@@ -1485,6 +1594,12 @@
         <button class="btn primary" id="signPadAdd" type="button">Add to page</button>
       </div>
     </div>
+  </div>
+
+  <div id="signPicker" class="sign-picker" hidden role="dialog" aria-label="Your saved signatures">
+    <div class="sign-picker-title">Your signatures</div>
+    <div class="sign-picker-list" id="signPickerList"></div>
+    <button class="sign-picker-add" id="signPickerAdd" type="button">+ Add new signature</button>
   </div>
 
   <!-- Pages manager: drag thumbnails to reorder, hover to delete, insert blank pages -->
