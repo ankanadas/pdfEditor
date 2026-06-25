@@ -13,6 +13,7 @@ import { NavigationMethods } from './render/navigation.js';
 import { HistoryMethods } from './core/history.js';
 import { StampMethods } from './features/stamps.js';
 import { EraseMethods } from './features/erase.js';
+import { PagesPanelMethods } from './features/pagesPanel.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
 // No external network request is made, so the app works fully offline and never reaches
@@ -3386,189 +3387,6 @@ class PDFEditorApp {
   // view, and the eventual Save output all stay in lockstep automatically.
   // ---------------------------------------------------------------------------
 
-  togglePagesPanel() {
-    const open = document.getElementById('pagesDrawer')?.classList.contains('open');
-    if (open) this.closePagesPanel(); else this.openPagesPanel();
-  }
-
-  openPagesPanel() {
-    if (!this.controller.isLoaded || !this.pdfJsDoc) {
-      this.showStatus('Open a PDF first', 'error');
-      return;
-    }
-    this.selectedThumb = null;
-    document.getElementById('pagesBackdrop')?.classList.add('open');
-    document.getElementById('pagesDrawer')?.classList.add('open');
-    this.renderPagesPanel();
-  }
-
-  closePagesPanel() {
-    document.getElementById('pagesBackdrop')?.classList.remove('open');
-    document.getElementById('pagesDrawer')?.classList.remove('open');
-  }
-
-  /** Build the thumbnail grid + the "insert position" dropdown from the current document. */
-  renderPagesPanel() {
-    const grid = document.getElementById('pagesGrid');
-    if (!grid || !this.pdfJsDoc) return;
-    const n = this.pdfJsDoc.numPages;
-
-    const count = document.getElementById('pagesCount');
-    if (count) count.textContent = `${n} page${n === 1 ? '' : 's'}`;
-    this.rebuildInsertPosOptions(n);
-
-    grid.innerHTML = '';
-    const hint = document.createElement('div');
-    hint.className = 'pages-hint';
-    hint.textContent = 'Drag to reorder · hover to delete';
-    grid.appendChild(hint);
-
-    for (let i = 0; i < n; i++) {
-      const thumb = document.createElement('div');
-      thumb.className = 'page-thumb';
-      thumb.draggable = true;
-      thumb.dataset.index = String(i);
-      if (i === this.selectedThumb) thumb.classList.add('selected');
-
-      const canvas = document.createElement('canvas');
-      canvas.className = 'thumb-canvas';
-      thumb.appendChild(canvas);
-
-      const del = document.createElement('button');
-      del.className = 'page-thumb-del';
-      del.title = 'Delete this page';
-      del.setAttribute('aria-label', `Delete page ${i + 1}`);
-      del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="m7 7 1 13h8l1-13"/></svg>';
-      del.addEventListener('click', (e) => { e.stopPropagation(); this.deletePage(i); });
-      thumb.appendChild(del);
-
-      const num = document.createElement('div');
-      num.className = 'thumb-num';
-      num.textContent = `Page ${i + 1}`;
-      thumb.appendChild(num);
-
-      thumb.addEventListener('click', () => this.selectThumb(i));
-      this.wireThumbDnD(thumb);
-      grid.appendChild(thumb);
-
-      this.renderThumbCanvas(canvas, i);   // async paint; doesn't block the drawer opening
-    }
-  }
-
-  /** Render page `pageIndex` into the small thumbnail canvas (crisp on HiDPI screens). */
-  async renderThumbCanvas(canvas, pageIndex) {
-    try {
-      const page = await this.pdfJsDoc.getPage(pageIndex + 1);
-      const base = page.getViewport({ scale: 1 });
-      const dpr = window.devicePixelRatio || 1;
-      const scale = (130 / base.width) * dpr;
-      const vp = page.getViewport({ scale });
-      canvas.width = vp.width;
-      canvas.height = vp.height;
-      canvas.style.aspectRatio = `${base.width} / ${base.height}`;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
-    } catch (e) {
-      console.warn('Thumbnail render failed for page', pageIndex, e);
-    }
-  }
-
-  /** Rebuild the "Insert at" dropdown: After page 1…N, plus End of document. */
-  rebuildInsertPosOptions(n) {
-    const sel = document.getElementById('insertPos');
-    if (!sel) return;
-    const prev = sel.value;
-    sel.innerHTML = '';
-    for (let i = 0; i < n; i++) {
-      const opt = document.createElement('option');
-      opt.value = String(i);
-      opt.textContent = `After page ${i + 1}`;
-      sel.appendChild(opt);
-    }
-    const end = document.createElement('option');
-    end.value = 'end';
-    end.textContent = 'End of document';
-    sel.appendChild(end);
-    sel.value = (prev === 'end' || (prev !== '' && parseInt(prev, 10) < n)) ? prev : 'end';
-  }
-
-  /** Click a thumbnail to select it (sets "insert after this page"); click again to clear. */
-  selectThumb(i) {
-    this.selectedThumb = (this.selectedThumb === i) ? null : i;
-    document.querySelectorAll('#pagesGrid .page-thumb').forEach((el) => {
-      el.classList.toggle('selected', Number(el.dataset.index) === this.selectedThumb);
-    });
-    const sel = document.getElementById('insertPos');
-    if (sel) sel.value = (this.selectedThumb == null) ? 'end' : String(this.selectedThumb);
-  }
-
-  /** Native HTML5 drag-and-drop wiring for one thumbnail. */
-  wireThumbDnD(thumb) {
-    thumb.addEventListener('dragstart', (e) => {
-      this._dragFrom = Number(thumb.dataset.index);
-      thumb.classList.add('dragging');
-      if (e.dataTransfer) {
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', thumb.dataset.index);
-      }
-    });
-    thumb.addEventListener('dragend', () => {
-      thumb.classList.remove('dragging');
-      this.clearDropMarkers();
-    });
-    thumb.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-      const rect = thumb.getBoundingClientRect();
-      const after = (e.clientX - rect.left) > rect.width / 2;
-      this.clearDropMarkers();
-      thumb.classList.add(after ? 'drop-after' : 'drop-before');
-    });
-    thumb.addEventListener('dragleave', () => {
-      thumb.classList.remove('drop-before', 'drop-after');
-    });
-    thumb.addEventListener('drop', (e) => {
-      e.preventDefault();
-      const from = this._dragFrom;
-      const j = Number(thumb.dataset.index);
-      const after = thumb.classList.contains('drop-after');
-      this.clearDropMarkers();
-      this._dragFrom = null;
-      if (from == null || Number.isNaN(from)) return;
-      this.movePage(from, after ? j + 1 : j);   // insert before original index (after ? j+1 : j)
-    });
-  }
-
-  clearDropMarkers() {
-    document.querySelectorAll('#pagesGrid .page-thumb.drop-before, #pagesGrid .page-thumb.drop-after')
-      .forEach(el => el.classList.remove('drop-before', 'drop-after'));
-  }
-
-  /** Move page `from` so it lands immediately before original index `insertBefore`. */
-  movePage(from, insertBefore) {
-    if (insertBefore === from || insertBefore === from + 1) return;   // dropped back in place
-    const n = this.pdfJsDoc.numPages;
-    const order = [];
-    for (let i = 0; i < n; i++) {
-      if (i === insertBefore) order.push({ src: from });
-      if (i !== from) order.push({ src: i });
-    }
-    if (insertBefore >= n) order.push({ src: from });   // moved to the very end
-    this.commitPageOrder(order, 'Pages reordered.', 'Reordering pages…');
-  }
-
-  /** Remove a page (never the last remaining one). */
-  deletePage(index) {
-    const n = this.pdfJsDoc.numPages;
-    if (n <= 1) { this.showStatus('A PDF must keep at least one page.', 'error'); return; }
-    if (this.selectedThumb === index) this.selectedThumb = null;
-    const order = [];
-    for (let i = 0; i < n; i++) if (i !== index) order.push({ src: i });
-    this.commitPageOrder(order, `Page ${index + 1} deleted.`, 'Deleting page…');
-  }
-
   /** Insert one blank page at the position chosen in the dropdown (end, or after page N). */
   async insertBlankPage() {
     if (!this.pdfJsDoc) return;
@@ -4204,7 +4022,7 @@ class PDFEditorApp {
 }
 
 
-Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods);
+Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
