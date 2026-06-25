@@ -15,6 +15,11 @@ import re
 # pyrefly: ignore [missing-import]
 from PIL import Image
 
+from config import (
+    ALLOWED_ORIGINS, RATE_DEFAULTS, RATE_HEAVY, RATELIMIT_ENABLED,
+    RATELIMIT_STORAGE_URI, MAX_PDF_MB, MAX_PDF_PAGES, MAX_CONTENT_LENGTH,
+)
+
 app = Flask(__name__)
 
 # Behind Render's TLS-terminating proxy: trust one X-Forwarded-For / -Proto hop so
@@ -23,18 +28,10 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # ---- CORS ----------------------------------------------------------------------------
-# Only our own frontend (production + local dev) may call this API from a browser.
-# Override with the ALLOWED_ORIGINS env var (comma-separated). NOTE: CORS is enforced by
-# the browser — it stops other sites' pages from using fetch() against us; it is NOT a
-# server-side firewall (curl / server scripts ignore it). Abuse throttling is the rate
-# limiter's job, below.
-_DEFAULT_ORIGINS = (
-    "https://quickpdfeditor.com,https://www.quickpdfeditor.com,"
-    "http://localhost:9000,http://127.0.0.1:9000"
-)
-ALLOWED_ORIGINS = [
-    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",") if o.strip()
-]
+# Only our own frontend (production + local dev) may call this API from a browser (origins
+# in config.ALLOWED_ORIGINS). NOTE: CORS is enforced by the browser — it stops other sites'
+# pages from using fetch() against us; it is NOT a server-side firewall (curl / server
+# scripts ignore it). Abuse throttling is the rate limiter's job, below.
 CORS(
     app,
     resources={r"/*": {"origins": ALLOWED_ORIGINS}},
@@ -44,23 +41,18 @@ CORS(
 )
 
 # ---- Rate limiting (abuse / DoS protection) ------------------------------------------
-# Per-client-IP limits. Storage defaults to in-memory, which lives inside ONE process and
-# resets on restart. The default deploy runs a single gunicorn worker (see render.yaml), so
-# in-memory counting is EXACT there. The moment you scale to N workers/instances, each counts
-# independently and the real limit becomes ~N x the numbers below (and still resets on deploy)
-# — fine for casual abuse prevention, but set RATELIMIT_STORAGE_URI to a Redis URL to share
-# counts across workers/instances and make the limit exact and durable when you scale up.
-# Set RATELIMIT_ENABLED=0 as an ops kill-switch to disable limiting entirely.
-RATE_DEFAULTS = ["60 per minute", "600 per hour"]
-RATE_HEAVY = "30 per minute;300 per hour"  # CPU/memory-heavy PDF endpoints
-
-app.config["RATELIMIT_ENABLED"] = os.environ.get("RATELIMIT_ENABLED", "1") not in ("0", "false", "False")
+# Per-client-IP limits (numbers in config.RATE_*). Storage defaults to in-memory, which lives
+# inside ONE process and resets on restart. The default deploy runs a single gunicorn worker
+# (see render.yaml), so in-memory counting is EXACT there. Scaling to N workers/instances makes
+# each count independently (real limit ~N x); set RATELIMIT_STORAGE_URI to a Redis URL to share
+# counts. RATELIMIT_ENABLED=0 is an ops kill-switch.
+app.config["RATELIMIT_ENABLED"] = RATELIMIT_ENABLED
 
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
     default_limits=RATE_DEFAULTS,
-    storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
+    storage_uri=RATELIMIT_STORAGE_URI,
     headers_enabled=True,
     strategy="fixed-window",
 )
@@ -81,18 +73,10 @@ def _rate_limited(_e):
     # to this response, so the browser can read it.
     return jsonify({"error": "Too many requests — please slow down and try again in a moment."}), 429
 
-# Defense-in-depth file-size limit (the frontend also blocks oversized files).
-# The editor sends the PDF base64-encoded (~1.34x larger), so the raw request cap is
-# set above the document limit to fit a MAX_PDF_MB document plus JSON overhead.
-#
-# Kept deliberately modest: a base64 PDF is held whole in RAM, decoded to bytes, then
-# PyMuPDF's working set is a further multiple of that. On a 512 MB instance a couple of
-# large concurrent uploads would OOM, so 30 MB (override via MAX_PDF_MB) leaves headroom.
-# MAX_PDF_PAGES additionally bounds the per-document working set for pathological
-# tiny-page / huge-count files that would otherwise slip under the byte-size cap.
-MAX_PDF_MB = int(os.environ.get("MAX_PDF_MB", "30"))
-MAX_PDF_PAGES = int(os.environ.get("MAX_PDF_PAGES", "500"))
-app.config['MAX_CONTENT_LENGTH'] = int(MAX_PDF_MB * 1.4 * 1024 * 1024)
+# Defense-in-depth file-size limit (the frontend also blocks oversized files); caps live in
+# config.MAX_*. A base64 PDF is held whole in RAM, decoded to bytes, then PyMuPDF's working set
+# is a further multiple of that, so the cap is kept modest to leave headroom on a 512 MB instance.
+app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
 
 @app.before_request
