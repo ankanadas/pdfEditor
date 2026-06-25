@@ -19,6 +19,9 @@ from config import (
     ALLOWED_ORIGINS, RATE_DEFAULTS, RATE_HEAVY, RATELIMIT_ENABLED,
     RATELIMIT_STORAGE_URI, MAX_PDF_MB, MAX_PDF_PAGES, MAX_CONTENT_LENGTH,
 )
+from pdf.io import (
+    _open_authenticated, PDF_MAGIC, _looks_like_pdf, _decode_pdf_or_400,
+)
 
 app = Flask(__name__)
 
@@ -983,20 +986,6 @@ def _link_rect_for_edit(edit, size, text_lines, font):
     return fitz.Rect(x, top, x + max(w, 4), bottom)
 
 
-def _open_authenticated(pdf_bytes, password=""):
-    """Open a PDF and authenticate it if it is encrypted.
-
-    Tries the empty password first (covers permission-only / empty-user-password files that
-    are common in the wild), then the supplied password. Returns (doc, ok); when ok is False
-    the document needs a real password the caller didn't provide and must not be used.
-    """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    if doc.needs_pass:
-        if not doc.authenticate("") and not (password and doc.authenticate(password)):
-            return doc, False
-    return doc, True
-
-
 def _page_limit_response(doc):
     """A JSON 413 response if the document has more pages than we allow, else None.
 
@@ -1007,31 +996,6 @@ def _page_limit_response(doc):
     if n > MAX_PDF_PAGES:
         return jsonify({"error": f"Too many pages ({n}). Maximum is {MAX_PDF_PAGES} pages."}), 413
     return None
-
-
-# A PDF must carry the %PDF- signature near the start. The spec / Acrobat tolerate up to ~1 KB of
-# leading junk (and so does PyMuPDF), so we scan the head rather than require it at offset 0.
-PDF_MAGIC = b"%PDF-"
-
-
-def _looks_like_pdf(pdf_bytes):
-    return bool(pdf_bytes) and PDF_MAGIC in pdf_bytes[:1024]
-
-
-def _decode_pdf_or_400(data, field="pdfBase64"):
-    """Decode the base64 PDF payload and verify it really is a PDF *before* it reaches the
-    MuPDF C parser. Returns (pdf_bytes, None) on success, or (None, (response, 400)) for a
-    missing field, undecodable base64, or non-PDF/malformed bytes — a cheap, clean rejection."""
-    b64 = data.get(field)
-    if not b64:
-        return None, (jsonify({"error": "Missing required fields"}), 400)
-    try:
-        pdf_bytes = base64.b64decode(b64)
-    except Exception:
-        return None, (jsonify({"error": "Invalid PDF data."}), 400)
-    if not _looks_like_pdf(pdf_bytes):
-        return None, (jsonify({"error": "This file is not a valid PDF."}), 400)
-    return pdf_bytes, None
 
 
 @app.route('/health', methods=['GET'])
