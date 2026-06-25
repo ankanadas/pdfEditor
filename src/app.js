@@ -7,6 +7,7 @@ import { AnnotationManager } from './annotationManager.js';
 import { loadImage, imageRatio } from './util/image.js';
 import { hexToRgb, rgbCss, rgbToHex } from './util/color.js';
 import { readRegion, sampleLineColors, trimCanvas, roundRectPath } from './util/canvas.js';
+import { confirmDialog } from './util/dialog.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
 // No external network request is made, so the app works fully offline and never reaches
@@ -400,7 +401,7 @@ class PDFEditorApp {
 
     // Opening a new PDF replaces the current one — warn if there are unsaved edits.
     if (this.edits.length > 0) {
-      const proceed = await this.confirmDialog(
+      const proceed = await confirmDialog(
         'Opening a new PDF will discard your unsaved edits. To revert changes instead, use Undo.'
       );
       if (!proceed) { event.target.value = ''; return; }
@@ -612,7 +613,7 @@ class PDFEditorApp {
     if (!this._editRestricted || this._restrictionConfirmed) return true;
     if (this._restrictionPromptOpen) return false;          // a prompt is already on screen
     this._restrictionPromptOpen = true;
-    const ok = await this.confirmDialog(
+    const ok = await confirmDialog(
       'This document contains editing restrictions. By continuing, you confirm that you are authorized to modify this document.',
       { title: 'Editing restrictions', okText: 'Continue', cancelText: 'Cancel' }
     );
@@ -2348,32 +2349,6 @@ class PDFEditorApp {
   }
 
   /** Branded yes/no dialog. Resolves true (proceed) or false (cancel). */
-  confirmDialog(message, opts = {}) {
-    return new Promise((resolve) => {
-      const back = document.getElementById('confirmDialog');
-      const msg = document.getElementById('confirmMessage');
-      const ok = document.getElementById('confirmOk');
-      const cancel = document.getElementById('confirmCancel');
-      const title = document.getElementById('confirmTitle');
-      if (!back || !ok || !cancel) { resolve(window.confirm(message)); return; }
-      if (title) title.textContent = opts.title || 'Discard your edits?';
-      ok.textContent = opts.okText || 'Open new PDF';
-      cancel.textContent = opts.cancelText || 'Cancel';
-      ok.classList.toggle('confirm-danger', !!opts.danger);   // red confirm for destructive actions
-      msg.textContent = message;
-      back.classList.add('open');
-      const finish = (val) => {
-        back.classList.remove('open');
-        ok.removeEventListener('click', onOk);
-        cancel.removeEventListener('click', onCancel);
-        resolve(val);
-      };
-      const onOk = () => finish(true);
-      const onCancel = () => finish(false);
-      ok.addEventListener('click', onOk);
-      cancel.addEventListener('click', onCancel);
-    });
-  }
 
   signPadClear() {
     const c = document.getElementById('signPadCanvas');
@@ -3927,7 +3902,7 @@ class PDFEditorApp {
     // Page structure changes shift page indices, which would invalidate any pending
     // text edits — confirm before discarding them.
     if (this.edits.length > 0) {
-      const ok = await this.confirmDialog(
+      const ok = await confirmDialog(
         'Reorganizing pages applies to the original document and clears your unsaved text edits (their page positions change). Continue?',
         { title: 'Reorganize pages?', okText: 'Continue', cancelText: 'Cancel' }
       );
@@ -4487,7 +4462,7 @@ class PDFEditorApp {
     const n = this.edits.length;
     if (n === 0) { this.showStatus('Nothing to discard', 'info'); return; }
     // Confirm first (same warning style as the Merge cancel dialog).
-    const ok = await this.confirmDialog(
+    const ok = await confirmDialog(
       `This removes your ${n} unsaved change${n === 1 ? '' : 's'}. You can still bring them back with Undo.`,
       { title: 'Discard your changes?', okText: 'Discard', cancelText: 'Cancel', danger: true }
     );
