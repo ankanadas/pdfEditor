@@ -40,6 +40,17 @@ _SERIF_FILES = {
     (False, True):  [_bundled("Tinos-Italic.ttf"), "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf"],
     (True,  True):  [_bundled("Tinos-BoldItalic.ttf"), "/System/Library/Fonts/Supplemental/Times New Roman Bold Italic.ttf"],
 }
+# Monospace fallback (Cousine = Apache-2.0 Courier-New clone) so editing an embedded MONO line keeps
+# a fixed-pitch face instead of dropping to a proportional sans.
+_MONO_FILES = {
+    (False, False): [_bundled("Cousine-Regular.ttf"), "/System/Library/Fonts/Supplemental/Courier New.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"],
+    (True,  False): [_bundled("Cousine-Bold.ttf"), "/System/Library/Fonts/Supplemental/Courier New Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"],
+    (False, True):  [_bundled("Cousine-Italic.ttf"), "/System/Library/Fonts/Supplemental/Courier New Italic.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Oblique.ttf"],
+    (True,  True):  [_bundled("Cousine-BoldItalic.ttf"), "/System/Library/Fonts/Supplemental/Courier New Bold Italic.ttf"],
+}
+# Monospace name signals (in addition to PyMuPDF's monospaced flag bit 8).
+_MONO_NAME_HINTS = ('courier', 'mono', 'consol', 'cousine', 'fira code', 'firacode',
+                    'jetbrains', 'ibm plex', 'ibmplex', 'source code', 'sourcecode')
 # Builtin Base-14 fallbacks: (serif, bold, italic) -> PyMuPDF font name.
 _BUILTIN = {
     (False, False, False): "helv", (False, True, False): "hebo",
@@ -96,14 +107,20 @@ def _find_font(candidates):
     return None
 
 
-def _edit_font_kwargs(serif, bold, italic):
-    """insert_text kwargs (fontname + fontfile, or builtin fontname) for a line's style."""
-    files = (_SERIF_FILES if serif else _SANS_FILES).get((bool(bold), bool(italic)), [])
+def _edit_font_kwargs(serif, bold, italic, mono=False):
+    """insert_text kwargs (fontname + fontfile, or builtin fontname) for a line's style.
+    mono wins over serif so an edited monospace line keeps a fixed-pitch face."""
+    if mono:
+        files = _MONO_FILES.get((bool(bold), bool(italic)), [])
+    else:
+        files = (_SERIF_FILES if serif else _SANS_FILES).get((bool(bold), bool(italic)), [])
     path = _find_font(files)
     if path:
         # A stable per-variant fontname lets PyMuPDF reuse the embedded font.
-        name = "ed_%d%d%d" % (int(bool(serif)), int(bool(bold)), int(bool(italic)))
+        name = "ed_%s%d%d" % ('m' if mono else int(bool(serif)), int(bool(bold)), int(bool(italic)))
         return dict(fontname=name, fontfile=path)
+    if mono:
+        return dict(fontname=_BASE14_BY_FAMILY['mono'][(bool(bold), bool(italic))])
     return dict(fontname=_BUILTIN[(bool(serif), bool(bold), bool(italic))])
 
 
@@ -464,6 +481,17 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
             want_serif = want_serif or bool(ls[0])
             want_bold = want_bold or bool(ls[1])
             want_italic = want_italic or bool(ls[2])
+    # Mono: the serif/sans catch-all would put an embedded monospace face (e.g. Cousine, the open
+    # Courier clone) onto a proportional sans. Detect mono from a toolbar 'mono' family or the
+    # original span (mono name / PyMuPDF monospaced flag / a standard Courier) and keep it fixed-pitch.
+    want_mono = (_TOOLBAR_FONTS.get(_fam_key, (None,))[0] == 'mono')
+    if span and not _fam_key:
+        _nm = (span.get('font', '') or '').lower()
+        if any(k in _nm for k in _MONO_NAME_HINTS) or (int(span.get('flags', 0) or 0) & 8) \
+                or _standard_family(span.get('font', '')) == 'mono':
+            want_mono = True
+    if want_mono:
+        want_serif = False
     options = []
     if span:
         # xref -> (basefont, ext, type) so we can both name- and type-match each embedded font.
@@ -522,7 +550,7 @@ def _resolve_fonts(doc, page, edit, text, cache, charset_cache, style_override=N
     if latex_kw:
         kw, fb = latex_kw, fitz.Font(fontfile=latex_kw['fontfile'])
     else:
-        kw = _edit_font_kwargs(want_serif, want_bold, want_italic)   # full fallback (covers Latin)
+        kw = _edit_font_kwargs(want_serif, want_bold, want_italic, mono=want_mono)   # full fallback
         fb = fitz.Font(fontfile=kw['fontfile']) if 'fontfile' in kw else fitz.Font(fontname=kw['fontname'])
     options.append((kw, fb, None, True))          # charset None == catch-all
     return options, size

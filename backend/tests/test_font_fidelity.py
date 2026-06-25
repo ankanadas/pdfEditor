@@ -120,6 +120,18 @@ class FontFidelityTests(unittest.TestCase):
             self.assertLess(abs(n["size"] - 14), 1.0, f"{font}: size not preserved ({n['size']})")
             self.assertEqual(self._rgb(n), (0, 0, 0), f"{font}: colour not preserved ({self._rgb(n)})")
 
+    # -- 2b) MONOSPACE preserved on edit (must not drop to a proportional sans) --
+    def test_mono_preserved_on_edit(self):
+        for label, font in [("courier(base14)", "cour"),
+                            ("cousine(embedded)", "Cousine-Regular.ttf")]:
+            src = self._make(font, text="def f(): return 0")
+            o = self._first_span(src)
+            n = self._span_with(self._edit(src, [self._edit_obj(o, "edited_mono = 1")]), "edited_mono")
+            self.assertIsNotNone(n, f"{label}: edited mono line missing")
+            mono = any(k in n["font"].lower() for k in ("cour", "cousine", "mono", "consol"))
+            self.assertTrue(mono, f"{label}: editing monospace text dropped to a proportional "
+                                  f"face ('{n['font']}') — fixed-pitch not preserved")
+
     # -- 3) explicit style changes are applied --------------------------------
     def test_explicit_bold_italic_size_applied(self):
         src = self._make("helv", size=14); o = self._first_span(src)
