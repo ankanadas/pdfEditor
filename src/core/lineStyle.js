@@ -1,0 +1,180 @@
+// Line-style detection — underline detection, cover-strip state, build/read per-line style runs.
+// Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js (this = the app).
+import { readRegion } from '../util/canvas.js';
+
+export const LineStyleMethods = {
+  /**
+   * Classify the source strip used to hide a text line: 'clean' (uniform background close to the
+   * cell's own colour — safe to stretch), 'dirty' (a border / rule / adjacent glyph passes through,
+   * so stretching it would paint a dark "shadow" band — fill solid instead) or 'unknown' (pixel
+   * readback unavailable — keep the legacy drawImage behaviour). Coordinates are device pixels.
+   */
+  _coverStripState(ctx, x, y, w, h, bg) {
+    if (!bg) return 'unknown';                       // no sampled bg (readback failed earlier) -> legacy
+    let d;
+    try { d = ctx.getImageData(Math.round(x), Math.round(y), Math.max(1, Math.round(w)), Math.max(1, Math.round(h))).data; }
+    catch (e) { return 'unknown'; }
+    const bgL = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
+    let sum = 0, n = 0; const vals = [];
+    for (let i = 0; i < d.length; i += 4) { const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; vals.push(l); sum += l; n++; }
+    if (!n) return 'unknown';
+    const mean = sum / n;
+    let q = 0; for (const l of vals) q += (l - mean) * (l - mean);
+    const std = Math.sqrt(q / n);
+    // Not uniform (a line/glyph runs through it) OR materially darker than the cell's own background.
+    if (std > 24 || mean < bgL - 22) return 'dirty';
+    return 'clean';
+  },
+  /**
+   * Detect a drawn underline under each item of a line by probing the rendered canvas (PDF.js draws
+   * underlines as a thin line, not a font attribute, so they aren't in the text items). Reads ONE
+   * strip just below the line's baseline, then per item looks for a long, THIN, contiguous run of ink
+   * spanning most of the item's width — an underline — while rejecting glyph descenders (short runs)
+   * and solid fills/shading (ink across many rows). Sets it.underline; returns true if any item is
+   * underlined. Must run on the CLEAN canvas, before the line is covered. Best-effort: any failure
+   * (e.g. a tainted canvas) just leaves underlines undetected.
+   *
+   * Crucially it rejects a horizontal RULE/DIVIDER that merely passes under the text: a real underline
+   * ends with the text, but a page divider/section rule/table border continues past the text on the
+   * left and/or right. The strip is read with a margin on each side, and any candidate rule row that
+   * still has ink in that outside margin is treated as a divider, NOT an underline — so editing a
+   * heading sitting just above a divider never mistakes the divider for an underline (which would make
+   * the save cover-and-redraw it at the new text width and visibly break the line).
+   */
+  _detectLineUnderlines(pv, line, bg) {
+    try {
+      const items = (line.items || []).filter(it => (it.text || '').trim());
+      if (!items.length) return false;
+      const cw = pv.canvas.width, ch = pv.canvas.height;
+      const H = Math.max(6, line.fontSizePx || (line.bottom - line.top));
+      const y0 = Math.max(0, Math.floor(line.baseline + H * 0.04));
+      const y1 = Math.min(ch, Math.ceil(line.baseline + H * 0.34));
+      const margin = Math.max(16, Math.round(H));        // room to see a rule extending past the text
+      const x0 = Math.max(0, Math.floor(line.left) - margin);
+      const x1 = Math.min(cw, Math.ceil(line.right) + margin);
+      const w = x1 - x0, h = y1 - y0;
+      if (w < 4 || h < 2) return false;
+      const data = readRegion(pv.canvas, x0, y0, w, h);
+      const isInk = (i) => {
+        if (data[i + 3] < 128) return false;
+        if (!bg) return (data[i] + data[i + 1] + data[i + 2]) < 600;       // dark on assumed-light bg
+        return (Math.abs(data[i] - bg[0]) + Math.abs(data[i + 1] - bg[1]) + Math.abs(data[i + 2] - bg[2])) > 100;
+      };
+      const rowInk = (py, from, to) => { for (let px = from; px < to; px++) { if (isInk((py * w + px) * 4)) return true; } return false; };
+      let any = false;
+      for (const it of items) {
+        const c0 = Math.max(0, Math.floor(it.left) - x0);
+        const c1 = Math.min(w, Math.ceil(it.right) - x0);
+        const iw = c1 - c0;
+        if (iw < 6) { it.underline = false; continue; }
+        // Columns just OUTSIDE the item, where a divider (but not an underline) would still have ink.
+        const lFrom = Math.max(0, c0 - margin), lTo = Math.max(0, c0 - 3);
+        const rFrom = Math.min(w, c1 + 3), rTo = Math.min(w, c1 + margin);
+        let lineRows = 0, inkRows = 0;
+        for (let py = 0; py < h; py++) {
+          let run = 0, best = 0, inkCols = 0;
+          for (let px = c0; px < c1; px++) {
+            const i = (py * w + px) * 4;
+            if (isInk(i)) { run++; inkCols++; if (run > best) best = run; } else run = 0;
+          }
+          if (inkCols > 0) inkRows++;
+          if (best >= 0.55 * iw) {
+            // A near-full-width rule that ALSO has ink in the outside margin is a divider/border, not
+            // this text's underline — don't count it.
+            const extendsOut = (lTo > lFrom && rowInk(py, lFrom, lTo)) || (rTo > rFrom && rowInk(py, rFrom, rTo));
+            if (!extendsOut) lineRows++;
+          }
+        }
+        // Underline = a thin rule (1..4 rows of near-full-width ink), NOT a solid fill (ink in most rows).
+        it.underline = lineRows >= 1 && lineRows <= 4 && inkRows <= Math.max(4, h * 0.6);
+        if (it.underline) any = true;
+      }
+      return any;
+    } catch (e) {
+      return false;
+    }
+  },
+  /**
+   * Group a line's items into contiguous style RUNS [{text,bold,italic,underline}] so a mixed line
+   * (a bold label + a regular tail, a partly-underlined line) keeps each run's own style when the
+   * line is edited and re-saved. Whitespace-only items extend the current run (a space carries no
+   * style of its own). Stored on line.styleRuns only when the line genuinely mixes styles AND the
+   * runs reconstruct line.text exactly — otherwise left unset so the simple whole-line path (which
+   * already preserves a uniform style) runs unchanged. No behaviour change for single-style lines.
+   */
+  _buildLineStyleRuns(line) {
+    const items = (line.items || []);
+    if (items.length < 1) return;
+    const runs = [];
+    let prevRight = null, endsSpace = true;          // start "true" so no leading synth space
+    const append = (text, st) => {
+      const last = runs[runs.length - 1];
+      if (!st && last) { last.text += text; }        // a blank item joins the current run
+      else if (last && last.bold === st.b && last.italic === st.i && last.underline === st.u) last.text += text;
+      else runs.push({ text, bold: st ? st.b : false, italic: st ? st.i : false, underline: st ? st.u : false });
+      if (text) endsSpace = /\s$/.test(text);
+    };
+    for (const it of items) {
+      const t = it.text || '';
+      if (!t) continue;
+      if (!t.trim()) { append(t, null); prevRight = it.right; continue; }
+      // Mirror groupTextItemsByLine: synthesise a space across a positional gap so the runs join back
+      // to the same text the simple path would produce (and the safety check below passes).
+      if (runs.length && prevRight != null && !endsSpace && !/^\s/.test(t) &&
+          (it.left - prevRight) > (it.height || 0) * 0.18) {
+        runs[runs.length - 1].text += ' '; endsSpace = true;
+      }
+      append(t, { b: !!it.bold, i: !!it.italic, u: !!it.underline });
+      prevRight = it.right;
+    }
+    // Need ≥2 distinct styles to be worth a per-run model.
+    const distinct = new Set(runs.map(r => `${r.bold}|${r.italic}|${r.underline}`));
+    if (runs.length < 2 || distinct.size < 2) return;
+    // Safety: the runs must reproduce the line's (normalised) text exactly, else fall back to the
+    // simple path rather than risk corrupting the line.
+    const norm = (s) => s.replace(/\s+/g, ' ').trim();
+    if (norm(runs.map(r => r.text).join('')) !== norm(line.text)) return;
+    line.styleRuns = runs;
+  },
+  /** One styled <span> (data-* markers + inline CSS) for a mixed existing-line run. */
+  _lineRunSpanHTML(r) {
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const css = [`font-weight:${r.bold ? 'bold' : 'normal'}`, `font-style:${r.italic ? 'italic' : 'normal'}`];
+    if (r.underline) css.push('text-decoration:underline');
+    const attrs = `data-bold="${r.bold ? 1 : 0}" data-italic="${r.italic ? 1 : 0}"${r.underline ? ' data-underline="1"' : ''}`;
+    return `<span ${attrs} style="${css.join(';')}">${esc(r.text)}</span>`;
+  },
+  /**
+   * Read a focused existing-line box back into a single line of style runs [{text,bold,italic,
+   * underline}], walking text nodes and inheriting each span's data-* markers. Returns null when the
+   * box has no styled spans (a plain, single-style line) so the caller keeps the simple whole-line
+   * path. Per-run text is cleaned the same way as the plain path, so the runs join back to newText.
+   */
+  _readLineRuns(div) {
+    if (!div || !div.querySelector('span[data-bold],span[data-italic],span[data-underline]')) return null;
+    const runs = [];
+    const push = (text, st) => {
+      if (!text) return;
+      const last = runs[runs.length - 1];
+      if (last && last.bold === st.bold && last.italic === st.italic && last.underline === st.underline) last.text += text;
+      else runs.push({ text, bold: st.bold, italic: st.italic, underline: st.underline });
+    };
+    const walk = (node, inh) => {
+      node.childNodes.forEach((child) => {
+        if (child.nodeType === Node.TEXT_NODE) { push(child.nodeValue, inh); return; }
+        if (child.nodeType !== Node.ELEMENT_NODE || child.tagName === 'BR') return;
+        const st = { ...inh };
+        if (child.hasAttribute && child.hasAttribute('data-bold')) st.bold = child.getAttribute('data-bold') === '1';
+        else if (child.style && (child.style.fontWeight === 'bold' || parseInt(child.style.fontWeight, 10) >= 600)) st.bold = true;
+        if (child.hasAttribute && child.hasAttribute('data-italic')) st.italic = child.getAttribute('data-italic') === '1';
+        else if (child.style && child.style.fontStyle === 'italic') st.italic = true;
+        if (child.hasAttribute && child.hasAttribute('data-underline')) st.underline = child.getAttribute('data-underline') === '1';
+        else if (child.style && /underline/.test(child.style.textDecoration || '')) st.underline = true;
+        walk(child, st);
+      });
+    };
+    walk(div, { bold: false, italic: false, underline: false });
+    const cleaned = runs.map(r => ({ ...r, text: this.cleanEditableText(r.text) })).filter(r => r.text.length);
+    return cleaned.length ? cleaned : null;
+  },
+};
