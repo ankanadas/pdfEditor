@@ -22,6 +22,7 @@ import { TextEditingMethods } from './core/textEditing.js';
 import { FileIOMethods } from './core/fileIO.js';
 import { TextToolbarMethods } from './features/textToolbar.js';
 import { ModeManagerMethods } from './core/modeManager.js';
+import { AnnotateToolbarMethods } from './features/annotateToolbar.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
 // No external network request is made, so the app works fully offline and never reaches
@@ -654,85 +655,6 @@ class PDFEditorApp {
 
   // ─── Annotation toolbar wiring ────────────────────────────────────────────────
 
-  /** Wire up all the annotation sub-tool buttons and option inputs. */
-  _initAnnotateToolbar() {
-    const SUB_TOOLS = ['freeHighlight', 'highlight', 'line', 'rect', 'circle', 'table'];
-
-    // Sub-tool buttons
-    for (const tool of SUB_TOOLS) {
-      document.getElementById(`ann-${tool}`)?.addEventListener('click', () => {
-        if (this.mode !== 'annotate') this.setMode('annotate');
-        this._activateAnnotateTool(tool);
-      });
-    }
-
-    // Colour: the SAME swatch popover as the text floating toolbar. One colour drives both shape
-    // strokes and highlight fills; it persists (lives on annotationManager) across tool switches.
-    const am = this.annotationManager;
-    this._setColorSwatch(am.strokeColor, 'ann-color-sw');
-    this._buildColorPopover('ann-color-btn', 'ann-color-pop', (hex) => {
-      am.strokeColor = hex; am.highlightColor = hex;
-      this._setColorSwatch(hex, 'ann-color-sw');
-      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'highlight', { strokeColor: hex, highlightColor: hex });
-    });
-
-    // Stroke width — persists on the manager.
-    document.getElementById('ann-width')?.addEventListener('input', (e) => {
-      const w = parseInt(e.target.value, 10);
-      am.strokeWidth = w;
-      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'rect', { strokeWidth: w });
-    });
-
-    // Highlight opacity — persists on the manager.
-    document.getElementById('ann-opacity')?.addEventListener('input', (e) => {
-      const op = parseInt(e.target.value, 10) / 100;
-      am.highlightOpacity = op;
-      if (this.mode === 'annotate') am.setTool(this._lastAnnotateTool || 'highlight', { highlightOpacity: op });
-    });
-
-    // Delete selected object (records an undo step via the manager's history).
-    document.getElementById('ann-delete')?.addEventListener('click', () => am.deleteSelected());
-
-    // Undo / redo use the SHARED top toolbar buttons (#undoBtn/#redoBtn) — see undo()/redo(), which
-    // route to the annotation layer while in annotate mode. Keep those buttons' enabled state in sync.
-    am.onHistoryChange = () => { if (this.mode === 'annotate') this.updateHistoryButtons(); };
-  }
-
-  /**
-   * Mark one sub-tool button as active, activate it on all Fabric canvases,
-   * and show/hide the opacity slider (only for highlight tools). Colour/width/opacity come from the
-   * manager (persisted), NOT reset to defaults — so switching tools keeps the user's settings.
-   */
-  _activateAnnotateTool(tool) {
-    this._lastAnnotateTool = tool;
-    // Toggle active class
-    document.querySelectorAll('.ann-tool-btn').forEach(btn => btn.classList.remove('active'));
-    document.getElementById(`ann-${tool}`)?.classList.add('active');
-    // Show opacity slider only for highlight tools
-    const opWrap = document.getElementById('ann-opacity-wrap');
-    if (opWrap) opWrap.style.display = (tool === 'highlight' || tool === 'freeHighlight') ? 'inline-flex' : 'none';
-    // Size (stroke width) has no effect for the word-snap Text Highlight or the fixed-line Table —
-    // show it dimmed + inert there so it's clear it doesn't apply (it still persists for other tools).
-    const sizeWrap = document.getElementById('ann-size-wrap');
-    const sizeOff = (tool === 'highlight' || tool === 'table');
-    if (sizeWrap) {
-      sizeWrap.classList.toggle('ann-off', sizeOff);
-      const wInput = document.getElementById('ann-width'); if (wInput) wInput.disabled = sizeOff;
-    }
-    // Keep the sliders in sync with the persisted values.
-    const am = this.annotationManager;
-    const wEl = document.getElementById('ann-width'); if (wEl) wEl.value = am.strokeWidth;
-    const oEl = document.getElementById('ann-opacity'); if (oEl) oEl.value = Math.round(am.highlightOpacity * 100);
-    this._setColorSwatch(am.strokeColor, 'ann-color-sw');
-    // Activate the tool with the persisted settings.
-    am.setTool(tool, {
-      strokeColor: am.strokeColor,
-      strokeWidth: am.strokeWidth,
-      highlightColor: am.highlightColor,
-      highlightOpacity: am.highlightOpacity,
-    });
-  }
-
   // ----- Signature dialog: Draw / Type / Image -----
   // Fonts offered on the Type tab. Each typed signature is rasterised to an image in the
   // chosen font, so the saved result looks EXACTLY like the preview (no font substitution).
@@ -1210,7 +1132,7 @@ class PDFEditorApp {
 }
 
 
-Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods);
+Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
