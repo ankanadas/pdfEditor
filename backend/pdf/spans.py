@@ -59,10 +59,25 @@ def _clamp_opacity(v):
 
 # Font-family name hints (used by _span_style and the _resolve_fonts serif override). A clear family
 # name in the font's basename is more reliable than the PDF's serif flag bit or the frontend's guess.
-_SERIF_NAME_HINTS = ('times', 'serif', 'georgia', 'garamond', 'roman', 'minion', 'charter')
+_SERIF_NAME_HINTS = ('times', 'serif', 'georgia', 'garamond', 'roman', 'minion', 'charter',
+                     # bundled/open serif faces + their metric clones, so a serif original is
+                     # recognised by NAME (not just the PDF serif flag).
+                     'tinos', 'caladea', 'cambria', 'gelasio', 'baskerville', 'merriweather',
+                     'playfair', 'noto serif', 'notoserif', 'eb garamond', 'ebgaramond',
+                     'pt serif', 'ptserif', 'libre baskerville', 'librebaskerville',
+                     'palatino', 'liberation serif')
+# NOTE: PyMuPDF can set the "serifed" span flag (4) on SANS faces (e.g. Carlito/Arimo, the open
+# Calibri/Arial clones LibreOffice embeds). The flag is therefore NOT trusted alone — a recognised
+# SANS name here overrides it (see _span_style), so editing such a line keeps it sans, not Tinos.
 _SANS_NAME_HINTS = ('helvetica', 'arial', 'verdana', 'tahoma', 'segoe', 'calibri', 'roboto',
                     'open sans', 'opensans', 'montserrat', 'noto sans', 'dejavu sans',
-                    'liberation sans', 'gill', 'futura', 'myriad')
+                    'liberation sans', 'gill', 'futura', 'myriad',
+                    # bundled/open sans + mono faces + common clones (mono is not serif either):
+                    'arimo', 'carlito', 'cousine', 'lato', 'nunito', 'ubuntu', 'poppins',
+                    'source sans', 'sourcesans', 'pt sans', 'ptsans', 'trebuchet',
+                    'liberation mono', 'consolas', 'fira code', 'firacode', 'jetbrains',
+                    'ibm plex', 'ibmplex', 'source code', 'sourcecode',
+                    'comic neue', 'comicneue', 'comic sans', 'comicsans')
 
 
 def _span_style(span):
