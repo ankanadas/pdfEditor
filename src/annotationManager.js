@@ -101,7 +101,26 @@ export class AnnotationManager {
       isDrawingMode: false,
       enableRetinaScaling: false,
       renderOnAddRemove: true,
+      // Don't let Fabric preventDefault touch gestures — let CSS touch-action (pinch-zoom) govern, so a
+      // two-finger pinch reaches the browser. Single-finger still draws (touch-action blocks 1-finger pan).
+      allowTouchScrolling: true,
     });
+
+    // Mobile: one finger = draw, TWO fingers = let the browser pinch-zoom / pan the PDF.
+    // `touch-action: pinch-zoom` lets the browser own multi-finger gestures while single-finger touches
+    // still reach Fabric for drawing; `_multiTouch` makes the tool handlers bail out (and discard any
+    // path) so a two-finger gesture never leaves a stray highlight. (No effect on desktop / mouse.)
+    try {
+      if (fc.upperCanvasEl) fc.upperCanvasEl.style.touchAction = 'pinch-zoom';
+      if (fc.lowerCanvasEl) fc.lowerCanvasEl.style.touchAction = 'pinch-zoom';
+      const upper = fc.upperCanvasEl;
+      if (upper) {
+        // Set the gate from the current finger count. It persists through the stroke (a 2nd finger landing
+        // mid-stroke still cancels the draw at path:created) and resets when a fresh SINGLE finger starts a
+        // new stroke — never on touchend, so path:created (which can fire after the fingers lift) still sees it.
+        upper.addEventListener('touchstart', (e) => { this._multiTouch = !!(e.touches && e.touches.length >= 2); }, { passive: true, capture: true });
+      }
+    } catch (_) { /* non-touch / older Fabric — drawing is unaffected */ }
 
     // Prevent accidental stage-pan when the mouse wheel fires over the layer.
     fc.on('mouse:wheel', (opt) => opt.e.stopPropagation());
@@ -274,6 +293,7 @@ export class AnnotationManager {
       fabricCanvas.freeDrawingBrush = brush;
       // Tag + style the resulting path as a translucent highlight stroke.
       fabricCanvas.on('path:created', (e) => {
+        if (this._multiTouch) { fabricCanvas.remove(e.path); fabricCanvas.renderAll(); return; }  // 2 fingers = zoom, not a stroke
         e.path.set({ opacity: this.highlightOpacity, stroke: this.highlightColor, fill: null });
         e.path.globalCompositeOperation = 'multiply';
         e.path._annotationType = 'highlight';
@@ -311,6 +331,7 @@ export class AnnotationManager {
     let tempShape = null;
 
     fabricCanvas.on('mouse:down', (opt) => {
+      if (this._multiTouch) return;                 // two fingers = pinch-zoom, not a shape
       // If the click landed on an existing object, let Fabric handle selection/move
       // and do NOT start drawing a new shape.
       if (opt.target) return;
@@ -390,6 +411,7 @@ export class AnnotationManager {
     const { fabricCanvas, pageIndex, pv } = entry;
 
     fabricCanvas.on('mouse:down', (opt) => {
+      if (this._multiTouch) return;                 // two fingers = pinch-zoom, not a highlight
       if (opt.target) return;
 
       // scenePoint is in the Fabric scene plane.  Because we keep the
@@ -445,6 +467,7 @@ export class AnnotationManager {
     const { fabricCanvas } = entry;
 
     fabricCanvas.on('mouse:down', (opt) => {
+      if (this._multiTouch) return;                 // two fingers = pinch-zoom, not a table
       // If the click landed on an existing object (moving a table), skip
       if (opt.target) return;
 

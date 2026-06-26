@@ -38,6 +38,12 @@ export const TextToolbarMethods = {
     document.getElementById('stage')?.addEventListener('scroll', () => this._positionTextToolbar());
     window.addEventListener('resize', () => this._positionTextToolbar());
     document.addEventListener('selectionchange', () => { if (this._ttTarget) this._positionTextToolbar(); });
+    // Mobile: the soft keyboard resizes/shifts the VISUAL viewport without firing window 'resize' or
+    // 'scroll'. Track it so the floating toolbar follows the visible area (and stays above the keyboard).
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => { if (this._ttTarget) this._positionTextToolbar(); });
+      window.visualViewport.addEventListener('scroll', () => { if (this._ttTarget) this._positionTextToolbar(); });
+    }
     // Hide on a click outside both the toolbar and the active text (an open Add-text editor commits
     // itself via its own outside-mousedown handler; line/overlay just deselect).
     document.addEventListener('mousedown', (e) => {
@@ -243,6 +249,30 @@ export const TextToolbarMethods = {
     if (!el || !el.isConnected) { this.hideTextToolbar(); return; }
     const r = el.getBoundingClientRect();
     const tw = tb.offsetWidth || 360, th = tb.offsetHeight || 40;
+    const vv = window.visualViewport;
+    const isMobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
+    if (isMobile && vv) {
+      // MOBILE: anchor to the VISUAL viewport, not the document. When the soft keyboard opens it shrinks
+      // the visual viewport (and shifts it), so a document-anchored toolbar scrolls off-screen. position:
+      // fixed is relative to the layout viewport, so add vv.offset* to land inside the visible band, and
+      // _initTextToolbar re-runs this on vv 'resize'/'scroll'. Keep it above the text when that fits in the
+      // visible area; otherwise dock it just above the keyboard (bottom edge of the visual viewport).
+      const pad = 6;
+      const visTop = vv.offsetTop, visLeft = vv.offsetLeft, visW = vv.width, visH = vv.height;
+      let left = r.left + r.width / 2 - tw / 2;
+      left = Math.max(visLeft + pad, Math.min(left, visLeft + visW - tw - pad));
+      const minTop = visTop + pad, maxTop = visTop + visH - th - pad;
+      let top = r.top - th - 8;                       // preferred: above the text
+      if (top < minTop || top > maxTop) {
+        const below = r.bottom + 8;
+        top = (below >= minTop && below <= maxTop) ? below : maxTop;   // else below, else dock at keyboard
+      }
+      top = Math.max(minTop, Math.min(top, maxTop));
+      tb.style.left = left + 'px';
+      tb.style.top = top + 'px';
+      return;
+    }
+    // DESKTOP (unchanged): anchor within the stage, flipping below if it would clip the top.
     const stage = document.getElementById('stage');
     const sr = stage ? stage.getBoundingClientRect() : { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
     let left = Math.max(sr.left + 4, Math.min(r.left + r.width / 2 - tw / 2, sr.right - tw - 4));
