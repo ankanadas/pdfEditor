@@ -42,6 +42,13 @@ export const TextEditingMethods = {
       if (anyUnderline && !line.styleRuns && line.items.every(it => !it.text.trim() || it.underline)) {
         line.underline = true;      // uniformly underlined line -> simple whole-line path
       }
+      // Restore an underline applied + saved THIS session that the thin baked rule's pixel-detection
+      // missed on this post-save re-render (only when no fresh pending edit already governs the line).
+      if (!line.underline && this._savedUnderlines && !this.findLineEdit(line) &&
+          this._savedUnderlines.some(u => u.p === pv.pageNum &&
+            Math.abs(u.y - line.baseline / this.scale) < (line.bottom - line.top) / this.scale)) {
+        line.underline = true;
+      }
     });
 
     // Hide the original text by copying a CLEAN background strip from just outside each line over
@@ -52,13 +59,27 @@ export const TextEditingMethods = {
     pv.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
     const cw = pv.canvas.width, ch = pv.canvas.height;
     lines.forEach((line) => {
+      // Cursive/script faces (and tall display fonts) draw glyph ink WELL above the cap line and below
+      // the baseline — beyond the nominal text bbox. Cover a vertical margin above/below so the baked
+      // ink is fully hidden under the edit box; otherwise script ascenders/descenders peek out as the
+      // "bars above each letter" + ghosting when editing a baked cursive line. Clamp the margin to the
+      // gap to the nearest neighbouring line so we never cover an adjacent line's text.
+      const lh0 = Math.max(1, line.bottom - line.top);
+      let gapUp = line.top, gapDn = ch - line.bottom;
+      for (const o of lines) {
+        if (o === line) continue;
+        if (o.bottom <= line.top) gapUp = Math.min(gapUp, line.top - o.bottom);
+        if (o.top >= line.bottom) gapDn = Math.min(gapDn, o.top - line.bottom);
+      }
+      const mUp = Math.min(lh0 * 0.45, Math.max(0, gapUp * 0.8));
+      const mDn = Math.min(lh0 * 0.45, Math.max(0, gapDn * 0.8));
       const lx = Math.max(0, Math.floor(line.left) - 2);
-      const ly = Math.max(0, Math.floor(line.top) - 2);
+      const ly = Math.max(0, Math.floor(line.top - mUp) - 2);
       const lw = Math.min(cw - lx, Math.ceil(line.right - line.left) + 6);
-      const lh = Math.min(ch - ly, Math.ceil(line.bottom - line.top) + 4);
-      const band = Math.max(2, Math.round((line.bottom - line.top) * 0.18));
-      let sy = ly - band - 2;                                            // clean strip ABOVE the line...
-      if (sy < 0) sy = Math.min(ch - band, Math.ceil(line.bottom) + 2);  // ...else just BELOW it
+      const lh = Math.min(ch - ly, Math.ceil((line.bottom + mDn) - (line.top - mUp)) + 4);
+      const band = Math.max(2, Math.round(lh0 * 0.18));
+      let sy = ly - band - 2;                                            // clean strip ABOVE the (expanded) box...
+      if (sy < 0) sy = Math.min(ch - band, Math.ceil(line.bottom + mDn) + 2);  // ...else just BELOW it
       // Only stretch the strip when it is genuinely CLEAN background. Next to a table border or a
       // section rule the strip catches that dark line and, stretched over the box, shows as a dark
       // band ("shadow") above the text. In that case cover with the line's solid background colour
@@ -259,6 +280,9 @@ export const TextEditingMethods = {
       newText: newText,
       // Floating-toolbar styling applied to this line (all optional; absent == unchanged).
       ...(line.underline ? { underline: true } : {}),
+      // Removing an underline: tell the backend to cover the previously-baked rule even though no
+      // fresh underline is drawn (else the old line-art survives redaction -> underline won't clear).
+      ...(line._coverUnderline ? { coverUnderline: true } : {}),
       ...(line.color ? { color: line.color } : {}),
       ...(line.opacity != null && line.opacity < 1 ? { opacity: line.opacity } : {}),
       ...(line.align ? { align: line.align } : {}),

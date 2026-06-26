@@ -86,9 +86,16 @@ export const SaveServiceMethods = {
         const loadingTask = pdfjsLib.getDocument({ data: editedPdfBytes.slice(0) });
         this.pdfJsDoc = await loadingTask.promise;
         await this.extractTextFromPDFjs();
+        // Remember underlines the user just applied: the backend bakes a THIN rule (≈0.055·size) that
+        // the on-load pixel underline-detection can miss on this re-render, so the edit box would lose
+        // the underline until the next save. Consumed by createEditableTextBoxes below, then cleared.
+        this._savedUnderlines = (this.edits || [])
+          .filter(e => e.underline && e.redact !== false && e.newText != null && e.pageIndex != null)
+          .map(e => ({ p: e.pageIndex, y: e.baseline }));
         this.edits = [];
         this.resetHistory();
         await this.buildPages();
+        this._savedUnderlines = null;
         this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
       } else {
         this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
@@ -98,8 +105,9 @@ export const SaveServiceMethods = {
       this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
     }
 
-    // Refresh to a clean slate once the toast + download have started.
-    setTimeout(() => window.location.reload(), 1600);
+    // Keep the document loaded after saving so the user can continue editing — a backend save
+    // has already re-baselined to the cleaned result above. (Previously the page reloaded ~1.6s
+    // after save, wiping the document back to the upload screen.)
   },
   /**
    * Apply all edits to the PDF in the browser using pdf-lib and return the new bytes.
