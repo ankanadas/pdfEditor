@@ -27,6 +27,7 @@ import { AnnotateToolbarMethods } from './features/annotateToolbar.js';
 import { RestrictionMethods } from './core/restrictions.js';
 import { LineStyleMethods } from './core/lineStyle.js';
 import { FontPickerMethods } from './core/fontPicker.js';
+import { TextSanitizeMethods } from './core/textSanitize.js';
 import { PageOpsMethods } from './features/pageOps.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
@@ -401,35 +402,6 @@ class PDFEditorApp {
   // ---------------------------------------------------------------------------
 
   /**
-   * Normalise text captured from a contentEditable box. Browsers slip in non-breaking
-   * spaces, zero-width characters, soft hyphens, etc. while you type — these have no glyph
-   * in a PDF's subset font and save as a missing-glyph box (□). Convert odd spaces to a
-   * normal space and drop the invisible characters so saved text is exactly what you typed.
-   */
-  cleanEditableText(s) {
-    return (s || '')
-      .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')  // odd spaces -> normal space
-      .replace(/[\u200b\u200c\u200d\u2060\ufeff\u00ad]/g, '')          // zero-width / BOM / soft hyphen
-      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ''); // control characters
-  }
-
-  /**
-   * Keep only characters the built-in Helvetica (WinAnsi) can render — Latin-1 plus the
-   * common typographic extras (• – — ' ' " " … € ™). Anything else becomes '?'.
-   */
-  sanitizeForStandardFont(s) {
-    const extras = new Set(['•', '–', '—', '‘', '’', '“', '”', '…', '€', '™', '©', '®',
-      'š', 'ž', 'Š', 'Ž', 'Œ', 'œ', 'Ÿ', 'ƒ', '†', '‡', '‰', '‹', '›']);
-    let out = '';
-    for (const ch of s) {
-      const c = ch.codePointAt(0);
-      if ((c >= 0x20 && c <= 0x7e) || (c >= 0xa0 && c <= 0xff) || extras.has(ch)) out += ch;
-      else out += '?';
-    }
-    return out;
-  }
-
-  /**
    * "Discard": drop ALL unsaved changes (added text, signatures, erases, line edits),
    * reverting to the loaded PDF. Undoable. Items already saved into the file are kept.
    */
@@ -479,7 +451,7 @@ class PDFEditorApp {
 }
 
 
-Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods);
+Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
