@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <!-- Pinch-zoom of the PDF stays enabled. Mobile Safari's auto-zoom on focusing a small-font editable
+       box (which threw the page + JS-positioned toolbar around) is prevented by locking the scale ONLY
+       while a text editor/toolbar is open (see _setViewportZoom), then restoring pinch when it closes. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Free PDF Editor: Edit, Sign &amp; Fill PDFs Online | Quick PDF Editor</title>
   <meta name="description" content="Free online PDF editor to edit text, sign, stamp and reorder pages right in your browser. No sign-up, no subscriptions, no ads, and your files are never stored." />
@@ -459,7 +462,9 @@
     .tt-btn:hover { background: #f1eeff; }
     .tt-btn.on { background: var(--brand); border-color: var(--brand); color: #fff; }
     .tt-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .tt-btn.tt-danger { color: #e5484d; }   /* delete reads clearly as red (standard trash icon) */
     .tt-btn.tt-danger:hover { background: #ffe9e9; color: #c0271f; }
+    .tt-btn svg { display: block; margin: 0 auto; pointer-events: none; }
     .tt-num { width: 48px; height: 28px; padding: 2px 6px; border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; }
     .tt-sel { height: 28px; padding: 2px 6px; border: 1px solid #d9d4ff; border-radius: 7px; font-size: 13px; background: #fff; }
 
@@ -1085,25 +1090,23 @@
       .appfoot { padding: 6px 10px; gap: 4px 12px; font-size: 11px; }
       .appfoot .foot-badge { display: none; }
 
-      /* ---- Floating text toolbar: keep it ABOVE the selected text (JS-positioned, like desktop);
-         compact, swipe horizontally if it still overflows; drop alignment + duplicate on mobile. ---- */
+      /* ---- Floating text toolbar: keep it ABOVE the selected text (JS-positioned, like desktop), but
+         WRAP to ~2 rows so EVERY control (font, colour, link, delete) is visible — never scrolled off
+         the right edge. Drop alignment + duplicate + opacity on mobile to keep it to two tidy rows. ---- */
       #textToolbar.show {
-        max-width: calc(100vw - 12px);
-        flex-wrap: nowrap; overflow-x: auto; overflow-y: visible;
-        -webkit-overflow-scrolling: touch; padding: 6px;
+        width: calc(100vw - 12px); max-width: calc(100vw - 12px);
+        flex-wrap: wrap; overflow: visible; padding: 6px; gap: 6px; justify-content: flex-start;
       }
-      #textToolbar.show > * { flex: 0 0 auto; }            /* don't squash controls; scroll instead */
-      /* Mobile edit/add: drop alignment + duplicate + OPACITY to keep the above-text bar compact. */
+      #textToolbar.show > * { flex: 0 0 auto; }            /* don't squash controls; wrap instead */
+      /* Mobile edit/add: drop alignment + duplicate + OPACITY to keep the bar compact (2 rows max). */
       #tt-align-left, #tt-align-center, #tt-align-right, #tt-dup, .tt-opacity { display: none; }
       .tt-btn { min-width: 40px; height: 40px; }
       .tt-num { width: 52px; height: 40px; }
       .tt-sel, .tt-font-btn { height: 40px; }
-      .tt-font-btn { min-width: 118px; max-width: 150px; }
+      .tt-font-btn { min-width: 96px; max-width: 132px; }
       /* Font-size +/- steppers: mobile has no native number spinner, so show explicit buttons. */
       .tt-step { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 40px;
         border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font-size: 20px; line-height: 1; padding: 0; }
-      /* Keep Delete reachable: pin it to the right edge while the rest of the bar scrolls. */
-      #tt-del { position: sticky; right: 0; z-index: 2; background: #fff; box-shadow: -8px 0 8px -6px rgba(0,0,0,.18); }
       /* Popups become bottom sheets so a horizontally-scrolling toolbar can never clip them. */
       .tt-font-pop, .tt-color-pop, .tt-link-pop {
         position: fixed; left: 8px; right: 8px; top: auto; bottom: 58px;
@@ -1501,7 +1504,7 @@
     </div>
     <!-- Duplicate the selected ADDED-text box (disabled for existing-text lines). -->
     <button class="tt-btn" id="tt-dup" type="button" title="Duplicate this text" aria-label="Duplicate">⧉</button>
-    <button class="tt-btn tt-danger" id="tt-del" type="button" title="Delete this text" aria-label="Delete this text">🗑</button>
+    <button class="tt-btn tt-danger" id="tt-del" type="button" title="Delete this text" aria-label="Delete this text"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path></svg></button>
   </div>
 
   <!-- Blocking loading overlay for page operations (reorder / delete / insert): covers the screen
