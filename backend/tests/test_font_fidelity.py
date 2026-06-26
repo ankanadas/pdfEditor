@@ -10,6 +10,9 @@ Committed + auto-discovered (test_*.py), so it runs on every `npm run build` / p
 import os
 import io
 import base64
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 import fitz  # noqa: E402
@@ -18,6 +21,49 @@ import sys  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))   # backend/
 import app as appmod  # noqa: E402
+
+# macOS Quick Look renders with the SAME engine as Preview/Finder (PDFKit/CoreGraphics) — the only way
+# to assert what the user actually sees in Preview. Gated: skips on Linux/CI and if Pillow is absent.
+try:
+    from PIL import Image, ImageChops  # noqa: E402
+    _HAS_PIL = True
+except Exception:
+    _HAS_PIL = False
+_HAS_QL = sys.platform == "darwin" and shutil.which("qlmanage") is not None
+
+
+def _ql_render(pdf_bytes):
+    """Render page 1 of `pdf_bytes` through macOS Quick Look (the Preview engine). Returns a PIL RGB
+    image, or None if Quick Look is unavailable or failed."""
+    d = tempfile.mkdtemp()
+    try:
+        p = os.path.join(d, "in.pdf")
+        with open(p, "wb") as fh:
+            fh.write(pdf_bytes)
+        subprocess.run(["qlmanage", "-t", "-s", "1000", "-o", d, p],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
+        out = os.path.join(d, "in.pdf.png")
+        return Image.open(out).convert("RGB").copy() if os.path.exists(out) else None
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _img_diff_pct(a, b, search=4):
+    """Percent of pixels that differ, minimised over a small +-`search` px shift (alignment-robust)."""
+    best = 100.0
+    for dx in range(-search, search + 1):
+        for dy in range(-search, search + 1):
+            d = ImageChops.difference(a, ImageChops.offset(b, dx, dy)).convert("L")
+            px = d.load(); W, H = d.size; nz = tot = 0
+            for y in range(2, H - 2):
+                for x in range(2, W - 2):
+                    tot += 1
+                    if px[x, y] > 40:
+                        nz += 1
+            best = min(best, 100 * nz / max(tot, 1))
+    return best
 
 FONTS = os.path.join(os.path.dirname(HERE), "fonts")
 SAMPLE = "Original sample line ABCxyz 123"
@@ -48,7 +94,7 @@ class FontFidelityTests(unittest.TestCase):
         doc = fitz.open(); pg = doc.new_page(width=480, height=200)
         if bg:
             pg.draw_rect(fitz.Rect(0, 0, 480, 200), color=None, fill=bg)
-        if font.endswith(".ttf"):
+        if font.endswith(".ttf") or font.endswith(".otf"):
             pg.insert_text(fitz.Point(72, 120), text, fontsize=size, color=color,
                            fontname="EF", fontfile=os.path.join(FONTS, font))
         else:
@@ -131,6 +177,38 @@ class FontFidelityTests(unittest.TestCase):
             mono = any(k in n["font"].lower() for k in ("cour", "cousine", "mono", "consol"))
             self.assertTrue(mono, f"{label}: editing monospace text dropped to a proportional "
                                   f"face ('{n['font']}') — fixed-pitch not preserved")
+
+    # -- 2c) PREVIEW (macOS PDFKit) render: a text-only edit keeps the FAMILY --
+    @unittest.skipUnless(_HAS_QL and _HAS_PIL, "needs macOS Quick Look (Preview engine) + Pillow")
+    def test_preview_render_keeps_font_family_on_text_edit(self):
+        # The cross-viewer check the font-NAME asserts can't make: render the SAVED file through macOS
+        # Quick Look (the SAME engine Preview/Finder use) and prove a TEXT-ONLY edit still renders in
+        # the SAME family. This is the failure the user hit — a heading that looked like a different
+        # font in Preview after editing. For each standard family we assert the saved heading, rendered
+        # in Preview, matches its OWN family reference far better than the opposite family.
+        cases = [
+            # (label, base14 font, in-family ref file, opposite-family ref file)
+            ("helvetica(sans)", "hebo", "TeXGyreHeros-Bold.otf", "Tinos-Bold.ttf"),
+            ("times(serif)",    "tibo", "Tinos-Bold.ttf",        "TeXGyreHeros-Bold.otf"),
+        ]
+        BOX = (120, 150, 900, 300)   # heading band in the ~1000px-wide Quick Look render
+        for label, font, same_fam, other_fam in cases:
+            src = self._make(font, size=40, text="Brand Heading")
+            o = self._first_span(src)
+            saved = self._edit(src, [self._edit_obj(o, "Brand Heading")])   # SAME text, no style change
+            saved_img = _ql_render(saved)
+            same_img = _ql_render(self._make(same_fam, size=40, text="Brand Heading"))
+            other_img = _ql_render(self._make(other_fam, size=40, text="Brand Heading"))
+            if not (saved_img and same_img and other_img):
+                self.skipTest("Quick Look render unavailable")
+            s = saved_img.crop(BOX); a = same_img.crop(BOX); b = other_img.crop(BOX)
+            d_same = _img_diff_pct(s, a)
+            d_other = _img_diff_pct(s, b)
+            # Saved heading must look like its OWN family, clearly more than the opposite family —
+            # catches a sans<->serif flip that ONLY shows up when rendered (not in the font name).
+            self.assertLess(d_same, d_other - 3.0,
+                            f"{label}: in Preview the edited heading is closer to the WRONG family "
+                            f"(same={d_same:.1f}% vs other={d_other:.1f}%) — family changed on a text edit")
 
     # -- 3) explicit style changes are applied --------------------------------
     def test_explicit_bold_italic_size_applied(self):
