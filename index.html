@@ -148,6 +148,12 @@
 
     /* ---------- Workspace ---------- */
     .workspace { flex: 1; display: flex; min-height: 0; }
+    /* Tool dock wraps both rails. On DESKTOP it is transparent (display:contents) and explicit order
+       keeps the layout sidebar | main | rightbar; on MOBILE it becomes one scroll row (see @media). */
+    .tool-dock { display: contents; }
+    .sidebar { order: 0; }
+    .main { order: 1; }
+    .rightbar { order: 2; }
 
     /* Sidebar */
     .sidebar {
@@ -505,6 +511,8 @@
     .tt-sw-custom input[type=color] { width: 22px; height: 20px; padding: 0; border: none; background: none; cursor: pointer; }
     .tt-opacity { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
     .tt-opacity input[type=range] { width: 64px; }
+    .tt-size-wrap { display: inline-flex; align-items: center; gap: 2px; }
+    .tt-step { display: none; }   /* desktop uses the native number spinner; +/- shown on mobile only */
 
     /* ---------- Hyperlink popover (floating toolbar) ---------- */
     .tt-link-wrap { position: relative; display: inline-flex; }
@@ -534,6 +542,7 @@
       position: absolute; color: #000; white-space: pre; cursor: move;
       padding: 1px 2px; border: 1px solid transparent; border-radius: 3px;
       z-index: 250; user-select: none;
+      touch-action: none;   /* let pointer-drag move/rotate/resize the box instead of the browser panning the page */
     }
     .insert-overlay:hover { border-color: #6d5efc; background: rgba(109, 94, 252, .06); }
     /* The selected added-text box (toolbar Size resizes it) */
@@ -550,6 +559,10 @@
     }
     .insert-overlay:hover .insert-handle, .insert-overlay:hover .insert-del,
     .insert-overlay:hover .insert-rotate { display: block; }
+    /* Touch has no :hover — show the move/rotate/resize handles whenever the box is selected so it
+       stays draggable/rotatable on mobile (text boxes use .selected, signatures use .sig-active). */
+    .insert-overlay.selected .insert-handle, .insert-overlay.selected .insert-del,
+    .insert-overlay.selected .insert-rotate { display: block; }
     .insert-overlay.sig-active .insert-handle, .insert-overlay.sig-active .insert-del,
     .insert-overlay.sig-active .insert-rotate { display: block; }
     .insert-overlay.insert-image { padding: 0; }
@@ -1027,32 +1040,41 @@
       #fileName { max-width: 120px; }
       .mode-indicator { display: none; }                  /* reclaim horizontal space */
 
-      /* Contextual action bar: keep the controls, drop the long helper sentences */
-      #actionBar { flex-wrap: wrap; padding: 6px 10px; gap: 8px; }
+      /* Contextual action bar: ONE horizontally-scrollable row — icons slide if they don't fit,
+         never wrap to a second row. Drop the long helper sentences. */
+      #actionBar { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; padding: 6px 10px; gap: 8px; }
+      #actionBar .ctx { flex-wrap: nowrap; }
+      #actionBar > *, #actionBar .ctx > *, #actionBar .stamp-chips { flex: 0 0 auto; }
+      #actionBar .stamp-chips { flex-wrap: nowrap; }
       #actionBar .ab-hint { display: none; }
 
       /* ---- Workspace: stack vertically — PDF on top (scrolls), tools docked at the bottom ---- */
       .workspace { flex-direction: column; min-height: 0; }
       .main { order: 0; flex: 1 1 auto; min-height: 0; }
 
-      /* Side rails -> a horizontal, full-width, horizontally-scrollable tool dock below the PDF.
-         Two compact rows (primary tools, then document tools); each scrolls if it overflows. */
-      .sidebar, .rightbar {
-        order: 1; flex: 0 0 auto; width: 100%; max-width: 100%;
+      /* Side rails -> ONE horizontally-scrollable tool dock below the PDF. ALL tools (Edit…Discard +
+         Reorder + Merge) stay on a SINGLE row and slide when they overflow — never wrap to a 2nd row.
+         The tool-dock is the scroll container; the rails become display:contents so their tools flow
+         straight into it as one row. */
+      .tool-dock {
+        display: flex; order: 1; flex: 0 0 auto; width: 100%; max-width: 100%;
         flex-direction: row; align-items: stretch; justify-content: flex-start;
-        gap: 6px; padding: 6px 8px; border: none; border-top: 1px solid var(--line);
+        gap: 6px; padding: 6px 8px; border-top: 1px solid var(--line);
         overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
       }
-      .rightbar { order: 2; border-top: none; }           /* sits flush under the first dock row */
+      .sidebar, .rightbar { display: contents; }            /* tools flow into the single dock row */
       .sidebar .sep { display: none; }
-      .sidebar .tool, .rightbar .tool {
+      .tool-dock .tool {
         flex: 0 0 auto; width: auto; min-width: 60px; min-height: 48px;   /* ≥44px touch targets */
         padding: 6px 10px; gap: 3px; font-size: 11px;
       }
-      .sidebar .tool .tool-ico, .rightbar .tool .tool-ico { width: 26px; height: 26px; }
+      .tool-dock .tool .tool-ico { width: 26px; height: 26px; }
       .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 28px; height: 28px; }
       /* Keep the landing clean: only show the (disabled) dock once a PDF is open. */
-      body:not(.has-pdf) .sidebar, body:not(.has-pdf) .rightbar { display: none; }
+      body:not(.has-pdf) .tool-dock { display: none; }
+
+      /* The bottom status toast covers the tools/content on small screens — hide it on mobile. */
+      #status, #status.show { display: none !important; }
 
       /* ---- PDF workspace: almost full width, minimal margins, natural vertical scroll ---- */
       .stage { padding: 8px 6px 14px; }
@@ -1063,19 +1085,25 @@
       .appfoot { padding: 6px 10px; gap: 4px 12px; font-size: 11px; }
       .appfoot .foot-badge { display: none; }
 
-      /* ---- Floating text toolbar: pin in-bounds at the bottom, swipe horizontally ---- */
+      /* ---- Floating text toolbar: keep it ABOVE the selected text (JS-positioned, like desktop);
+         compact, swipe horizontally if it still overflows; drop alignment + duplicate on mobile. ---- */
       #textToolbar.show {
-        left: 6px !important; right: 6px !important; top: auto !important;
-        bottom: calc(env(safe-area-inset-bottom, 0px) + 6px) !important;
-        width: auto !important; max-width: calc(100vw - 12px);
+        max-width: calc(100vw - 12px);
         flex-wrap: nowrap; overflow-x: auto; overflow-y: visible;
         -webkit-overflow-scrolling: touch; padding: 6px;
       }
       #textToolbar.show > * { flex: 0 0 auto; }            /* don't squash controls; scroll instead */
+      /* Mobile edit/add: drop alignment + duplicate + OPACITY to keep the above-text bar compact. */
+      #tt-align-left, #tt-align-center, #tt-align-right, #tt-dup, .tt-opacity { display: none; }
       .tt-btn { min-width: 40px; height: 40px; }
       .tt-num { width: 52px; height: 40px; }
       .tt-sel, .tt-font-btn { height: 40px; }
       .tt-font-btn { min-width: 118px; max-width: 150px; }
+      /* Font-size +/- steppers: mobile has no native number spinner, so show explicit buttons. */
+      .tt-step { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 40px;
+        border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font-size: 20px; line-height: 1; padding: 0; }
+      /* Keep Delete reachable: pin it to the right edge while the rest of the bar scrolls. */
+      #tt-del { position: sticky; right: 0; z-index: 2; background: #fff; box-shadow: -8px 0 8px -6px rgba(0,0,0,.18); }
       /* Popups become bottom sheets so a horizontally-scrolling toolbar can never clip them. */
       .tt-font-pop, .tt-color-pop, .tt-link-pop {
         position: fixed; left: 8px; right: 8px; top: auto; bottom: 58px;
@@ -1207,6 +1235,9 @@
   </header>
 
   <div class="workspace">
+    <!-- Tool dock: wraps both rails so MOBILE renders them as ONE horizontally-scrollable row.
+         On desktop it is display:contents (transparent) so the rails keep their left/right positions. -->
+    <div class="tool-dock">
     <!-- Tool sidebar -->
     <aside class="sidebar">
       <button class="tool featured" id="editModeBtn" disabled title="Most useful: edit existing text in place">
@@ -1239,6 +1270,19 @@
         Discard
       </button>
     </aside>
+
+    <!-- Right tool rail: document-level tools. Reorder (top); Merge. (Moved inside .tool-dock.) -->
+    <aside class="rightbar" aria-label="Document tools">
+      <button class="tool" id="pagesPanelBtn" disabled title="Reorder pages: drag to reorder, delete, or insert blank pages">
+        <img class="tool-ico" src="/assets/fun-ui/reorder.png" alt="" aria-hidden="true">
+        Reorder
+      </button>
+      <button class="tool merge-tool" id="mergeBtn" title="Merge PDF: combine multiple PDFs into one document">
+        <img class="tool-ico" src="/assets/fun-ui/merge.png" alt="" aria-hidden="true">
+        Merge
+      </button>
+    </aside>
+    </div><!-- /tool-dock -->
 
     <!-- Main: toolbar + stage -->
     <div class="main" id="main-content" role="main" tabindex="-1">
@@ -1402,18 +1446,6 @@
         <div id="canvasContainer"></div>
       </div>
     </div>
-
-    <!-- Right tool rail: document-level tools. Reorder moved here (top); Merge is new. -->
-    <aside class="rightbar" aria-label="Document tools">
-      <button class="tool" id="pagesPanelBtn" disabled title="Reorder pages: drag to reorder, delete, or insert blank pages">
-        <img class="tool-ico" src="/assets/fun-ui/reorder.png" alt="" aria-hidden="true">
-        Reorder
-      </button>
-      <button class="tool merge-tool" id="mergeBtn" title="Merge PDF: combine multiple PDFs into one document">
-        <img class="tool-ico" src="/assets/fun-ui/merge.png" alt="" aria-hidden="true">
-        Merge
-      </button>
-    </aside>
   </div>
 
   <!-- Shared contextual floating text toolbar. ONE toolbar for both edited existing text and
@@ -1424,7 +1456,11 @@
     <button class="tt-btn" id="tt-italic" type="button" title="Italic" aria-label="Italic"><i>I</i></button>
     <button class="tt-btn" id="tt-underline" type="button" title="Underline" aria-label="Underline"><u>U</u></button>
     <span class="tt-sep"></span>
-    <input type="number" id="tt-size" class="tt-num" min="4" max="200" step="1" title="Font size" aria-label="Font size" />
+    <span class="tt-size-wrap">
+      <button type="button" class="tt-step" id="tt-size-dec" tabindex="-1" title="Decrease font size" aria-label="Decrease font size">−</button>
+      <input type="number" id="tt-size" class="tt-num" min="4" max="200" step="1" title="Font size" aria-label="Font size" />
+      <button type="button" class="tt-step" id="tt-size-inc" tabindex="-1" title="Increase font size" aria-label="Increase font size">+</button>
+    </span>
     <!-- Searchable font picker: one dropdown listing every font (each row previewed in its own face),
          with a "Recently used" section. #tt-font is a hidden value-holder so the toolbar sync code is
          unchanged; the list + selection are built by app.js (_initFontPicker). -->

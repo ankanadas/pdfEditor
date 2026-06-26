@@ -147,21 +147,30 @@ export const InsertEditorMethods = {
     // 'size' | 'bold' | 'italic'.
     const applyStyle = (kind, value) => {
       if (kind === 'size') { value = Math.max(4, Math.min(200, Math.round(value))); this._lastInsertSize = value; }
-      const range = workingRange();
+      let range = workingRange();
       const sel = window.getSelection();
       const liveInEditor = sel && sel.rangeCount && div.contains(sel.getRangeAt(0).commonAncestorContainer);
-      if (!range || range.collapsed) {
-        // No selection: arm the pen for the next typed characters (existing text is untouched).
-        const base = pendingStyle || (range ? caretStyle(range) : { ...boxDefaults });
+      const hasText = div.textContent.replace(/​/g, '').trim().length > 0;
+      if ((!range || range.collapsed) && !hasText) {
+        // EMPTY box, nothing selected: arm the pen for the next typed characters + set the box default.
+        const base = pendingStyle || { ...boxDefaults };
         pendingStyle = { ...base }; pendingStyle[kind] = value;
-        if (!range) {                  // truly empty box: also make it the box default
-          edit.fontSize = pendingStyle.size; edit.bold = pendingStyle.bold; edit.italic = pendingStyle.italic;
-          div.style.fontSize = (pendingStyle.size * unit) + 'px';
-          div.style.fontWeight = pendingStyle.bold ? 'bold' : 'normal';
-          div.style.fontStyle = pendingStyle.italic ? 'italic' : 'normal';
-          boxDefaults.size = pendingStyle.size; boxDefaults.bold = pendingStyle.bold; boxDefaults.italic = pendingStyle.italic;
-        }
+        edit.fontSize = pendingStyle.size; edit.bold = pendingStyle.bold; edit.italic = pendingStyle.italic;
+        div.style.fontSize = (pendingStyle.size * unit) + 'px';
+        div.style.fontWeight = pendingStyle.bold ? 'bold' : 'normal';
+        div.style.fontStyle = pendingStyle.italic ? 'italic' : 'normal';
+        boxDefaults.size = pendingStyle.size; boxDefaults.bold = pendingStyle.bold; boxDefaults.italic = pendingStyle.italic;
         syncToolbar(); return;
+      }
+      if (!range || range.collapsed) {
+        // Text present but nothing selected: apply to the WHOLE box — changing the size/B/I resizes/
+        // restyles the text you just typed (the intuitive behaviour) and the box default so new text
+        // matches too. (A specific selection still restyles only that run — see below.)
+        const r = document.createRange(); r.selectNodeContents(div);
+        if (liveInEditor) { sel.removeAllRanges(); sel.addRange(r); }
+        range = r;
+        boxDefaults[kind] = value;
+        if (kind === 'size') edit.fontSize = value;
       }
       // A real selection: restyle just that text and drop the pen. Wrap it in a span carrying the new
       // style (size/bold/italic/underline/color/link) and propagate to any nested same-kind spans.
@@ -269,6 +278,9 @@ export const InsertEditorMethods = {
       if (changed) this.commitHistory();
       this.renderCurrentPage();
     };
+    // Let the toolbar's Delete remove the whole Add-text box: cancel (don't commit) -> the editor +
+    // its (uncommitted) text are discarded and the box disappears.
+    if (this._activeInsertEditor) this._activeInsertEditor.cancel = () => finish(false);
 
     // Commit when the user mouses down anywhere that isn't this editor or the Add-text toolbar
     // (so adjusting size/B/I keeps the box open). Esc cancels.
@@ -616,11 +628,29 @@ export const InsertEditorMethods = {
       this.commitHistory();
     };
 
+    // A reusable pointer-drag (mouse + touch + pen): capture the pointer so move/up keep firing when
+    // the finger slides off a small handle, and so `touch-action:none` on the overlay stops the page
+    // from scrolling instead of dragging. Mirrors wireImageOverlay so text + signatures behave the same.
+    const drag = (target, e, onMove, onUp) => {
+      e.preventDefault(); e.stopPropagation();
+      try { target.setPointerCapture(e.pointerId); } catch (_) {}
+      const sx = e.clientX, sy = e.clientY;
+      const move = (ev) => onMove(ev.clientX - sx, ev.clientY - sy, ev);
+      const up = (ev) => {
+        target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', up);
+        target.removeEventListener('pointercancel', up);
+        try { target.releasePointerCapture(e.pointerId); } catch (_) {}
+        if (onUp) onUp(ev);
+      };
+      target.addEventListener('pointermove', move);
+      target.addEventListener('pointerup', up);
+      target.addEventListener('pointercancel', up);
+    };
+
     // Rotate: drag the top handle around the text origin (left edge at the baseline). That pivot
     // is fixed by the transform-origin, so it stays put under rotation. Shift snaps to 15°.
     if (rotate) {
-      rotate.addEventListener('mousedown', (e) => {
-        e.preventDefault(); e.stopPropagation();
+      rotate.addEventListener('pointerdown', (e) => {
         const parent = div.parentElement;
         if (!parent) return;        // overlay was just re-rendered (e.g. committing an open editor)
         const wrapRect = parent.getBoundingClientRect();
@@ -632,81 +662,64 @@ export const InsertEditorMethods = {
         // away from the origin pivot, so an absolute angle would start offset; a delta doesn't.
         const startRot = edit.rotation || 0;
         const startAngle = Math.atan2(e.clientY - pivotY, e.clientX - pivotX);
-        const move = (ev) => {
-          let deg = startRot + (Math.atan2(ev.clientY - pivotY, ev.clientX - pivotX) - startAngle) * 180 / Math.PI;
-          if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
-          deg = Math.round(deg);
-          edit.rotation = deg;
-          div.style.transform = `rotate(${deg}deg)`;
-        };
-        const up = () => {
-          window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
-          this.commitHistory();
-          this.showStatus(`Rotated to ${edit.rotation || 0}°`, 'success');
-        };
-        window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+        drag(rotate, e,
+          (dx, dy, ev) => {
+            let deg = startRot + (Math.atan2(ev.clientY - pivotY, ev.clientX - pivotX) - startAngle) * 180 / Math.PI;
+            if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+            deg = Math.round(deg);
+            edit.rotation = deg;
+            div.style.transform = `rotate(${deg}deg)`;
+          },
+          () => { this.commitHistory(); this.showStatus(`Rotated to ${edit.rotation || 0}°`, 'success'); });
       });
     }
 
     // Move (drag the body)
-    div.addEventListener('mousedown', (e) => {
+    div.addEventListener('pointerdown', (e) => {
       if (e.target === del || e.target === handle || e.target === rotate) return;
       const isText = edit.style !== 'signature';
-      if (isText) this.selectInsert(edit);   // clicking a text box selects it
-      e.preventDefault(); e.stopPropagation();
-      const sx = e.clientX, sy = e.clientY;
+      if (isText) this.selectInsert(edit);   // tapping/clicking a text box selects it (shows its handles)
       const ox = parseFloat(div.style.left), oy = parseFloat(div.style.top);
       let dragged = false;
-      const move = (ev) => {
-        if (!dragged && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 4) return;   // ignore jitter
-        dragged = true;
-        div.style.left = (ox + ev.clientX - sx) + 'px';
-        div.style.top = (oy + ev.clientY - sy) + 'px';
-      };
-      const up = () => {
-        window.removeEventListener('mousemove', move);
-        window.removeEventListener('mouseup', up);
-        // A drag moves the box; a plain click on a TEXT box opens its editor so the user can place a
+      drag(div, e,
+        (dx, dy) => {
+          if (!dragged && Math.abs(dx) + Math.abs(dy) < 4) return;   // ignore jitter
+          dragged = true;
+          div.style.left = (ox + dx) + 'px';
+          div.style.top = (oy + dy) + 'px';
+        },
+        // A drag moves the box; a plain tap/click on a TEXT box opens its editor so the user can place a
         // caret and select PART of the text to style or hyperlink (mirrors Canva/Figma text boxes).
-        if (dragged) commitFromDiv();
-        else if (isText && pv) this.openInsertEditor(edit, pv, false);
-      };
-      window.addEventListener('mousemove', move);
-      window.addEventListener('mouseup', up);
+        () => { if (dragged) commitFromDiv(); else if (isText && pv) this.openInsertEditor(edit, pv, false); });
     });
 
     // Resize (drag the corner handle = scale the font size). For a mixed-size box every run
     // scales by the same factor so their relative sizes are preserved.
-    handle.addEventListener('mousedown', (e) => {
-      e.preventDefault(); e.stopPropagation();
-      const sy = e.clientY;
+    handle.addEventListener('pointerdown', (e) => {
       const startFont = parseFloat(div.style.fontSize);
       const hasRuns = !!(edit.runs && edit.runs.length);
       const spans = hasRuns ? Array.from(div.querySelectorAll('span')) : [];
       const spanStart = spans.map(s => parseFloat(s.style.fontSize) || startFont);
       let factor = 1;
-      const move = (ev) => {
-        const f = Math.max(8, startFont + (ev.clientY - sy));
-        factor = f / startFont;
-        div.style.fontSize = f + 'px';
-        div.style.lineHeight = hasRuns ? '1.2' : f + 'px';
-        spans.forEach((s, i) => { s.style.fontSize = (spanStart[i] * factor) + 'px'; });
-      };
-      const up = () => {
-        window.removeEventListener('mousemove', move);
-        window.removeEventListener('mouseup', up);
-        if (hasRuns && factor !== 1) {
-          edit.runs = edit.runs.map(line =>
-            line.map(r => ({ text: r.text, size: Math.max(4, Math.round(r.size * factor)), bold: !!r.bold, italic: !!r.italic })));
-        }
-        commitFromDiv();
-      };
-      window.addEventListener('mousemove', move);
-      window.addEventListener('mouseup', up);
+      drag(handle, e,
+        (dx, dy) => {
+          const f = Math.max(8, startFont + dy);
+          factor = f / startFont;
+          div.style.fontSize = f + 'px';
+          div.style.lineHeight = hasRuns ? '1.2' : f + 'px';
+          spans.forEach((s, i) => { s.style.fontSize = (spanStart[i] * factor) + 'px'; });
+        },
+        () => {
+          if (hasRuns && factor !== 1) {
+            edit.runs = edit.runs.map(line =>
+              line.map(r => ({ text: r.text, size: Math.max(4, Math.round(r.size * factor)), bold: !!r.bold, italic: !!r.italic })));
+          }
+          commitFromDiv();
+        });
     });
 
-    // Delete
-    del.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    // Delete — keep on tap/click; stop it from starting a box drag.
+    del.addEventListener('pointerdown', (e) => { e.stopPropagation(); });
     del.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
       this.edits = this.edits.filter(x => x !== edit);

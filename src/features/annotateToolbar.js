@@ -17,7 +17,11 @@ export const AnnotateToolbarMethods = {
     // Colour: the SAME swatch popover as the text floating toolbar. One colour drives both shape
     // strokes and highlight fills; it persists (lives on annotationManager) across tool switches.
     const am = this.annotationManager;
-    this._setColorSwatch(am.strokeColor, 'ann-color-sw');
+    // Show the colour the DEFAULT tool will actually apply: highlight tools FILL with highlightColor
+    // (yellow), shapes STROKE with strokeColor (red). Otherwise the swatch shows the shape colour while
+    // a highlight comes out a different colour ("wrong colour first time").
+    const t0 = this._lastAnnotateTool || 'highlight';
+    this._setColorSwatch((t0 === 'highlight' || t0 === 'freeHighlight') ? am.highlightColor : am.strokeColor, 'ann-color-sw');
     this._buildColorPopover('ann-color-btn', 'ann-color-pop', (hex) => {
       am.strokeColor = hex; am.highlightColor = hex;
       this._setColorSwatch(hex, 'ann-color-sw');
@@ -70,7 +74,9 @@ export const AnnotateToolbarMethods = {
     const am = this.annotationManager;
     const wEl = document.getElementById('ann-width'); if (wEl) wEl.value = am.strokeWidth;
     const oEl = document.getElementById('ann-opacity'); if (oEl) oEl.value = Math.round(am.highlightOpacity * 100);
-    this._setColorSwatch(am.strokeColor, 'ann-color-sw');
+    // Reflect the colour THIS tool actually applies (highlight fill vs shape stroke).
+    const isHl = (tool === 'highlight' || tool === 'freeHighlight');
+    this._setColorSwatch(isHl ? am.highlightColor : am.strokeColor, 'ann-color-sw');
     // Activate the tool with the persisted settings.
     am.setTool(tool, {
       strokeColor: am.strokeColor,
