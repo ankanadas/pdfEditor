@@ -122,7 +122,8 @@ export const FontPickerMethods = {
       const recent = this._recentFonts().map(k => FONT_BY_KEY[k]).filter(Boolean);
       if (recent.length) html += `<div class="tt-font-group">Recently used</div>` + recent.map(optHTML).join('') + `<div class="tt-font-group">All fonts</div>`;
     }
-    const shown = FONT_CATALOG.filter(match);
+    // All fonts listed ALPHABETICALLY by display name (the "Recently used" group above keeps recency).
+    const shown = FONT_CATALOG.filter(match).slice().sort((a, b) => a.name.localeCompare(b.name));
     html += shown.map(optHTML).join('');
     list.innerHTML = html;
     if (empty) empty.hidden = shown.length > 0;

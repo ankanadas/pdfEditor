@@ -20,6 +20,12 @@ export const TextToolbarMethods = {
     on('tt-italic', 'click', () => this.applyTextStyle('italic', !this._ttStyle().italic));
     on('tt-underline', 'click', () => this.applyTextStyle('underline', !this._ttStyle().underline));
     on('tt-size', 'input', (e) => { const v = parseInt(e.target.value, 10); if (v) this.applyTextStyle('size', v); });
+    // +/- steppers (mobile has no native number spinner). Clamp to the same 4–200 range as the input.
+    const stepSize = (delta) => { const el = document.getElementById('tt-size'); if (!el) return; const v = Math.max(4, Math.min(200, (parseInt(el.value, 10) || 14) + delta)); el.value = String(v); this.applyTextStyle('size', v); };
+    on('tt-size-dec', 'mousedown', (e) => e.preventDefault());
+    on('tt-size-inc', 'mousedown', (e) => e.preventDefault());
+    on('tt-size-dec', 'click', () => stepSize(-1));
+    on('tt-size-inc', 'click', () => stepSize(1));
     this._initFontPicker();
     this._initColorPalette();
     on('tt-align-left', 'click', () => this.applyTextStyle('align', 'left'));
@@ -187,7 +193,10 @@ export const TextToolbarMethods = {
     // re-selects in the picker; fall back to the generic guess before the page has resolved.
     const famKey = this._displayFontKey(o.fontFamily, this._realFontName(o) || o.fontFamilyName || o.fontName);
     return { bold, italic, underline, size,
-             color: o.color, opacity: o.opacity, align: o.align,
+             // Reflect the line's REAL ink colour (sampled into textColor) when the user hasn't set an
+             // explicit toolbar colour yet — otherwise the swatch shows black on first open for a
+             // white/grey/coloured line until you change it.
+             color: o.color || o.textColor, opacity: o.opacity, align: o.align,
              link: o.link ? o.link.uri : '',
              family: famKey,
              // Existing text whose original font isn't in the dropdown (LaTeX/Computer-Modern or any
@@ -409,6 +418,12 @@ export const TextToolbarMethods = {
   deleteActiveText() {
     const t = this._ttTarget;
     if (!t) return;
+    if (t.kind === 'editor') {
+      // An OPEN Add-text editor: cancel it so the text box is removed (not committed).
+      if (this._activeInsertEditor && this._activeInsertEditor.cancel) this._activeInsertEditor.cancel();
+      else this.hideTextToolbar();
+      return;
+    }
     if (t.kind === 'line') {
       this.trackEdit(this.lineToEdit(t.line, ''));   // empty replacement -> redacted away on save
       if (t.el) { t.el.textContent = ''; t.el.dataset.originalText = ''; }
