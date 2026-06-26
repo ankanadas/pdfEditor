@@ -1,6 +1,7 @@
 // Floating text toolbar — show/hide/position, colour + link popovers, and applying style/colour/link/align to a box or per-line runs.
 // Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js (this = the app).
 import { hexToRgb, rgbCss, rgbToHex } from '../util/color.js';
+import { LINK_BLUE } from '../util/fontCatalog.js';
 
 export const TextToolbarMethods = {
   // ----------------------------------------------------------------------------------------------
@@ -233,7 +234,7 @@ export const TextToolbarMethods = {
    *  underline (the standard look) UNLESS the user already set a colour, which then supersedes. */
   _applyLink(t, value) {
     const uri = (value == null ? '' : String(value)).trim();
-    const BLUE = this.constructor.LINK_BLUE;
+    const BLUE = LINK_BLUE;
     if (t.kind === 'editor' && this._activeInsertEditor) {
       if (this._activeInsertEditor.hasSelection()) {             // partial: just the selected run(s)
         const had = this._activeInsertEditor.style();
@@ -294,7 +295,7 @@ export const TextToolbarMethods = {
   },
   /** Default a whole text object's link look to blue + underline, unless a colour is already set. */
   _defaultLinkStyle(edit, el) {
-    if (edit.color == null) { edit.color = this.constructor.LINK_BLUE; if (el) el.style.color = rgbCss(edit.color); }
+    if (edit.color == null) { edit.color = LINK_BLUE; if (el) el.style.color = rgbCss(edit.color); }
     edit.underline = true; if (el) el.style.textDecoration = 'underline';
   },
   /** Apply one control to whatever text is active. */
