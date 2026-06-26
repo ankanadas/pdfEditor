@@ -64,7 +64,7 @@ export const PagesPanelMethods = {
       thumb.appendChild(num);
 
       thumb.addEventListener('click', () => this.selectThumb(i));
-      this.wireThumbDnD(thumb);
+      this.platform.bindPageReorder(thumb);   // desktop: HTML5 DnD; mobile: MOBILE-TODO
       grid.appendChild(thumb);
 
       this.renderThumbCanvas(canvas, i);   // async paint; doesn't block the drawer opening

@@ -5,6 +5,7 @@ import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { AnnotationManager } from './annotationManager.js';
 import { SIGN_FONTS, FONT_CATALOG, FONT_BY_KEY, TOOLBAR_FONT_KEYS, LINK_BLUE } from './util/fontCatalog.js';
+import { buildPlatform } from './platform/detect.js';
 import { loadImage, imageRatio } from './util/image.js';
 import { hexToRgb, rgbCss, rgbToHex } from './util/color.js';
 import { readRegion, sampleLineColors, trimCanvas, roundRectPath } from './util/canvas.js';
@@ -46,6 +47,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 class PDFEditorApp {
   constructor() {
     this.controller = new EditorController();
+    // Platform adapter (desktop vs mobile) — resolved ONCE here and injected; shared code calls
+    // this.platform.* hooks and never branches on device type. See src/platform/.
+    this.platform = buildPlatform(this);
     this.pageViews = [];   // one {pageNum, page, viewport, canvas, ctx, wrapper} per page
     this.currentPage = 0;  // page currently in view (for the indicator / page nav)
     this.mode = null; // 'auto' (smart: edit-on-text / add-on-blank), 'edit', 'text', 'erase', 'stamp'
