@@ -145,10 +145,23 @@ export const TextToolbarMethods = {
     return 'https://' + s;
   },
   /** Show the toolbar for a target { kind:'editor'|'overlay'|'line', el, edit?, line? }. */
+  /** Mobile only: lock the page scale to 1 while a text editor is open so Safari can't auto-zoom on
+   *  focusing a small-font editable box (which used to fling the page + toolbar around). Pinch-zoom of
+   *  the PDF is restored the moment editing ends, so reading the document by pinching still works. */
+  _setViewportZoom(locked) {
+    if (!window.matchMedia || !window.matchMedia('(max-width: 767px)').matches) return;
+    const m = document.querySelector('meta[name=viewport]');
+    if (!m) return;
+    const want = locked
+      ? 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'
+      : 'width=device-width, initial-scale=1.0';
+    if (m.getAttribute('content') !== want) m.setAttribute('content', want);
+  },
   _showTextToolbar(target) {
     this._ttTarget = target;
     const tb = document.getElementById('textToolbar');
     if (!tb) return;
+    this._setViewportZoom(true);                 // freeze scale while editing (mobile) — no focus auto-zoom
     tb.hidden = false; tb.classList.add('show');
     const dup = document.getElementById('tt-dup');
     if (dup) dup.disabled = (target.kind === 'line');   // duplicate/move are added-text only
@@ -161,6 +174,7 @@ export const TextToolbarMethods = {
     const tb = document.getElementById('textToolbar');
     if (tb) { tb.classList.remove('show'); tb.hidden = true; }
     const lp = document.getElementById('tt-link-pop'); if (lp) lp.hidden = true;
+    this._setViewportZoom(false);                // editing done — restore pinch-zoom of the PDF (mobile)
   },
   /** Style of the active target, used to light up the toolbar buttons. */
   _ttStyle() {
