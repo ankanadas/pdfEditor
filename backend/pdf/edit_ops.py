@@ -115,7 +115,10 @@ def apply_edits(doc, data):
             has_ul = bool(edit.get('underline')) or any(
                 isinstance(r, dict) and r.get('underline')
                 for ln in (edit.get('runs') or []) for r in (ln or []))
-            if not has_ul:
+            # Cover the sub-baseline strip when drawing a fresh underline OR when the user REMOVED an
+            # underline (coverUnderline) — otherwise a previously-baked rule survives redaction (which
+            # keeps line art) and the underline can't be cleared.
+            if not has_ul and not edit.get('coverUnderline'):
                 continue
             ex = float(edit.get('x', 0)); er = float(edit.get('right', ex))
             eb = float(edit.get('baseline', 0)); ebot = float(edit.get('bottom', eb))

@@ -361,6 +361,7 @@ export const TextToolbarMethods = {
    *  immediately; trackEdit does not re-render, so the box keeps focus). */
   _applyLineStyle(t, kind, value) {
     const l = t.line, div = t.el;
+    const wasUnderlined = !!l.underline;   // capture BEFORE the toggle, to know if an old rule needs covering
     const rich = !!(l.styleRuns && l.styleRuns.length) &&
       div.querySelector('span[data-bold],span[data-italic],span[data-underline]');
     if (rich && (kind === 'bold' || kind === 'italic' || kind === 'underline')) {
@@ -385,6 +386,9 @@ export const TextToolbarMethods = {
     else if (kind === 'align') { l.align = value; div.style.textAlign = value; }
     else if (kind === 'family') { l.fontFamily = value; div.style.fontFamily = this._familyCss(value); }
     else if (kind === 'link') { this._setLink(l, value); div.classList.toggle('tt-has-link', !!l.link); }
+    // Removing an underline that was there (incl. one WE baked on a prior save): flag the edit so the
+    // backend covers the old rule. Re-adding clears the flag so a fresh underline is drawn instead.
+    if (kind === 'underline') l._coverUnderline = wasUnderlined && !value;
     const runs = this._readLineRuns(div);
     if (runs) l.styleRuns = runs;
     this.trackEdit(this.lineToEdit(l, this.cleanEditableText(div.textContent), runs));
