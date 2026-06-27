@@ -12,7 +12,8 @@ import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { mergePdfBytes } from './mergeCore.js';
 import {
-  deviceCapBytes, deviceCapMb, withinDeviceCap, isEditableOutput, DEVICE_CAP_MESSAGE,
+  deviceCapBytes, deviceCapMb, withinDeviceCap, isEditableOutput,
+  EDIT_LIMIT_BYTES, EDIT_LIMIT_PAGES, DEVICE_CAP_MESSAGE,
 } from './core/limits.js';
 
 // A single input file is only rejected when it can't even be held on this device. The merge
@@ -714,7 +715,13 @@ function updateMergeWarn() {
     els.warn.textContent = DEVICE_CAP_MESSAGE;
     els.warn.className = 'merge-warn red';
   } else if (!isEditableOutput(bytes, pages)) {
-    els.warn.textContent = 'These files are larger than 30 MB or over 500 pages, so editing is disabled. Click “Merge & open” below to combine them and view the result.';
+    const overSize = bytes > EDIT_LIMIT_BYTES;
+    const overPages = pages > EDIT_LIMIT_PAGES;
+    let reason;
+    if (overSize && overPages) reason = 'more than 30 MB and more than 500 pages';
+    else if (overSize) reason = 'more than 30 MB';
+    else reason = 'more than 500 pages';
+    els.warn.textContent = `The combined file will be ${reason}, so editing is disabled. Click “Merge & open” below to combine these files and view the result.`;
     els.warn.className = 'merge-warn red';
   } else {
     els.warn.textContent = 'Click “Merge & open” below to combine these files and open the result in the editor.';
