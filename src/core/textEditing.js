@@ -71,8 +71,14 @@ export const TextEditingMethods = {
         if (o.bottom <= line.top) gapUp = Math.min(gapUp, line.top - o.bottom);
         if (o.top >= line.bottom) gapDn = Math.min(gapDn, o.top - line.bottom);
       }
-      const mUp = Math.min(lh0 * 0.45, Math.max(0, gapUp * 0.8));
-      const mDn = Math.min(lh0 * 0.45, Math.max(0, gapDn * 0.8));
+      // The extra cover margin exists ONLY to hide cursive/script glyph ink that overflows the nominal
+      // bbox (tall ascenders / long descenders). On normal text it instead swallows a horizontal rule
+      // sitting in the gap above/below the line (e.g. a resume section divider), leaving the rule broken
+      // in the editor (it reappears on save). So apply it only to script faces; normal text gets a tight cover.
+      const rfn = `${this._realFontName(line) || ''} ${line.fontFamily || ''} ${line.fontName || ''}`;
+      const cursive = /script|brush|pacific|snell|chancery|cursive|\bhand|comic|segoe.?print/i.test(rfn);
+      const mUp = cursive ? Math.min(lh0 * 0.45, Math.max(0, gapUp * 0.8)) : 0;
+      const mDn = cursive ? Math.min(lh0 * 0.45, Math.max(0, gapDn * 0.8)) : 0;
       const lx = Math.max(0, Math.floor(line.left) - 2);
       const ly = Math.max(0, Math.floor(line.top - mUp) - 2);
       const lw = Math.min(cw - lx, Math.ceil(line.right - line.left) + 6);
