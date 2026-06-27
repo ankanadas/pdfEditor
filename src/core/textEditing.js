@@ -13,6 +13,10 @@ export const TextEditingMethods = {
    * user actually changes are tracked, so saving leaves all other text untouched.
    */
   createEditableTextBoxes(pv) {
+    // Skip ROTATED pages: the per-line edit boxes are laid out in the page's unrotated text space, so
+    // on a rotated render they land garbled/overlapping. Existing-text editing is therefore disabled
+    // on rotated pages — Add text, Highlight, Sign, Stamp and Erase still work (they map clicks live).
+    if (((pv.page && pv.page.rotate) || 0) % 360 !== 0) return;
     const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === pv.pageNum);
     if (pageTextItems.length === 0) return;
 
