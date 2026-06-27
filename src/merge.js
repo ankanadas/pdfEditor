@@ -11,6 +11,7 @@
 import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { mergePdfBytes } from './mergeCore.js';
+import { downloadBytes } from './util/download.js';
 import {
   deviceCapBytes, deviceCapMb, withinDeviceCap, isEditableOutput,
   largeFileReasonSentence, DEVICE_CAP_MESSAGE,
@@ -62,8 +63,8 @@ function setup() {
     progress: document.getElementById('mergeProgress'),
     progressBar: document.getElementById('mergeProgressBar'),
     go: document.getElementById('mergeGo'),
+    download: document.getElementById('mergeDownload'),
     warn: document.getElementById('mergeWarn'),
-    note: document.getElementById('mergeNote'),
     cancelBtn: document.getElementById('mergeCancel'),
     confirm: document.getElementById('mergeConfirm'),
     confirmTitle: document.getElementById('mergeConfirmTitle'),
@@ -112,6 +113,7 @@ function setup() {
 
   els.clear.addEventListener('click', clearAll);
   els.go.addEventListener('click', doMerge);
+  if (els.download) els.download.addEventListener('click', doMergeDownload);
 
   render();
 }
@@ -461,11 +463,11 @@ function mergeMode() {
   return withinDeviceCap(bytes) ? 'open' : 'overcap';
 }
 
-async function doMerge() {
+// Shared merge runner. Combines the valid files, then hands the bytes to `onResult` (open vs download).
+async function runMerge(onResult) {
   const valid = validItems();
   if (merging || valid.length < 1) return;
-  const mode = mergeMode();
-  if (mode === 'overcap') { status(DEVICE_CAP_MESSAGE, 'err'); return; }
+  if (mergeMode() === 'overcap') { status(DEVICE_CAP_MESSAGE, 'err'); return; }
 
   merging = true;
   updateButtons();
@@ -480,24 +482,13 @@ async function doMerge() {
       onProgress: (done, total) => showProgress(Math.round((done / total) * 88) + 2),
     });
     showProgress(100);
-    // OOM-safety: a result that somehow ballooned past the device cap downloads/aborts rather
-    // than try to stream a too-big file into the editor.
     if (!withinDeviceCap(bytes.length)) {
       track('merge_failed', { error: 'over_device_cap', bytes: bytes.length });
       status(DEVICE_CAP_MESSAGE, 'err');
       return;
     }
     track('merge_completed', { fileCount: valid.length, pageCount: totalPages, bytes: bytes.length });
-
-    // Always hand the combined result to the editor (a large result opens there view-only). No
-    // status message — the editor opening the result is feedback enough.
-    loadIntoEditor(bytes);
-    // The merged document becomes the open document, so reset the list, reopening the
-    // panel then shows only it (auto-included as "Current document"), not the old sources.
-    items = [];
-    currentSig = null;
-    dismissedCurrentSig = null;
-    setTimeout(closeDrawer, 700);
+    onResult(bytes, valid.length);
   } catch (err) {
     const msg = String((err && err.message) || err);
     const oom = /allocation|out of memory|invalid array length|maximum call|range/i.test(msg);
@@ -509,6 +500,25 @@ async function doMerge() {
     updateButtons();
     setTimeout(() => { if (!merging) hideProgress(); }, 900);
   }
+}
+
+// "Merge & open": combine and open the result in the editor (a large result opens there view-only).
+function doMerge() {
+  return runMerge((bytes) => {
+    loadIntoEditor(bytes);
+    items = [];
+    currentSig = null;
+    dismissedCurrentSig = null;
+    setTimeout(closeDrawer, 700);
+  });
+}
+
+// "Download": combine and download the result directly; never opens the editor.
+function doMergeDownload() {
+  return runMerge((bytes, n) => {
+    downloadBytes(bytes, 'merged.pdf');
+    status(`Downloaded the merged PDF (${n} file${n === 1 ? '' : 's'}).`, 'ok');
+  });
 }
 
 // Hand the merged bytes to the editor through the existing file pipeline (no app.js
@@ -698,6 +708,7 @@ function updateButtons() {
   const ready = validItems().length >= 1;   // enabled for one file too; disabled only when empty
   const over = ready && mergeMode() === 'overcap';
   els.go.disabled = merging || !ready || over;
+  if (els.download) els.download.disabled = merging || !ready || over;
   updateMergeWarn();
 
   if (merging) {
@@ -705,15 +716,20 @@ function updateButtons() {
     els.go.title = 'Merging…';
     return;
   }
-  // Always "Merge & open": the result always goes to the editor (a large one opens there view-only).
+  // Two actions, side by side: Merge & open (to the editor; a large result opens view-only) and
+  // Download (download the combined PDF, never opens the editor).
   els.go.innerHTML = `${MERGE_ICON} Merge &amp; open`;
   els.go.title = over ? DEVICE_CAP_MESSAGE
     : (ready ? 'Combine the PDFs in order and open the result' : 'Add a PDF to get started');
+  if (els.download) {
+    els.download.innerHTML = `${DOWNLOAD_ICON} Download`;
+    els.download.title = over ? DEVICE_CAP_MESSAGE
+      : (ready ? 'Combine the PDFs and download the result' : 'Add a PDF to get started');
+  }
 }
 
-// A clear, prominent banner that tells the user what "Merge & open" will do with the current
-// selection: PURPLE when the result is editable, RED when it'll open view-only (over the 30 MB /
-// 500-page edit limit) or can't be processed at all (over the device cap).
+// Prominent banner shown ONLY when the merged result would be over the limit (red) or over the device
+// cap (red). Editable results show no banner (the two buttons speak for themselves). No decorative quotes.
 function updateMergeWarn() {
   if (!els.warn) return;
   if (!items.length || !validItems().length) { els.warn.hidden = true; return; }
@@ -721,14 +737,14 @@ function updateMergeWarn() {
   if (!withinDeviceCap(bytes)) {
     els.warn.textContent = DEVICE_CAP_MESSAGE;
     els.warn.className = 'merge-warn red';
+    els.warn.hidden = false;
   } else if (!isEditableOutput(bytes, pages)) {
-    els.warn.textContent = `${largeFileReasonSentence(bytes, pages)} Click “Merge & open” below to merge these files.`;
+    els.warn.textContent = `${largeFileReasonSentence(bytes, pages)} Click Download to download the merged files.`;
     els.warn.className = 'merge-warn red';
+    els.warn.hidden = false;
   } else {
-    els.warn.textContent = 'Click “Merge & open” below to combine these files and open the result in the editor.';
-    els.warn.className = 'merge-warn purple';
+    els.warn.hidden = true;
   }
-  els.warn.hidden = false;
 }
 
 // --- Small helpers ----------------------------------------------------------------
