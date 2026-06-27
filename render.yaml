@@ -10,17 +10,21 @@ services:
     # plan to match it on every Blueprint sync, so keep it at the plan you are paying for.
     plan: standard
     buildCommand: pip install -r requirements.txt
-    # 1 worker: each worker holds a whole base64 PDF + PyMuPDF's multiple-of-that working set in
-    # RAM, so a couple of concurrent large uploads per worker are memory-heavy. Standard (2 GB)
-    # has headroom over the old free tier, but we keep a single worker because it also makes the
-    # in-memory rate limiter exact (no per-worker x N). Raise --workers if you need more concurrency.
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1
+    # Workers: default 2, tunable via the WEB_CONCURRENCY env var (e.g. set it to 3 on the dashboard,
+    # no code change). 2 workers stop one slow /edit-pdf from blocking /health + other requests; on
+    # Standard (2 GB) there is ample headroom (each worker holds a whole base64 PDF + PyMuPDF's
+    # multiple-of-that working set, so peak is ~150-200 MB baseline + ~120-160 MB per in-flight 30 MB
+    # PDF per worker). CONSEQUENCE: the in-memory rate limiter (memory://) counts PER worker, so the
+    # per-IP limit is now APPROXIMATE (~Nx the configured value). Set RATELIMIT_STORAGE_URI (Redis)
+    # below to make it exact across workers (see app.py).
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers ${WEB_CONCURRENCY:-2}
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.7"
-      # Rate-limit counters live in-process and are exact with the single worker above.
-      # If you ever raise --workers or run multiple instances, set RATELIMIT_STORAGE_URI to
-      # a Redis URL so the limit stays exact and survives restarts (see app.py).
+      # Rate-limit counters live in-process. With the 2 workers above they count PER worker, so the
+      # per-IP limit is approximate (~Nx). To make it exact (and survive restarts), uncomment and set
+      # RATELIMIT_STORAGE_URI to a shared Redis URL (see app.py). Leave it unset to accept the soft ~Nx
+      # limit (fine for low traffic / low abuse risk).
       # - key: RATELIMIT_STORAGE_URI
       #   value: "redis://<host>:6379"
