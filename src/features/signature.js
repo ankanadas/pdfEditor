@@ -288,6 +288,12 @@ export const SignatureMethods = {
       const pv = this.pageViews.find(v => v.wrapper === wrap || v.wrapper.contains(wrap));
       if (!pv) return;
       e.preventDefault(); e.stopPropagation();             // pre-empt the canvas add-text click
+      // Rotated pages map clicks to the unrotated space, so a signature would save in the wrong place.
+      if (((pv.page && pv.page.rotate) || 0) % 360 !== 0) {
+        this.showStatus('Signatures can’t be placed on rotated pages. Un-rotate the page first.', 'info');
+        this._cancelSignaturePlacement();
+        return;
+      }
       const rect = pv.canvas.getBoundingClientRect();
       const toIntrinsic = pv.canvas.width / rect.width;    // same screen->PDF mapping as add-text
       const pageWp = pv.canvas.width / this.scale, pageHp = pv.canvas.height / this.scale;

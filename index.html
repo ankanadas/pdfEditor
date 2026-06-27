@@ -217,6 +217,7 @@
       padding: 8px 13px; border-radius: 9px; font-size: 13.5px; font-weight: 600; transition: all .15s ease;
     }
     .btn svg { width: 16px; height: 16px; }
+    .btn[hidden] { display: none; }   /* the class sets display:inline-flex, so [hidden] needs this */
     .btn:hover:not(:disabled) { background: #f6f7fb; }
     .btn:disabled { opacity: .45; cursor: not-allowed; }
     .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
@@ -707,6 +708,23 @@
     .btn.confirm-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
     .btn.confirm-danger:hover { background: #c81e1e; border-color: #c81e1e; }
 
+    /* ---------- Large-file (too big to edit) dialog ---------- */
+    .large-file-box { position: relative; }
+    .lf-close {
+      position: absolute; top: 12px; right: 12px; width: 34px; height: 34px; border-radius: 50%;
+      border: none; background: #f1f2f6; color: #4b5563; display: grid; place-items: center; cursor: pointer;
+    }
+    .lf-close:hover { background: #e6e8ef; color: var(--ink); }
+    .lf-close svg { width: 18px; height: 18px; }
+    .lf-actions { display: flex; gap: 12px; margin-top: 24px; }
+    .lf-action {
+      flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer;
+      padding: 16px 12px; border-radius: 14px; border: 1.5px solid var(--border, #e2e5ee);
+      background: #fafbff; font-weight: 700; font-size: 14px; color: var(--ink);
+    }
+    .lf-action:hover { border-color: var(--brand, #6c4cf0); background: #f3f1ff; }
+    .lf-action img { width: 40px; height: 40px; object-fit: contain; }
+
     /* ---------- Pages manager (reorder / delete / insert) ---------- */
     /* ===================== Reorder modal (matches the Merge modal) ===================== */
     .pages-backdrop {
@@ -758,6 +776,16 @@
     }
     .page-thumb-del svg { width: 13px; height: 13px; }
     .page-thumb:hover .page-thumb-del { display: grid; }
+    .page-thumb .thumb-canvas { transition: transform .15s ease; }   /* instant rotate preview */
+    /* Always-visible rotate bar at the bottom of every page tile (purple, labelled L/R). */
+    .thumb-rotbar { display: flex; gap: 6px; width: 100%; margin-top: 2px; }
+    .thumb-rot {
+      flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+      padding: 5px 4px; border: none; border-radius: 7px; cursor: pointer;
+      background: var(--brand, #6c4cf0); color: #fff; font-size: 11px; font-weight: 700;
+    }
+    .thumb-rot:hover { background: #5a3fd6; }
+    .thumb-rot svg { width: 13px; height: 13px; }
     .pages-foot {
       flex: 0 0 auto; border-top: 1px solid var(--line); padding: 12px 20px;
       display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -857,6 +885,7 @@
       border-radius: 9px; padding: 9px 13px; display: flex; align-items: center; gap: 8px;
     }
     .merge-note svg { width: 16px; height: 16px; flex: 0 0 auto; }
+    .merge-note[hidden] { display: none; }   /* the class sets display:flex, so [hidden] needs this */
 
     .merge-status { margin: 0; font-size: 13px; }
     .merge-status:empty { display: none; }
@@ -967,6 +996,12 @@
     .merge-clear:hover { background: #fdeced; }
     .merge-progress { height: 7px; border-radius: 999px; background: #eceef5; overflow: hidden; }
     .merge-progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--brand), #19b36b); transition: width .2s ease; }
+    .merge-warn { margin: 4px 0 0; padding: 12px 14px; border-radius: 11px; font-size: 14.5px;
+                  line-height: 1.45; font-weight: 700; text-align: center; border: 1.5px solid; }
+    /* Editable result -> purple text on light purple. Over the limit / cap -> red on light red. */
+    .merge-warn.purple { color: #5a3fd6; background: #f3f1ff; border-color: #cdc2ff; }
+    .merge-warn.red    { color: #c0291f; background: #fdecec; border-color: #f3b6b1; }
+    .merge-warn[hidden] { display: none; }
     .merge-actions { display: flex; gap: 8px; align-items: center; }
     .merge-actions .spacer { flex: 1; }
     .merge-actions .btn { justify-content: center; }
@@ -1308,9 +1343,9 @@
 
     <!-- Right tool rail: document-level tools. Reorder (top); Merge. (Moved inside .tool-dock.) -->
     <aside class="rightbar" aria-label="Document tools">
-      <button class="tool" id="pagesPanelBtn" disabled title="Reorder pages: drag to reorder, delete, or insert blank pages">
+      <button class="tool" id="pagesPanelBtn" disabled title="Rotate/Reorder: rotate, drag to reorder, delete, or insert blank pages">
         <img class="tool-ico" src="/assets/fun-ui/reorder.png" alt="" aria-hidden="true">
-        Reorder
+        Rotate/Reorder
       </button>
       <button class="tool merge-tool" id="mergeBtn" title="Merge PDF: combine multiple PDFs into one document">
         <img class="tool-ico" src="/assets/fun-ui/merge.png" alt="" aria-hidden="true">
@@ -1473,7 +1508,8 @@
             <div class="big">Drag &amp; drop your PDF here</div>
             <div class="or">or</div>
             <span class="btn primary" style="pointer-events:none">Upload PDF</span>
-            <div class="or" style="margin-top:14px">PDF files up to 30 MB</div>
+            <div class="or" style="margin-top:14px">Merge, Reorder &amp; Rotate files of any size</div>
+            <div class="or" style="margin-top:4px">To Edit, upload files up to 30 MB</div>
           </label>
         </div>
 
@@ -1614,6 +1650,25 @@
     </div>
   </div>
 
+  <!-- Large-file dialog: shown when a file is too large to EDIT (>30MB / >500 pages) but opens view-only. -->
+  <div id="largeFileModal" class="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="largeFileTitle">
+    <div class="confirm-box large-file-box">
+      <button class="lf-close" id="largeFileClose" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+      <div class="confirm-title" id="largeFileTitle">This file is too large to edit</div>
+      <div class="confirm-msg" id="largeFileMsg">This file is too large to edit. You can still rotate, reorder, or merge it.</div>
+      <div class="lf-actions">
+        <button class="lf-action" id="largeFileReorder" type="button">
+          <img src="/assets/fun-ui/reorder.png" alt="" aria-hidden="true"> Rotate/Reorder
+        </button>
+        <button class="lf-action" id="largeFileMerge" type="button">
+          <img src="/assets/fun-ui/merge.png" alt="" aria-hidden="true"> Merge
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Signature dialog: Draw / Type / Image -->
   <div id="signPad" class="signpad-backdrop">
     <div class="signpad">
@@ -1678,8 +1733,8 @@
     <aside class="pages-drawer" id="pagesDrawer" role="dialog" aria-label="Manage pages">
       <div class="pages-head">
         <span class="pages-heading">
-          <span class="pages-title">Reorder pages</span>
-          <span class="pages-subtitle">Drag to reorder · hover a page to delete</span>
+          <span class="pages-title">Rotate/Reorder</span>
+          <span class="pages-subtitle">Drag to reorder · rotate, delete, or insert pages</span>
         </span>
         <span class="count" id="pagesCount"></span>
         <span class="spacer"></span>
@@ -1687,6 +1742,8 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
         </button>
       </div>
+      <!-- Large-file banner at the TOP (same style/syntax as the Merge box). -->
+      <div class="merge-warn" id="pagesLargeWarn" role="status" style="margin:12px 20px 0" hidden></div>
       <div class="pages-grid" id="pagesGrid"></div>
       <div class="pages-foot">
         <div class="row">
@@ -1697,6 +1754,10 @@
         <button class="btn primary" id="insertBlankBtn" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
           Insert blank page
+        </button>
+        <button class="btn primary" id="pagesDownload" type="button" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          Download
         </button>
       </div>
     </aside>
@@ -1718,10 +1779,9 @@
 
       <div class="merge-body">
         <input id="mergeFileInput" type="file" accept="application/pdf,.pdf" multiple hidden />
-        <div class="merge-note">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
-          <span>These files aren't loaded into the editor yet. Click <b>Merge &amp; open</b> first to combine and view them.</span>
-        </div>
+
+        <!-- Always-on banner at the TOP of the merge box: purple (editable) / red (over the limit). -->
+        <div class="merge-warn" id="mergeWarn" role="status" hidden></div>
 
         <p class="merge-status" id="mergeStatus" role="status" aria-live="polite"></p>
 
@@ -1740,8 +1800,12 @@
           <div class="merge-progress-bar" id="mergeProgressBar"></div>
         </div>
         <div class="merge-actions">
-          <button class="btn" id="mergeCancel" type="button">Cancel</button>
+          <button class="btn confirm-danger" id="mergeCancel" type="button">Cancel</button>
           <span class="spacer"></span>
+          <button class="btn primary" id="mergeDownload" type="button" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+            Download
+          </button>
           <button class="btn primary" id="mergeGo" type="button" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
             Merge &amp; open
@@ -1814,7 +1878,7 @@
         { sel: '#eraseModeBtn',      title: 'Erase',         desc: 'Drag a box over old content, like a stale signature, to white it out.' },
         { sel: '#stampModeBtn',      title: 'Stamp',         desc: 'Drop a mark such as Approved, Rejected, Final, Draft or Copy.' },
         { sel: '#clearSignatureBtn', title: 'Discard',       desc: 'Remove all your unsaved changes at once. You can always Undo afterwards.' },
-        { sel: '#pagesPanelBtn',     title: 'Reorder pages', desc: 'Open the page manager to drag, delete or insert blank pages.' },
+        { sel: '#pagesPanelBtn',     title: 'Rotate/Reorder', desc: 'Open the page manager to rotate, drag, delete or insert blank pages.' },
         { sel: '#mergeBtn',          title: 'Merge PDFs',    desc: 'Combine several PDFs into a single document, in any order you like.' }
       ];
 

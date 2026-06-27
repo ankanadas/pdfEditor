@@ -93,6 +93,9 @@ export const ModeManagerMethods = {
     } else if (this.mode === 'annotate') {
       indicator.textContent = 'Highlight';
       indicator.classList.add('active');
+    } else if (this.mode === 'view') {
+      indicator.textContent = 'View only (large file)';
+      indicator.classList.remove('active');
     } else {
       indicator.textContent = 'Pick a tool';
       indicator.classList.remove('active');
@@ -105,6 +108,12 @@ export const ModeManagerMethods = {
     }
     if (!this.mode) {
       this.showStatus('Pick a tool on the left first — Edit, Add, or Sign — then click the page.', 'error');
+      return;
+    }
+    // Editing is disabled on ROTATED pages: a click maps to the unrotated coordinate space, so an
+    // added edit would save in the wrong place. Block it cleanly (the page still views fine).
+    if (((pv.page && pv.page.rotate) || 0) % 360 !== 0) {
+      this.showStatus('Editing is disabled on rotated pages. Un-rotate the page to edit it.', 'info');
       return;
     }
     // Edit mode owns existing text via the per-line boxes; a click that reaches the bare
