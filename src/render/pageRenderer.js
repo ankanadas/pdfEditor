@@ -15,7 +15,12 @@ export const PageRendererMethods = {
 
     for (let i = 0; i < this.pdfJsDoc.numPages; i++) {
       const page = await this.pdfJsDoc.getPage(i + 1);
-      const viewport = page.getViewport({ scale: this.scale });
+      // Show any not-yet-baked rotation (large/view-only docs) by rotating the pdf.js viewport — fast,
+      // no pdf-lib rebuild. The bake into the file happens only on Download. (Empty for normal docs.)
+      const pend = (this._pendingRot && this._pendingRot[i]) || 0;
+      const viewport = pend
+        ? page.getViewport({ scale: this.scale, rotation: (page.rotate + pend) % 360 })
+        : page.getViewport({ scale: this.scale });
 
       const wrapper = document.createElement('div');
       wrapper.className = 'page-wrap';
