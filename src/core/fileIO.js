@@ -3,6 +3,7 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import { confirmDialog } from '../util/dialog.js';
 import { PDFBackendService } from '../services/pdfBackendService.js';
+import { MupdfService } from '../services/mupdfService.js';
 import {
   EDIT_LIMIT_BYTES, EDIT_LIMIT_PAGES, deviceCapBytes, DEVICE_CAP_MESSAGE,
 } from './limits.js';
@@ -172,17 +173,28 @@ export const FileIOMethods = {
       let workingData = arrayBuffer.slice(0);
       if (enteredPassword) {
         this.showStatus('Unlocking PDF…', 'info');
+        // Hybrid-first: the live backend stays primary. If it's unreachable or can't unlock, fall back
+        // to in-browser mupdf-wasm (same MuPDF engine, no server) so a protected PDF still opens unlocked
+        // with no network at all. Only if BOTH fail do we keep the locked doc and let the save flatten.
+        let res = null;
         try {
-          const res = await PDFBackendService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
-          if (res.bytes) {
-            const dec = res.bytes;
-            workingData = dec.buffer.slice(dec.byteOffset, dec.byteOffset + dec.byteLength);
-            this.pdfJsDoc = await pdfjsLib.getDocument({ data: dec.slice(0) }).promise;
-          } else {
-            console.warn('Backend could not unlock the PDF; it will save as a flattened copy.');
-          }
+          res = await PDFBackendService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
         } catch (e) {
-          console.warn('Backend decrypt unavailable; protected PDF will save as a flattened copy:', e);
+          console.warn('Backend decrypt unavailable; trying in-browser WASM:', e);
+        }
+        if ((!res || !res.bytes) && MupdfService.isSupported()) {
+          try {
+            res = await MupdfService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
+          } catch (e) {
+            console.warn('WASM decrypt failed; protected PDF will save as a flattened copy:', e);
+          }
+        }
+        if (res && res.bytes) {
+          const dec = res.bytes;
+          workingData = dec.buffer.slice(dec.byteOffset, dec.byteOffset + dec.byteLength);
+          this.pdfJsDoc = await pdfjsLib.getDocument({ data: dec.slice(0) }).promise;
+        } else {
+          console.warn('Could not unlock the PDF; it will save as a flattened copy.');
         }
       }
       this.originalFileData = workingData; // Clone the (possibly decrypted) ArrayBuffer
