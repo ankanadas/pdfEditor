@@ -64,14 +64,24 @@ export const FileIOMethods = {
     const modal = document.getElementById('largeFileModal');
     if (!modal) return;
     const close = () => modal.classList.remove('open');
+    // Cancel / X / backdrop => the user chose to VIEW: dismiss and render the view-only editor now.
+    const cancel = () => { close(); this._ensureLargeViewRendered(); };
     const reorderBtn = document.getElementById('largeFileReorder');
     const mergeBtn = document.getElementById('largeFileMerge');
     const closeBtn = document.getElementById('largeFileClose');
+    // Picking a tool just opens that tool — the editor is NOT rendered (the tool has what it needs).
     if (reorderBtn) reorderBtn.onclick = () => { close(); this.openPagesPanel(); };
     if (mergeBtn) mergeBtn.onclick = () => { close(); document.getElementById('mergeBtn')?.click(); };
-    if (closeBtn) closeBtn.onclick = close;
-    modal.onclick = (e) => { if (e.target === modal) close(); };       // click the backdrop to dismiss
+    if (closeBtn) closeBtn.onclick = cancel;
+    modal.onclick = (e) => { if (e.target === modal) cancel(); };
     modal.classList.add('open');
+  },
+  /** Render the large file's view-only pages on demand (once). Called on Cancel or when leaving a tool. */
+  async _ensureLargeViewRendered() {
+    if (!this.largeFileMode || this._largeViewRendered || !this.pdfJsDoc) return;
+    this._largeViewRendered = true;
+    await this.buildPages();
+    document.getElementById('stage')?.scrollTo({ top: 0 });
   },
   async handleFileSelect(event) {
     const file = event.target.files[0];
@@ -178,18 +188,19 @@ export const FileIOMethods = {
       this.largeFileMode = (file.size > EDIT_LIMIT_BYTES) || (pageCount > EDIT_LIMIT_PAGES);
 
       if (this.largeFileMode) {
-        // VIEW-ONLY: render page bitmaps (client-side), no text extraction / editable overlays.
-        // The pages tool and Merge read this.originalFileData directly, so no pdf-lib editor load.
+        // Large file: do NOT render the editor first. Show the choice dialog immediately; only render
+        // the (possibly huge) view-only page bitmaps if the user actually chooses to view (Cancel) or
+        // returns from a tool. Picking Rotate/Reorder or Merge goes straight to that tool — no render.
         this.controller.isLoaded = true;
         this.currentPage = 0;
+        this._largeViewRendered = false;
+        const container = document.getElementById('canvasContainer');
+        if (container) container.innerHTML = '';      // blank editor behind the modal (no stale doc)
+        this.pageViews = [];
         this.setMode('view');
         this.enableUiAfterLoad(true);
         this.updateModeIndicator();
-        // Show the dialog IMMEDIATELY — the decision is known from the page count, so don't make the
-        // user wait for buildPages() to render every (possibly huge) page first. Render behind it.
         this._openLargeFileDialog();
-        await this.buildPages();
-        document.getElementById('stage')?.scrollTo({ top: 0 });
         return;
       }
 
