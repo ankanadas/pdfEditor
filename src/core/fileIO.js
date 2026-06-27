@@ -63,6 +63,16 @@ export const FileIOMethods = {
   _openLargeFileDialog() {
     const modal = document.getElementById('largeFileModal');
     if (!modal) return;
+    // Name the LIMIT the file crossed (so the user learns the cap), not the file's own numbers.
+    const overSize = this.originalFile && this.originalFile.size > EDIT_LIMIT_BYTES;
+    const overPages = this.pdfJsDoc && this.pdfJsDoc.numPages > EDIT_LIMIT_PAGES;
+    let reason;
+    if (overSize && overPages) reason = 'is greater than 30 MB and has more than 500 pages';
+    else if (overSize) reason = 'is greater than 30 MB';
+    else reason = 'has more than 500 pages';
+    const msgEl = document.getElementById('largeFileMsg');
+    if (msgEl) msgEl.textContent =
+      `This file ${reason}, which is too large to edit. You can still rotate, reorder, or merge it.`;
     const close = () => modal.classList.remove('open');
     // Cancel / X / backdrop => the user chose to VIEW: dismiss and render the view-only editor now.
     const cancel = () => { close(); this._ensureLargeViewRendered(); };

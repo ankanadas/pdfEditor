@@ -5,7 +5,9 @@ module.exports = {
   entry: './src/app.js',
   output: {
     path: path.resolve(__dirname, 'dist'),
-    filename: 'bundle.js',
+    // Content hash in the filename so every build gets a fresh URL — browsers (and Netlify) can no
+    // longer serve a stale cached bundle. HtmlWebpackPlugin injects the hashed name into index.html.
+    filename: 'bundle.[contenthash].js',
     clean: true,
   },
   module: {
