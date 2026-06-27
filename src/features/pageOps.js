@@ -1,9 +1,11 @@
 // Page operations — insert blank page, commit/apply a new page order, flatten to PDF bytes, busy overlay.
 // Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js (this = the app).
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument, rgb, degrees } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { loadImage } from '../util/image.js';
 import { confirmDialog } from '../util/dialog.js';
+import { downloadBytes } from '../util/download.js';
+import { overEditLimit, withinDeviceCap, DEVICE_CAP_MESSAGE, LARGE_FILE_WARNING } from '../core/limits.js';
 
 export const PageOpsMethods = {
   /** Insert one blank page at the position chosen in the dropdown (end, or after page N). */
@@ -51,8 +53,22 @@ export const PageOpsMethods = {
     this._showBusy(busyMsg || 'Updating pages…');
     try {
       const bytes = await this.applyPageOrder(order);
+      const outPages = order.length;   // exact output page count (one descriptor per output page)
 
-      // Adopt the rebuilt document as the new baseline and reload everything from it.
+      // Over the device cap: can't safely hold the result — abort and keep the current document.
+      if (!withinDeviceCap(bytes.length)) {
+        this.showStatus(DEVICE_CAP_MESSAGE, 'error');
+        return;
+      }
+
+      // Gate on the OUTPUT: once a document is over the 30 MB / 500-page edit limit it is
+      // download-only (editing is unsupported). largeFileMode is sticky for the session — a doc
+      // opened large stays download-only here even if a delete drops it back under the limit
+      // (re-open the downloaded file to edit it).
+      const downloadOnly = this.largeFileMode || overEditLimit(bytes.length, outPages);
+
+      // Adopt the rebuilt document as the new in-memory baseline either way (so further page ops
+      // and the Download button compound correctly, and the thumbnails reflect the change).
       this.originalFileData = bytes;
       const loadingTask = pdfjsLib.getDocument({ data: bytes.slice(0) });
       this.pdfJsDoc = await loadingTask.promise;
@@ -60,18 +76,37 @@ export const PageOpsMethods = {
       this.resetHistory();
       this.selectedThumb = null;
 
-      await this.extractTextFromPDFjs();
-      await this.buildPages();
-      this.updatePageInfo();
-      this.renderPagesPanel();
-      this.showStatus(successMsg, 'success');
+      if (downloadOnly) {
+        // VIEW-ONLY / large: never route back through the editable pipeline or the backend. Re-render
+        // the page bitmaps + thumbnails so the change is visible, and offer a single Download.
+        this.largeFileMode = true;
+        this.setMode('view');
+        await this.buildPages();
+        this.enableUiAfterLoad(true);
+        this.updatePageInfo();
+        this.renderPagesPanel();
+        this.showStatus(`${successMsg} Editing is disabled for large files — use Download to save.`, 'info');
+      } else {
+        await this.extractTextFromPDFjs();
+        await this.buildPages();
+        this.updatePageInfo();
+        this.renderPagesPanel();
+        this.showStatus(successMsg, 'success');
+      }
     } catch (e) {
       console.error('Page operation failed:', e);
-      this.showStatus(`Couldn't update pages: ${e.message}`, 'error');
+      const oom = /allocation|out of memory|invalid array length|range/i.test(String(e && e.message));
+      this.showStatus(oom ? DEVICE_CAP_MESSAGE : `Couldn't update pages: ${e.message}`, 'error');
     } finally {
       this._pageOpBusy = false;
       this._hideBusy();
     }
+  },
+
+  /** Download the current in-memory document (used by the pages drawer in large/view-only mode). */
+  downloadCurrentPdf() {
+    if (!this.originalFileData) return;
+    downloadBytes(this.originalFileData, 'document.pdf');
   },
   /** Show / hide the blocking page-operation loading overlay. */
   _showBusy(msg) {
@@ -80,7 +115,11 @@ export const PageOpsMethods = {
     if (o) o.hidden = false;
   },
   _hideBusy() { const o = document.getElementById('busyOverlay'); if (o) o.hidden = true; },
-  /** Build new PDF bytes from the ordered descriptor list using pdf-lib. */
+  /**
+   * Build new PDF bytes from the ordered descriptor list using pdf-lib. Each descriptor is
+   * { src: indexInCurrentDoc } or { blank: true, w, h }; an optional `rot` (90/180/270) is applied
+   * LOSSLESSLY as PDF /Rotate, combined with the page's existing rotation (no rasterization).
+   */
   async applyPageOrder(order) {
     const src = await PDFDocument.load(this.originalFileData, { ignoreEncryption: true });
     const out = await PDFDocument.create();
@@ -91,8 +130,12 @@ export const PageOpsMethods = {
 
     let ci = 0;
     for (const item of order) {
-      if (item.src != null) out.addPage(copied[ci++]);
-      else out.addPage([item.w || 612, item.h || 792]);   // blank page
+      const pg = (item.src != null) ? copied[ci++] : out.addPage([item.w || 612, item.h || 792]);
+      if (item.rot) {
+        const base = (pg.getRotation && pg.getRotation().angle) || 0;
+        pg.setRotation(degrees(((base + item.rot) % 360 + 360) % 360));
+      }
+      if (item.src != null) out.addPage(pg);   // blank pages are already added by addPage() above
     }
     return out.save();
   },
