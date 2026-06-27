@@ -728,7 +728,7 @@ function updateMergeWarn() {
     if (overSize && overPages) reason = 'more than 30 MB and more than 500 pages';
     else if (overSize) reason = 'more than 30 MB';
     else reason = 'more than 500 pages';
-    els.warn.textContent = `The combined file will be ${reason}, so editing is disabled. Click “Merge & open” below to combine these files and view the result.`;
+    els.warn.textContent = `The combined file will be ${reason}, so Editing is Disabled. Click “Merge & open” below to merge these files.`;
     els.warn.className = 'merge-warn red';
   } else {
     els.warn.textContent = 'Click “Merge & open” below to combine these files and open the result in the editor.';
