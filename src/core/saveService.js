@@ -49,24 +49,31 @@ export const SaveServiceMethods = {
     const forceClientSide = this.largeFileMode || (this.originalFileData &&
       (this.originalFileData.byteLength || this.originalFileData.length || 0) > EDIT_LIMIT_BYTES);
 
-    try {
-      if (!forceClientSide && await PDFBackendService.checkHealth()) {
-        // Serialize Fabric annotations (highlights, shapes, etc.) so the backend can
-        // burn them in as native PDF annotations (real /Highlight with fill_opacity).
-        const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
-        editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits, fabricAnnotations);
-        viaBackend = true;
-      }
-    } catch (e) { console.warn('Backend save failed, trying client-side:', e); }
-
-    // 2) mupdf-wasm tier — only when the backend didn't produce bytes (down/unhealthy) and this isn't a
-    //    forced-client large file. Rejects when it can't do the edit set faithfully → falls to pdf-lib.
-    if (!editedPdfBytes && !forceClientSide && MupdfService.isSupported()) {
+    const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
+    // The in-browser mupdf-wasm edit (no server, true text removal, embedded-font reuse).
+    const tryWasm = async () => {
+      if (editedPdfBytes || !MupdfService.isSupported()) return;
+      try { editedPdfBytes = await MupdfService.editPDF(this.originalFileData, this.edits, fabricAnnotations); }
+      catch (e) { console.warn('WASM save unavailable/declined:', e); }
+    };
+    // The PyMuPDF backend edit (also true text removal; the historical primary).
+    const tryBackend = async () => {
+      if (editedPdfBytes || forceClientSide) return;
       try {
-        const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
-        editedPdfBytes = await MupdfService.editPDF(this.originalFileData, this.edits, fabricAnnotations);
-      } catch (e) { console.warn('WASM save unavailable/declined, trying pdf-lib:', e); }
-    }
+        if (await PDFBackendService.checkHealth()) {
+          editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits, fabricAnnotations);
+          viaBackend = true;
+        }
+      } catch (e) { console.warn('Backend save failed, trying client-side:', e); }
+    };
+
+    // Tier order. WASM_EDIT_FIRST flips the chain to WASM-primary — the Phase-5 cutover toggle. It is
+    // OFF by default so production keeps the proven backend-first behaviour (WASM is the no-server
+    // fallback beneath it); set window.WASM_EDIT_FIRST = true to promote WASM once parity is signed off.
+    // (Phase 1b+ declines edits it can't do faithfully, so even WASM-first cleanly falls through.)
+    const wasmFirst = typeof window !== 'undefined' && window.WASM_EDIT_FIRST === true;
+    if (wasmFirst) { await tryWasm(); await tryBackend(); }
+    else { await tryBackend(); await tryWasm(); }
 
     if (!editedPdfBytes) {
       try {
