@@ -14,6 +14,34 @@ export const isLatexSubset = (base) => LATEX_RE.test(stripName(base));
 
 const asName = (o) => { try { return o && o.asName ? o.asName() : ''; } catch (_) { return ''; } };
 
+const LX_BOLD = ['cmbx', 'cmb', 'bx', 'bold', 'black', 'heavy', 'semibold'];
+const LX_ITALIC = ['cmti', 'cmsl', 'cmmi', 'cmssi', 'cmitt', 'cmsltt', 'italic', 'oblique', 'slanted'];
+
+/**
+ * LaTeX/TeX family profile { shape, family, bold, italic } or null. Recognises Computer Modern,
+ * Latin Modern, TeX Gyre and the classic mathptmx/helvet/courier substitutes (incl. subset names).
+ * Picks the open fallback face shape (cm/times/helvetica/courier) + family (serif/sans/mono).
+ * Ported from fonts.py _latex_font_profile.
+ */
+export function latexProfile(base) {
+  const raw = stripName(base);
+  const nm = raw.replace(/[\s-]/g, '');
+  const cmLm = LATEX_RE.test(raw) || nm.includes('latinmodern') || nm.includes('computermodern')
+    || /^(lmroman|lmsans|lmmono)/.test(nm);
+  const times = ['texgyretermes', 'termes', 'nimbusrom', 'pagella', 'bonum', 'schola'].some((k) => nm.includes(k));
+  const helv = ['texgyreheros', 'heros', 'nimbussans', 'adventor'].some((k) => nm.includes(k));
+  const cour = ['texgyrecursor', 'cursor', 'nimbusmono'].some((k) => nm.includes(k));
+  if (!(cmLm || times || helv || cour)) return null;
+  const bold = LX_BOLD.some((k) => nm.includes(k));
+  const italic = LX_ITALIC.some((k) => nm.includes(k));
+  if (times) return { shape: 'times', family: 'serif', bold, italic };
+  if (helv) return { shape: 'helvetica', family: 'sans', bold, italic };
+  if (cour) return { shape: 'courier', family: 'mono', bold, italic };
+  const family = ['cmss', 'lmsans', 'lmss'].some((k) => nm.includes(k)) ? 'sans'
+    : ['cmtt', 'cmitt', 'cmsltt', 'lmmono', 'lmtt'].some((k) => nm.includes(k)) ? 'mono' : 'serif';
+  return { shape: 'cm', family, bold, italic };
+}
+
 /**
  * Enumerate a page's fonts → Map(strippedBaseName → { base, subtype, reusable, ff, isCID }).
  * `reusable` = embedded TrueType (FontFile2) that isn't a LaTeX subset; `ff` is the font-file stream

@@ -10,7 +10,7 @@
 // hides the .wasm subpath); emitted as a content-hashed asset whose URL we fetch below.
 import wasmUrl from 'mupdf-wasm-binary';
 import { applyEdits } from './mupdfEdit.js';
-import { loadEditFont } from './mupdfFonts.js';
+import { loadBundledFont } from './mupdfFonts.js';
 
 let _mupdfPromise = null;
 async function getMupdf() {
@@ -41,7 +41,7 @@ async function edit(bytes, edits, annotations) {
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), 'application/pdf');
   try {
     if (!(doc instanceof mupdf.PDFDocument)) throw new Error('not a PDF');
-    const loadFont = (family, bold, italic) => loadEditFont(mupdf, family, bold, italic, self.location.origin);
+    const loadFont = (candidates) => loadBundledFont(mupdf, candidates, self.location.origin);
     // MUST await: applyEdits is async (font fetch), so returning the bare promise would let the
     // `finally` destroy the doc mid-operation. await keeps it alive until the work completes.
     return await applyEdits(mupdf, doc, { edits, annotations }, loadFont);

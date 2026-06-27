@@ -12,7 +12,8 @@
 // Font loading is injected (`loadFont(family,bold,italic) → Promise<mupdf.Font>`) so this module is
 // engine-pure and testable in Node — the worker supplies a fetch-based loader (see mupdfFonts.js).
 import { analyzePage, detectSpan } from './mupdfSpans.js';
-import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName } from './mupdfFontEngine.js';
+import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName, latexProfile } from './mupdfFontEngine.js';
+import { bundledCandidates } from './mupdfFonts.js';
 
 /** Normalise editable-box quirks (nbsp, zero-width, soft-hyphen, control chars) without dropping real
  *  Unicode — every font is embedded full-Unicode (Type0), so curly quotes / em-dash / accents / ₹ all
@@ -93,11 +94,13 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   let _charsets = null;
   const charsets = () => (_charsets || (_charsets = warmCharsets(doc)));
 
-  /** Bundled substitute, embedded full-Unicode (Type0/Identity) — the catch-all. */
-  async function bundledOption(family, bold, italic) {
-    const key = `${family}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
+  /** Bundled substitute, embedded full-Unicode (Type0/Identity) — the catch-all. `spec` selects the
+   *  family: an explicit toolbar key, a LaTeX profile, or the generic sans/serif/mono. */
+  async function bundledOption(spec, bold, italic) {
+    const candidates = bundledCandidates(spec, bold, italic);
+    const key = candidates[0] + '|' + (bold ? 1 : 0) + '|' + (italic ? 1 : 0);
     if (!simpleCache.has(key)) {
-      const mfont = await loadFont(family, bold, italic);
+      const mfont = await loadFont(candidates);
       const ref = doc.addFont(mfont);
       simpleCache.set(key, { name: 'WF' + (seq++), ref, mfont, charset: null });
     }
@@ -161,9 +164,6 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     return segs;
   }
   const measureSeg = (seg, size) => seg.units.reduce((w, u) => w + u.adv, 0) * size;
-
-  const familyOf = (e) => (e.fontFamily === 'serif' || (e.fontFamily == null && e.serif)) ? 'serif'
-    : e.fontFamily === 'mono' ? 'mono' : 'sans';
 
   // Group edits by page.
   const byPage = new Map();
@@ -240,9 +240,16 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       const isInsert = e.redact === false;
       const x = +(e.x || 0), baseline = +(e.baseline || 0);
       const sp = e._span;   // detected original style (replace edits only)
-      // Family: an explicit toolbar/family choice wins; else the detected original family; else the
-      // frontend's serif guess.
-      const family = e.fontFamily != null ? familyOf(e) : (sp ? sp.family : familyOf(e));
+      // Bundled-font selection: an explicit toolbar family (Arial/Calibri/Georgia/…) wins; else a LaTeX
+      // original blends with the matching open LaTeX face (Latin Modern / TeX Gyre); else the generic
+      // family (detected from the original, or the frontend's serif/mono guess).
+      let bundleSpec;
+      if (e.fontFamily != null) {
+        bundleSpec = { key: String(e.fontFamily).toLowerCase() };
+      } else {
+        const lp = (!isInsert && sp && sp.fontName) ? latexProfile(sp.fontName) : null;
+        bundleSpec = lp ? { latex: lp } : { family: sp ? sp.family : (e.serif ? 'serif' : 'sans') };
+      }
       // Size: keep the original's exact size by default (the frontend's geometric guess runs big); an
       // explicit toolbar size change (sizeOverride) or added text uses the frontend size.
       let boxSize = +(e.fontSize || 12) || 12;
@@ -285,7 +292,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // detected original (so an italic run on a non-italic original still gets a proper italic).
       const reused = (!isInsert && sp) ? reusedOption(sp, pageFonts) : null;
       for (const parts of lineModel) for (const r of parts) {
-        const bundled = await bundledOption(family, r.bold, r.italic);
+        const bundled = await bundledOption(bundleSpec, r.bold, r.italic);
         const useReused = reused && sp && r.bold === sp.bold && r.italic === sp.italic;
         r._opts = useReused ? [reused, bundled] : [bundled];
       }
