@@ -17,7 +17,11 @@ export const TextEditingMethods = {
     // on a rotated render they land garbled/overlapping. Existing-text editing is therefore disabled
     // on rotated pages — Add text, Highlight, Sign, Stamp and Erase still work (they map clicks live).
     if (((pv.page && pv.page.rotate) || 0) % 360 !== 0) return;
-    const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === pv.pageNum);
+    // Skip ROTATED text runs (e.g. a rotated "Add text" baked into the PDF by a backend save, then
+    // re-extracted on the post-save reload). A horizontal edit box can't represent rotated text, and
+    // drawing one would paint a phantom second layer over the rotated rendering (the "two layers of
+    // add text" bug). Rotated text stays as its baked rendering; other lines remain editable.
+    const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === pv.pageNum && !item.rotated);
     if (pageTextItems.length === 0) return;
 
     const canvasWrapper = pv.wrapper;
