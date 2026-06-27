@@ -171,9 +171,12 @@ function closeDrawer() {
 // into the editor unless they click Merge first).
 function requestClose() {
   if (!merging && hasUnmergedAdded()) {
+    const download = mergeMode() === 'download';   // large result -> the action is Download, not "open"
     showConfirmDialog({
       title: 'Discard these files?',
-      message: "You've added files but haven't combined them yet. They won't be saved unless you click the <b>Merge</b> button first. Close anyway?",
+      message: download
+        ? "You've added files but haven't downloaded the combined PDF yet. Closing will clear them. Close anyway?"
+        : "You've added files but haven't combined them yet. Closing will clear them — click <b>Merge &amp; open</b> first to keep the result. Close anyway?",
       stayLabel: 'Back to merge',
       confirmLabel: 'Close anyway',
       onConfirm: () => { discardAll(); closeDrawer(); },
