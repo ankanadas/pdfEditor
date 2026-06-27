@@ -11,6 +11,7 @@
 //
 // Font loading is injected (`loadFont(family,bold,italic) → Promise<mupdf.Font>`) so this module is
 // engine-pure and testable in Node — the worker supplies a fetch-based loader (see mupdfFonts.js).
+import { analyzePage, detectSpan } from './mupdfSpans.js';
 
 // ── CP1252 / WinAnsi encoding (simple fonts only encode this set, like the pdf-lib StandardFonts) ──
 const CP1252_HIGH = {
@@ -132,6 +133,14 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     const b = page.getBounds();
     const pw = b[2] - b[0], ph = b[3] - b[1];
 
+    // 0) Detect each replace edit's ORIGINAL span (size/colour/family/weight) BEFORE redaction removes
+    //    it, so the replacement matches the original instead of the frontend's geometric guesses.
+    const analysis = analyzePage(page);
+    for (const e of pageEdits) {
+      if (e.redact === false) continue;
+      e._span = detectSpan(analysis, +(e.x || 0), +(e.baseline || 0));
+    }
+
     // 1) Redact the original text of REPLACE edits (true removal), keeping images + line-art so a
     //    coloured/shaded cell or border behind the text survives — no white cover box (the win over
     //    pdf-lib). Insert-only edits (added text) set redact:false and aren't redacted.
@@ -177,10 +186,22 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     for (const e of pageEdits) {
       const isInsert = e.redact === false;
       const x = +(e.x || 0), baseline = +(e.baseline || 0);
-      const family = familyOf(e);
-      const boxSize = +(e.fontSize || 12) || 12;
+      const sp = e._span;   // detected original style (replace edits only)
+      // Family: an explicit toolbar/family choice wins; else the detected original family; else the
+      // frontend's serif guess.
+      const family = e.fontFamily != null ? familyOf(e) : (sp ? sp.family : familyOf(e));
+      // Size: keep the original's exact size by default (the frontend's geometric guess runs big); an
+      // explicit toolbar size change (sizeOverride) or added text uses the frontend size.
+      let boxSize = +(e.fontSize || 12) || 12;
+      if (sp && sp.size && !e.sizeOverride && !isInsert) boxSize = sp.size;
+      // Weight/slant: union the frontend flag with the detected original (only ADDS — never un-bolds a
+      // correct line), recovering a bold heading on a non-embedded standard font the frontend missed.
+      let wantBold = !!e.bold, wantItalic = !!e.italic;
+      if (sp && !isInsert) { wantBold = wantBold || sp.bold; wantItalic = wantItalic || sp.italic; }
       const boxColor = parseColor(e.color, null);
-      const defColor = boxColor || [0, 0, 0];
+      // Colour: an explicit toolbar colour wins; else the original span's colour (white-on-dark); added
+      // text stays black.
+      const defColor = boxColor || ((sp && !isInsert) ? sp.color : [0, 0, 0]);
       const boxUnderline = !!e.underline;
       const rot = +(e.rotation || 0) || 0;
 
@@ -192,8 +213,8 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
             bold: !!r.bold, italic: !!r.italic, underline: !!r.underline || boxUnderline,
             color: parseColor(r.color, null) || defColor })))
         : (isInsert
-            ? String(e.newText || '').split(/\r\n?|\n/).map(l => [{ text: sanitizeWinAnsi(l), size: boxSize, bold: !!e.bold, italic: !!e.italic, underline: boxUnderline, color: defColor }])
-            : [[{ text: sanitizeWinAnsi(String(e.newText || '').replace(/[\r\n]+/g, ' ')), size: boxSize, bold: !!e.bold, italic: !!e.italic, underline: boxUnderline, color: defColor }]]);
+            ? String(e.newText || '').split(/\r\n?|\n/).map(l => [{ text: sanitizeWinAnsi(l), size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }])
+            : [[{ text: sanitizeWinAnsi(String(e.newText || '').replace(/[\r\n]+/g, ' ')), size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }]]);
 
       if (!lineModel.some(parts => parts.some(r => r.text))) continue;
 
