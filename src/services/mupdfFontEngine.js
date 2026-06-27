@@ -14,6 +14,16 @@ export const isLatexSubset = (base) => LATEX_RE.test(stripName(base));
 
 const asName = (o) => { try { return o && o.asName ? o.asName() : ''; } catch (_) { return ''; } };
 
+/** Family ('sans'|'serif'|'mono') if `base` is one of the 14 standard PDF TEXT fonts (Helvetica/Arial,
+ *  Times, Courier), else null. Symbol/ZapfDingbats excluded. Mirrors fonts.py _standard_family. */
+export function standardFamily(base) {
+  const nm = stripName(base);
+  if (nm.startsWith('helvetica') || nm.startsWith('arial')) return 'sans';
+  if (nm.startsWith('times') || nm.includes('times new roman')) return 'serif';
+  if (nm.startsWith('courier')) return 'mono';
+  return null;
+}
+
 const LX_BOLD = ['cmbx', 'cmb', 'bx', 'bold', 'black', 'heavy', 'semibold'];
 const LX_ITALIC = ['cmti', 'cmsl', 'cmmi', 'cmssi', 'cmitt', 'cmsltt', 'italic', 'oblique', 'slanted'];
 
