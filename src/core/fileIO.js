@@ -3,20 +3,28 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import { confirmDialog } from '../util/dialog.js';
 import { PDFBackendService } from '../services/pdfBackendService.js';
+import {
+  EDIT_LIMIT_BYTES, EDIT_LIMIT_PAGES, deviceCapBytes, DEVICE_CAP_MESSAGE,
+} from './limits.js';
 
-const MAX_FILE_MB = 30;
-const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
+// View-only controls stay enabled even for large (non-editable) files; edit controls are gated.
+const VIEW_CONTROLS = ['prevPageBtn', 'nextPageBtn', 'pagesPanelBtn'];
+const EDIT_CONTROLS = ['saveBtn', 'textInput', 'editModeBtn', 'textModeBtn',
+  'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'annotateModeBtn', 'clearSignatureBtn'];
 
 export const FileIOMethods = {
-  /** Enable all the tools/controls that require a loaded PDF. */
-  enableUiAfterLoad() {
-    ['saveBtn', 'textInput', 'prevPageBtn', 'nextPageBtn', 'pagesPanelBtn',
-     'editModeBtn', 'textModeBtn', 'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn',
-     'annotateModeBtn', 'clearSignatureBtn']
-      .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+  /**
+   * Enable the tools/controls that require a loaded PDF. When `large` is true the document is
+   * over the edit limit (30 MB / 500 pages) and opens VIEW-ONLY: viewing, paging, Rotate/Reorder
+   * and Merge stay available, but the editing tools (Edit/Add/Sign/Erase/Stamp/Highlight/Save)
+   * are disabled.
+   */
+  enableUiAfterLoad(large = false) {
+    VIEW_CONTROLS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+    EDIT_CONTROLS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !!large; });
     // Warm the edit backend now (free hosts sleep when idle) so it's awake by the time the
     // user saves — avoids the first save silently falling back to client-side. Fire-and-forget.
-    PDFBackendService.checkHealth().catch(() => {});
+    if (!large) PDFBackendService.checkHealth().catch(() => {});
   },
   /** Clear the loaded PDF and return to the empty upload state. Used by the Merge panel
    *  when the user removes the current document (the one open here). */
@@ -24,6 +32,7 @@ export const FileIOMethods = {
     this.pdfJsDoc = null;
     this.originalFile = null;
     this.originalFileData = null;
+    this.largeFileMode = false;
     this.edits = [];
     this.currentPage = 0;
     if (typeof this.resetHistory === 'function') this.resetHistory();
@@ -46,6 +55,24 @@ export const FileIOMethods = {
       .forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = true; });
     document.querySelectorAll('.tool.active').forEach((el) => el.classList.remove('active'));
   },
+  /**
+   * Modal shown when a file is opened that's too large to EDIT (over 30 MB / 500 pages) but small
+   * enough to view. Offers Rotate/Reorder or Merge (both client-side). Cancel/X leaves the file
+   * open view-only. Handlers are assigned with onclick (idempotent across repeated opens).
+   */
+  _openLargeFileDialog() {
+    const modal = document.getElementById('largeFileModal');
+    if (!modal) return;
+    const close = () => modal.classList.remove('open');
+    const reorderBtn = document.getElementById('largeFileReorder');
+    const mergeBtn = document.getElementById('largeFileMerge');
+    const closeBtn = document.getElementById('largeFileClose');
+    if (reorderBtn) reorderBtn.onclick = () => { close(); this.openPagesPanel(); };
+    if (mergeBtn) mergeBtn.onclick = () => { close(); document.getElementById('mergeBtn')?.click(); };
+    if (closeBtn) closeBtn.onclick = close;
+    modal.onclick = (e) => { if (e.target === modal) close(); };       // click the backdrop to dismiss
+    modal.classList.add('open');
+  },
   async handleFileSelect(event) {
     const file = event.target.files[0];
     if (!file) return;
@@ -58,15 +85,16 @@ export const FileIOMethods = {
       if (!proceed) { event.target.value = ''; return; }
     }
 
-    // Enforce the size limit before doing any work.
-    if (file.size > MAX_FILE_BYTES) {
-      const mb = (file.size / (1024 * 1024)).toFixed(1);
-      this.showStatus(`That PDF is ${mb} MB — please choose a file under ${MAX_FILE_MB} MB.`, 'error');
+    // Only the absolute DEVICE cap blocks loading outright — a file we can't safely hold in this
+    // browser. Files merely over the EDIT limit (30 MB / 500 pages) still open, view-only (handled
+    // after we know the page count); they can be viewed, merged and rotated/reordered, just not edited.
+    if (file.size > deviceCapBytes()) {
+      this.showStatus(DEVICE_CAP_MESSAGE, 'error');
       document.body.classList.remove('has-pdf');  // keep the upload screen showing
       event.target.value = '';                     // allow re-selecting after picking a smaller file
       return;
     }
-    // Size OK — reveal the editor.
+    // Within the device cap — reveal the editor (it may still be view-only, decided below).
     document.body.classList.add('has-pdf');
 
     try {
@@ -143,7 +171,28 @@ export const FileIOMethods = {
       // edit (see _confirmEditAllowed / the stage mousedown gate). Reset the confirmation per document.
       this._editRestricted = editRestricted;
       this._restrictionConfirmed = false;
-      
+
+      // Decide editable vs view-only by the OUTPUT we just loaded: > 30 MB OR > 500 pages (whichever
+      // hits first) means editing is unsupported, but the file still opens for viewing/merge/reorder.
+      const pageCount = this.pdfJsDoc.numPages;
+      this.largeFileMode = (file.size > EDIT_LIMIT_BYTES) || (pageCount > EDIT_LIMIT_PAGES);
+
+      if (this.largeFileMode) {
+        // VIEW-ONLY: render page bitmaps (client-side), no text extraction / editable overlays.
+        // The pages tool and Merge read this.originalFileData directly, so no pdf-lib editor load.
+        this.controller.isLoaded = true;
+        this.currentPage = 0;
+        this.setMode('view');
+        await this.buildPages();
+        document.getElementById('stage')?.scrollTo({ top: 0 });
+        this.enableUiAfterLoad(true);
+        this.updateModeIndicator();
+        this.showStatus(`Large file opened view-only — ${pageCount} page(s). Editing is disabled.`, 'info');
+        this._openLargeFileDialog();
+        return;
+      }
+
+      // ----- Normal editable flow -----
       // Try to load into controller (pdf-lib) for editing - but don't fail if it doesn't work
       try {
         await this.controller.loadPDF(file);
@@ -154,12 +203,12 @@ export const FileIOMethods = {
         this.controller.isLoaded = true;
         // Don't show error - backend editing will work fine
         console.log('Using backend-only mode for this PDF');
-        
+
         // Manually enable controls since controller won't emit 'loaded' event
         this.enableUiAfterLoad();
         this.showStatus(`PDF loaded successfully! ${this.pdfJsDoc.numPages} page(s)`, 'success');
       }
-      
+
       // Extract text geometry with PDF.js — the same engine that renders the canvas —
       // so the editable overlays align exactly. The backend is used only when saving.
       await this.extractTextFromPDFjs();

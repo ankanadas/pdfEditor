@@ -707,6 +707,23 @@
     .btn.confirm-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
     .btn.confirm-danger:hover { background: #c81e1e; border-color: #c81e1e; }
 
+    /* ---------- Large-file (too big to edit) dialog ---------- */
+    .large-file-box { position: relative; }
+    .lf-close {
+      position: absolute; top: 12px; right: 12px; width: 34px; height: 34px; border-radius: 50%;
+      border: none; background: #f1f2f6; color: #4b5563; display: grid; place-items: center; cursor: pointer;
+    }
+    .lf-close:hover { background: #e6e8ef; color: var(--ink); }
+    .lf-close svg { width: 18px; height: 18px; }
+    .lf-actions { display: flex; gap: 12px; margin-top: 24px; }
+    .lf-action {
+      flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer;
+      padding: 16px 12px; border-radius: 14px; border: 1.5px solid var(--border, #e2e5ee);
+      background: #fafbff; font-weight: 700; font-size: 14px; color: var(--ink);
+    }
+    .lf-action:hover { border-color: var(--brand, #6c4cf0); background: #f3f1ff; }
+    .lf-action img { width: 40px; height: 40px; object-fit: contain; }
+
     /* ---------- Pages manager (reorder / delete / insert) ---------- */
     /* ===================== Reorder modal (matches the Merge modal) ===================== */
     .pages-backdrop {
@@ -967,6 +984,10 @@
     .merge-clear:hover { background: #fdeced; }
     .merge-progress { height: 7px; border-radius: 999px; background: #eceef5; overflow: hidden; }
     .merge-progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--brand), #19b36b); transition: width .2s ease; }
+    .merge-warn { margin: 2px 0 0; padding: 9px 12px; border-radius: 10px; font-size: 13px; line-height: 1.35;
+                  color: #92480a; background: #fff4e5; border: 1px solid #f6d6a8; font-weight: 600; }
+    .merge-warn.err { color: var(--danger); background: #fdecec; border-color: #f6c2c2; }
+    .merge-warn[hidden] { display: none; }
     .merge-actions { display: flex; gap: 8px; align-items: center; }
     .merge-actions .spacer { flex: 1; }
     .merge-actions .btn { justify-content: center; }
@@ -1614,6 +1635,25 @@
     </div>
   </div>
 
+  <!-- Large-file dialog: shown when a file is too large to EDIT (>30MB / >500 pages) but opens view-only. -->
+  <div id="largeFileModal" class="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="largeFileTitle">
+    <div class="confirm-box large-file-box">
+      <button class="lf-close" id="largeFileClose" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+      <div class="confirm-title" id="largeFileTitle">This file is too large to edit</div>
+      <div class="confirm-msg" id="largeFileMsg">This file is larger than 30&nbsp;MB / 500&nbsp;pages — editing isn't supported. Would you like to Reorder or Merge instead?</div>
+      <div class="lf-actions">
+        <button class="lf-action" id="largeFileReorder" type="button">
+          <img src="/assets/fun-ui/reorder.png" alt="" aria-hidden="true"> Rotate/Reorder
+        </button>
+        <button class="lf-action" id="largeFileMerge" type="button">
+          <img src="/assets/fun-ui/merge.png" alt="" aria-hidden="true"> Merge
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Signature dialog: Draw / Type / Image -->
   <div id="signPad" class="signpad-backdrop">
     <div class="signpad">
@@ -1739,6 +1779,7 @@
         <div class="merge-progress" id="mergeProgress" hidden aria-hidden="true">
           <div class="merge-progress-bar" id="mergeProgressBar"></div>
         </div>
+        <div class="merge-warn" id="mergeWarn" role="status" hidden></div>
         <div class="merge-actions">
           <button class="btn" id="mergeCancel" type="button">Cancel</button>
           <span class="spacer"></span>

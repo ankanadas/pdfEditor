@@ -93,6 +93,9 @@ export const ModeManagerMethods = {
     } else if (this.mode === 'annotate') {
       indicator.textContent = 'Highlight';
       indicator.classList.add('active');
+    } else if (this.mode === 'view') {
+      indicator.textContent = 'View only (large file)';
+      indicator.classList.remove('active');
     } else {
       indicator.textContent = 'Pick a tool';
       indicator.classList.remove('active');
