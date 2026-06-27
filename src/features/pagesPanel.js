@@ -1,6 +1,6 @@
 // Pages panel — open/close the Rotate/Reorder drawer, render thumbnails, drag-to-reorder, rotate,
 // insert-pos options, move/delete pages. Assembled onto PDFEditorApp.prototype (mixin).
-import { LARGE_FILE_WARNING } from '../core/limits.js';
+import { largeFileReasonSentence } from '../core/limits.js';
 
 export const PagesPanelMethods = {
   togglePagesPanel() {
@@ -129,8 +129,16 @@ export const PagesPanelMethods = {
     const warn = document.getElementById('pagesLargeWarn');
     const dl = document.getElementById('pagesDownload');
     if (warn) {
-      warn.textContent = large ? LARGE_FILE_WARNING : '';
-      warn.hidden = !large;
+      if (large) {
+        const bytes = (this.originalFileData && (this.originalFileData.byteLength || this.originalFileData.length)) || 0;
+        const pages = this.pdfJsDoc ? this.pdfJsDoc.numPages : 0;
+        // Same syntax + style as the Merge banner; appends the page-tool's own action sentence.
+        warn.textContent = `${largeFileReasonSentence(bytes, pages)} You can download the file instead.`;
+        warn.className = 'merge-warn red';
+        warn.hidden = false;
+      } else {
+        warn.hidden = true;
+      }
     }
     if (dl) {
       dl.hidden = !large;
@@ -271,7 +279,8 @@ export const PagesPanelMethods = {
     if (dl && this.largeFileMode) dl.hidden = false;
     const hint = document.getElementById('pagesLargeWarn');
     if (hint && !this.largeFileMode && this._hasPendingRot()) {
-      hint.textContent = 'Rotation is previewed here — it’s applied when you close this panel or Save.';
+      hint.textContent = 'Rotation is previewed here. It is applied when you close this panel or Save.';
+      hint.className = 'merge-warn purple';   // info, not an error
       hint.hidden = false;
     }
   },

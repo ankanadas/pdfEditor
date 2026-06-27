@@ -5,7 +5,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import { loadImage } from '../util/image.js';
 import { confirmDialog } from '../util/dialog.js';
 import { downloadBytes } from '../util/download.js';
-import { overEditLimit, withinDeviceCap, DEVICE_CAP_MESSAGE, LARGE_FILE_WARNING } from '../core/limits.js';
+import { overEditLimit, withinDeviceCap, DEVICE_CAP_MESSAGE } from '../core/limits.js';
 
 export const PageOpsMethods = {
   /** Insert one blank page at the position chosen in the dropdown (end, or after page N). */
