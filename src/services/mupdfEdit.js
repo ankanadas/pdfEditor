@@ -77,6 +77,9 @@ function parseColor(str, fallback) {
   return fallback;
 }
 
+const rectsIntersect = (a, b) => !(a[2] < b[0] || b[2] < a[0] || a[3] < b[1] || b[3] < a[1]);
+const sameRect = (a, b) => Math.abs(a[0] - b[0]) < 1.5 && Math.abs(a[1] - b[1]) < 1.5 && Math.abs(a[2] - b[2]) < 1.5 && Math.abs(a[3] - b[3]) < 1.5;
+
 /** Append `stream` to a page's /Contents (normalise single-stream → array, then push). */
 function appendContents(doc, pageObj, stream) {
   let contents = pageObj.get('Contents');
@@ -214,6 +217,16 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       if (e.redact === false) continue;
       e._span = detectSpan(analysis, +(e.x || 0), +(e.baseline || 0));
     }
+
+    // Capture external hyperlinks BEFORE redaction — applyRedactions drops links overlapping an
+    // edited line, so we re-add the dropped ones after re-inserting (keeps an edited footer/email
+    // clickable). Mirrors edit_ops.py saved_links.
+    let savedLinks = [];
+    try {
+      savedLinks = page.getLinks()
+        .filter((l) => { try { return l.isExternal() && l.getURI(); } catch (_) { return false; } })
+        .map((l) => ({ rect: l.getBounds(), uri: l.getURI() }));
+    } catch (_) {}
 
     // 1) Redact the original text of REPLACE edits (true removal), keeping images + line-art so a
     //    coloured/shaded cell or border behind the text survives — no white cover box (the win over
@@ -357,6 +370,28 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       for (const fam of usedFonts) fdict.put(fam.name, fam.ref);
       const stream = doc.addStream(ops.build(), doc.newDictionary());
       appendContents(doc, pageObj, stream);
+    }
+
+    // Hyperlinks: place user-added links over their edited text, then restore any saved link that
+    // redaction dropped (overlapped a redacted rect, isn't a user-managed area, and isn't still present).
+    const managedRects = [];
+    for (const e of pageEdits) {
+      const link = e.link && typeof e.link === 'object' ? e.link : null;
+      if (link && link.uri && !e.linkRemoved) {
+        const lr = [+(e.x || 0), +(e.top || 0), +(e.right || e.x || 0), +(e.bottom || e.top || 0)];
+        managedRects.push(lr);
+        try { page.createLink(lr, link.uri); } catch (_) {}
+      }
+    }
+    if (savedLinks.length && redactRects.length) {
+      let current = [];
+      try { current = page.getLinks().map((l) => l.getBounds()); } catch (_) {}
+      for (const s of savedLinks) {
+        if (!redactRects.some((rr) => rectsIntersect(s.rect, rr))) continue;   // wasn't in a redacted area
+        if (managedRects.some((m) => rectsIntersect(s.rect, m))) continue;     // user manages this area
+        if (current.some((c) => sameRect(c, s.rect))) continue;               // survived redaction
+        try { page.createLink(s.rect, s.uri); } catch (_) {}
+      }
     }
   }
 
