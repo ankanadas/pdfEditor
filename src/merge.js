@@ -171,14 +171,21 @@ function closeDrawer() {
 }
 // Close, but first warn if the user added files they haven't merged (those won't load
 // into the editor unless they click Merge first).
+// Cancel / close: ABANDON the merge. If files were added, confirm first (they'll be removed). The
+// document already open in the editor stays as it is; if Merge was opened standalone, the editor
+// stays empty. (Merging only happens via the "Merge & open" button.)
 function requestClose() {
-  // No "discard?" nag. If files were added, closing AUTO-MERGES them into the editor (the merged
-  // result opens there, large ones view-only). Nothing to merge, or over the device cap -> just close.
-  if (!merging && hasUnmergedAdded() && mergeMode() !== 'overcap') {
-    doMerge();
-    return;
+  if (!merging && hasUnmergedAdded()) {
+    showConfirmDialog({
+      title: 'Cancel merge?',
+      message: 'These files will be removed and won’t be merged. The document open in the editor stays as it is.',
+      stayLabel: 'Back to merge',
+      confirmLabel: 'Remove & cancel',
+      onConfirm: () => { discardAll(); closeDrawer(); },
+    });
+  } else {
+    closeDrawer();
   }
-  closeDrawer();
 }
 function hasUnmergedAdded() {
   return items.some((i) => !i.isCurrent && i.bytes && !i.error);
