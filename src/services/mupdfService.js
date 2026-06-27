@@ -66,4 +66,21 @@ export const MupdfService = {
       : new Uint8Array(pdfArrayBuffer).slice().buffer;
     return call('decrypt', { bytes: buf, password }, [buf]);
   },
+
+  /**
+   * Apply text edits + Fabric annotations in the browser (WASM). Drop-in for PDFBackendService.editPDF;
+   * resolves a Uint8Array of edited bytes, or REJECTS if the edit set isn't faithfully supported yet
+   * (the caller then falls through to the pdf-lib tier).
+   * @param {ArrayBuffer} pdfArrayBuffer
+   * @param {Array} edits
+   * @param {Array} [annotations]
+   * @returns {Promise<Uint8Array>}
+   */
+  async editPDF(pdfArrayBuffer, edits, annotations = []) {
+    if (!this.isSupported()) throw new Error('mupdf-wasm unsupported in this browser');
+    const buf = pdfArrayBuffer instanceof ArrayBuffer
+      ? pdfArrayBuffer.slice(0)
+      : new Uint8Array(pdfArrayBuffer).slice().buffer;
+    return call('edit', { bytes: buf, edits, annotations }, [buf]);
+  },
 };
