@@ -69,7 +69,9 @@
     window.PDF_BACKEND_URL =
       (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
         ? 'http://127.0.0.1:5001'
-        : 'https://pdf-editor-backend-jndx.onrender.com';
+        : (location.protocol === 'http:' && /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname))
+          ? 'http://' + location.hostname + ':5001'   // LAN-IP dev testing (phone on same Wi-Fi) → the host laptop's backend
+          : 'https://pdf-editor-backend-jndx.onrender.com';
   </script>
   <style>
     :root {
@@ -448,7 +450,7 @@
     /* Shared contextual floating text toolbar (positioned by app.js; one for Edit + Add text). */
     #textToolbar {
       position: fixed; z-index: 600; display: none; align-items: center; gap: 4px;
-      padding: 5px 7px; background: #fff; border: 1px solid #d9d4ff; border-radius: 10px;
+      padding: 5px 7px; background: #f3f1ff; border: 1px solid #cdc2ff; border-radius: 10px;
       box-shadow: 0 8px 26px rgba(20, 22, 40, .22); white-space: nowrap;
       font-size: 13px; color: var(--ink);
     }
@@ -1052,6 +1054,13 @@
       #actionBar > *, #actionBar .ctx > *, #actionBar .stamp-chips { flex: 0 0 auto; }
       #actionBar .stamp-chips { flex-wrap: nowrap; }
       #actionBar .ab-hint { display: none; }
+      /* Highlight mode on mobile: keep only the two highlighters; hide the shape + table tools. */
+      #ann-line, #ann-rect, #ann-circle, #ann-table { display: none; }
+      /* Compact the highlight bar so the COLOUR swatch is reachable: hide only the "Colour" label (the
+         swatch is self-explanatory). KEEP the "Size"/"Opacity" labels — they sit after the colour control
+         so they don't push it off-screen, and the user needs to know which slider is which. */
+      .ann-color-label { display: none; }
+      .ann-color-wrap, .ann-slider-wrap { padding: 4px 6px; gap: 4px; }
 
       /* ---- Workspace: stack vertically — PDF on top (scrolls), tools docked at the bottom ---- */
       .workspace { flex-direction: column; min-height: 0; }
@@ -1090,30 +1099,53 @@
       .appfoot { padding: 6px 10px; gap: 4px 12px; font-size: 11px; }
       .appfoot .foot-badge { display: none; }
 
-      /* ---- Floating text toolbar: keep it ABOVE the selected text (JS-positioned, like desktop), but
-         WRAP to ~2 rows so EVERY control (font, colour, link, delete) is visible — never scrolled off
-         the right edge. Drop alignment + duplicate + opacity on mobile to keep it to two tidy rows. ---- */
+      /* ---- Floating text toolbar: keep it ABOVE the selected text (JS-positioned, like desktop). Stay on
+         ONE row and SLIDE horizontally when it doesn't fit (never wrap to a 2nd row); Delete stays pinned
+         to the right edge so it's always reachable. Drop alignment + duplicate + opacity on mobile. ---- */
+      /* ---- Mobile text toolbar: PINNED as a fixed bar at the TOP of the screen (JS sets top/left/width to
+         the VISUAL viewport so it stays put when the keyboard scrolls the page). ONE row that SLIDES
+         horizontally if it doesn't fit — never wraps to a 2nd row. Colour sits first so it's in view;
+         Delete is pinned to the right edge. ---- */
       #textToolbar.show {
-        width: calc(100vw - 12px); max-width: calc(100vw - 12px);
-        flex-wrap: wrap; overflow: visible; padding: 6px; gap: 6px; justify-content: flex-start;
+        position: fixed; top: 0; left: 0;
+        flex-wrap: nowrap; overflow-x: auto; overflow-y: visible; -webkit-overflow-scrolling: touch;
+        padding: 8px; gap: 6px; border-radius: 0; border: none; border-bottom: 1px solid var(--line);
+        box-shadow: 0 4px 14px rgba(20, 22, 40, .16); z-index: 1400;
       }
-      #textToolbar.show > * { flex: 0 0 auto; }            /* don't squash controls; wrap instead */
-      /* Mobile edit/add: drop alignment + duplicate + OPACITY to keep the bar compact (2 rows max). */
+      #textToolbar.show > * { flex: 0 0 auto; }            /* don't squash controls; slide instead */
+      /* Mobile edit/add: drop alignment + duplicate + OPACITY to keep the row short. */
       #tt-align-left, #tt-align-center, #tt-align-right, #tt-dup, .tt-opacity { display: none; }
-      .tt-btn { min-width: 40px; height: 40px; }
-      .tt-num { width: 52px; height: 40px; }
-      .tt-sel, .tt-font-btn { height: 40px; }
-      .tt-font-btn { min-width: 96px; max-width: 132px; }
+      #textToolbar.show .tt-sep { display: none; }
+      /* Most-used controls first (B/I/U + size are order 0), then COLOUR, then Font, then Link. */
+      .tt-color-wrap { order: 1; }
+      .tt-fontpick { order: 2; }
+      .tt-link-wrap { order: 3; }
+      .tt-btn { min-width: 42px; height: 42px; font-size: 16px; }
+      .tt-num { width: 46px; height: 42px; }
+      .tt-sel, .tt-font-btn { height: 42px; }
+      .tt-font-btn { min-width: 84px; max-width: 104px; }
+      /* Delete goes LAST (after link) and is pinned to the right edge so it's always reachable. */
+      #tt-del { order: 4; position: sticky; right: 0; z-index: 2; background: #fff; box-shadow: -8px 0 8px -6px rgba(0,0,0,.18); }
       /* Font-size +/- steppers: mobile has no native number spinner, so show explicit buttons. */
-      .tt-step { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 40px;
+      .tt-step { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; height: 42px;
         border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font-size: 20px; line-height: 1; padding: 0; }
-      /* Popups become bottom sheets so a horizontally-scrolling toolbar can never clip them. */
+      /* iOS Safari force-ZOOMS the page when you focus an <input> whose font-size is < 16px. The font
+         picker focuses its search box on open, so tapping the font control was zooming the screen (and
+         then everything looked cut off). Keep every editable INPUT at 16px on mobile to stop that. */
+      #tt-size, #tt-font-search, #tt-link-input { font-size: 16px; }
+      /* Pickers open as a full-width sheet pinned just BELOW the pinned toolbar — above everything else
+         (z-index 1500 > toolbar 1400). For colour/font the JS blurs the editor first so the keyboard is
+         closed and the whole sheet is visible; the link sheet (which needs the keyboard) stays compact. */
       .tt-font-pop, .tt-color-pop, .tt-link-pop {
-        position: fixed; left: 8px; right: 8px; top: auto; bottom: 58px;
+        position: fixed; left: 8px; right: 8px; top: 116px; bottom: auto;
         transform: none; width: auto; max-width: calc(100vw - 16px);
-        max-height: 50vh; overflow: auto;
+        max-height: 64vh; overflow: auto; z-index: 1500;
+        box-shadow: 0 14px 40px rgba(20, 22, 40, .32);
       }
-      .tt-color-pop { grid-template-columns: repeat(8, 1fr); justify-items: center; }
+      /* Bigger, full-cell swatches on mobile (a fixed 18px swatch inside a 1fr column rendered as a
+         zero/!visible cell on iOS — only "Custom" showed). Stretch each swatch to fill its cell. */
+      .tt-color-pop { grid-template-columns: repeat(7, 1fr); gap: 8px; justify-items: stretch; }
+      .tt-color-pop .tt-sw { width: 100%; height: 34px; }
 
       /* Bigger signature-overlay handles so they're tappable with a finger. */
       .insert-handle { width: 22px; height: 22px; right: -11px; bottom: -11px; }
@@ -1441,7 +1473,7 @@
             <div class="big">Drag &amp; drop your PDF here</div>
             <div class="or">or</div>
             <span class="btn primary" style="pointer-events:none">Upload PDF</span>
-            <div class="or" style="margin-top:14px">PDF files up to 100 MB</div>
+            <div class="or" style="margin-top:14px">PDF files up to 30 MB</div>
           </label>
         </div>
 
