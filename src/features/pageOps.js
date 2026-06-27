@@ -79,11 +79,13 @@ export const PageOpsMethods = {
       this.selectedThumb = null;
 
       if (downloadOnly) {
-        // VIEW-ONLY / large: never route back through the editable pipeline or the backend. Re-render
-        // the page bitmaps + thumbnails so the change is visible, and offer a single Download.
+        // VIEW-ONLY / large: never route back through the editable pipeline or the backend. Crucially,
+        // DON'T re-render the whole (possibly huge) main view on every page op — re-rendering hundreds
+        // of pages is what made reorder/delete/rotate feel like it hung. Only refresh the drawer
+        // thumbnails; mark the main view stale so it renders ONCE when the user closes the drawer.
         this.largeFileMode = true;
+        this._largeViewRendered = false;
         this.setMode('view');
-        await this.buildPages();
         this.enableUiAfterLoad(true);
         this.updatePageInfo();
         this.renderPagesPanel();
