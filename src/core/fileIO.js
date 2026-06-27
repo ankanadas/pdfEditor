@@ -187,7 +187,7 @@ export const FileIOMethods = {
         document.getElementById('stage')?.scrollTo({ top: 0 });
         this.enableUiAfterLoad(true);
         this.updateModeIndicator();
-        this.showStatus(`Large file opened view-only — ${pageCount} page(s). Editing is disabled.`, 'info');
+        // The dialog explains the large-file state — no extra status toast (keeps the screen uncluttered).
         this._openLargeFileDialog();
         return;
       }

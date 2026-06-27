@@ -64,6 +64,7 @@ function setup() {
     progressBar: document.getElementById('mergeProgressBar'),
     go: document.getElementById('mergeGo'),
     warn: document.getElementById('mergeWarn'),
+    note: document.getElementById('mergeNote'),
     cancelBtn: document.getElementById('mergeCancel'),
     confirm: document.getElementById('mergeConfirm'),
     confirmTitle: document.getElementById('mergeConfirmTitle'),
@@ -172,7 +173,7 @@ function requestClose() {
   if (!merging && hasUnmergedAdded()) {
     showConfirmDialog({
       title: 'Discard these files?',
-      message: "You've added files but haven't merged them. They won't be loaded into the editor unless you click <b>Merge &amp; open</b> first. Close anyway?",
+      message: "You've added files but haven't combined them yet. They won't be saved unless you click the <b>Merge</b> button first. Close anyway?",
       stayLabel: 'Back to merge',
       confirmLabel: 'Close anyway',
       onConfirm: () => { discardAll(); closeDrawer(); },
@@ -716,8 +717,11 @@ function updateButtons() {
   }
 }
 
-// In-drawer warning banner that mirrors the button mode.
+// In-drawer banner that mirrors the button mode. Only ONE message shows at a time: the neutral
+// "not combined yet" note for an editable result, OR the amber large-file warning for a download.
 function updateMergeWarn(mode) {
+  const big = mode === 'download' || mode === 'overcap';
+  if (els.note) els.note.hidden = big || !items.length;   // hide the blue note when the amber one shows
   if (!els.warn) return;
   if (mode === 'download') {
     els.warn.textContent = LARGE_FILE_WARNING;
