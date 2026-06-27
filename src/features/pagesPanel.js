@@ -140,6 +140,12 @@ export const PagesPanelMethods = {
         warn.hidden = true;
       }
     }
+    // Large/view-only: hide the insert controls (an editing action that doesn't apply) so the footer
+    // shows ONE clear action — Download. Normal docs: insert controls visible, Download hidden.
+    const insertBtn = document.getElementById('insertBlankBtn');
+    const insertRow = document.querySelector('.pages-foot .row');
+    if (insertBtn) insertBtn.hidden = large;
+    if (insertRow) insertRow.style.display = large ? 'none' : '';
     if (dl) {
       dl.hidden = !large;
       dl.onclick = () => this.downloadCurrentPdf();
