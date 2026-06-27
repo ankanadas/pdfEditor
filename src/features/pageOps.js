@@ -22,11 +22,13 @@ export const PageOpsMethods = {
     const w = ref.view[2] - ref.view[0];
     const h = ref.view[3] - ref.view[1];
 
+    const pend = this._pendingRot || {};
     const order = [];
     for (let i = 0; i < n; i++) {
-      order.push({ src: i });
+      order.push({ src: i, rot: pend[i] || 0 });   // carry any pending rotation through the insert
       if (i === afterIndex) order.push({ blank: true, w, h });
     }
+    this._pendingRot = {};
     const where = (val === 'end') ? 'at the end' : `after page ${afterIndex + 1}`;
     await this.commitPageOrder(order, `Blank page inserted ${where}.`, 'Adding a blank page…');
   },
@@ -85,7 +87,8 @@ export const PageOpsMethods = {
         this.enableUiAfterLoad(true);
         this.updatePageInfo();
         this.renderPagesPanel();
-        this.showStatus(`${successMsg} Editing is disabled for large files — use Download to save.`, 'info');
+        // Drawer already shows the amber "download instead" warning — keep the toast to a brief confirm.
+        this.showStatus(successMsg, 'info');
       } else {
         await this.extractTextFromPDFjs();
         await this.buildPages();
@@ -103,10 +106,22 @@ export const PageOpsMethods = {
     }
   },
 
-  /** Download the current in-memory document (used by the pages drawer in large/view-only mode). */
-  downloadCurrentPdf() {
+  /**
+   * Download the current document (used by the pages drawer in large/view-only mode). Bakes any
+   * pending rotations into the output with a single pdf-lib pass (no full editor reload), so large
+   * files download fast with their rotations applied. Pending state is kept so the preview stays.
+   */
+  async downloadCurrentPdf() {
     if (!this.originalFileData) return;
-    downloadBytes(this.originalFileData, 'document.pdf');
+    let bytes = this.originalFileData;
+    if (this._pendingRot && Object.keys(this._pendingRot).length) {
+      const n = this.pdfJsDoc.numPages;
+      const order = [];
+      for (let i = 0; i < n; i++) order.push({ src: i, rot: this._pendingRot[i] || 0 });
+      this._showBusy('Preparing download…');
+      try { bytes = await this.applyPageOrder(order); } finally { this._hideBusy(); }
+    }
+    downloadBytes(bytes, 'document.pdf');
   },
   /** Show / hide the blocking page-operation loading overlay. */
   _showBusy(msg) {

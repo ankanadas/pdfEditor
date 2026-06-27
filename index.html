@@ -217,6 +217,7 @@
       padding: 8px 13px; border-radius: 9px; font-size: 13.5px; font-weight: 600; transition: all .15s ease;
     }
     .btn svg { width: 16px; height: 16px; }
+    .btn[hidden] { display: none; }   /* the class sets display:inline-flex, so [hidden] needs this */
     .btn:hover:not(:disabled) { background: #f6f7fb; }
     .btn:disabled { opacity: .45; cursor: not-allowed; }
     .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
@@ -775,17 +776,16 @@
     }
     .page-thumb-del svg { width: 13px; height: 13px; }
     .page-thumb:hover .page-thumb-del { display: grid; }
-    /* Per-page rotate handles, styled like the delete handle but in the bottom corners. */
-    .page-thumb-rot {
-      position: absolute; bottom: -8px; width: 24px; height: 24px; border-radius: 50%;
-      border: 2px solid #fff; background: var(--brand, #6c4cf0); color: #fff; cursor: pointer; padding: 0;
-      display: none; place-items: center; box-shadow: 0 2px 6px rgba(0, 0, 0, .2); z-index: 2;
-    }
-    .page-thumb-rot.left { left: -8px; }
-    .page-thumb-rot.right { right: -8px; }
-    .page-thumb-rot svg { width: 13px; height: 13px; }
-    .page-thumb:hover .page-thumb-rot { display: grid; }
     .page-thumb .thumb-canvas { transition: transform .15s ease; }   /* instant rotate preview */
+    /* Always-visible rotate bar at the bottom of every page tile (purple, labelled L/R). */
+    .thumb-rotbar { display: flex; gap: 6px; width: 100%; margin-top: 2px; }
+    .thumb-rot {
+      flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+      padding: 5px 4px; border: none; border-radius: 7px; cursor: pointer;
+      background: var(--brand, #6c4cf0); color: #fff; font-size: 11px; font-weight: 700;
+    }
+    .thumb-rot:hover { background: #5a3fd6; }
+    .thumb-rot svg { width: 13px; height: 13px; }
     .pages-foot {
       flex: 0 0 auto; border-top: 1px solid var(--line); padding: 12px 20px;
       display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -885,6 +885,7 @@
       border-radius: 9px; padding: 9px 13px; display: flex; align-items: center; gap: 8px;
     }
     .merge-note svg { width: 16px; height: 16px; flex: 0 0 auto; }
+    .merge-note[hidden] { display: none; }   /* the class sets display:flex, so [hidden] needs this */
 
     .merge-status { margin: 0; font-size: 13px; }
     .merge-status:empty { display: none; }
@@ -1342,7 +1343,7 @@
     <aside class="rightbar" aria-label="Document tools">
       <button class="tool" id="pagesPanelBtn" disabled title="Rotate/Reorder: rotate, drag to reorder, delete, or insert blank pages">
         <img class="tool-ico" src="/assets/fun-ui/reorder.png" alt="" aria-hidden="true">
-        Reorder
+        Rotate/Reorder
       </button>
       <button class="tool merge-tool" id="mergeBtn" title="Merge PDF: combine multiple PDFs into one document">
         <img class="tool-ico" src="/assets/fun-ui/merge.png" alt="" aria-hidden="true">
@@ -1774,9 +1775,9 @@
 
       <div class="merge-body">
         <input id="mergeFileInput" type="file" accept="application/pdf,.pdf" multiple hidden />
-        <div class="merge-note">
+        <div class="merge-note" id="mergeNote">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
-          <span>These files aren't loaded into the editor yet. Click <b>Merge &amp; open</b> first to combine and view them.</span>
+          <span id="mergeNoteText">These files aren't combined yet. Click <b>Merge &amp; open</b> to combine them and open the result.</span>
         </div>
 
         <p class="merge-status" id="mergeStatus" role="status" aria-live="polite"></p>

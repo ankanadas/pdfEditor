@@ -19,6 +19,16 @@ export const SaveServiceMethods = {
       return;
     }
 
+    // Bake any rotations the user previewed in the Rotate/Reorder panel but hasn't committed yet
+    // (rotation is deferred for speed) into the bytes we're about to save.
+    if (this._pendingRot && Object.keys(this._pendingRot).length) {
+      const n = this.pdfJsDoc.numPages;
+      const order = [];
+      for (let i = 0; i < n; i++) order.push({ src: i, rot: this._pendingRot[i] || 0 });
+      try { this.originalFileData = await this.applyPageOrder(order); this._pendingRot = {}; }
+      catch (e) { console.warn('Could not bake pending rotation before save:', e); }
+    }
+
     // Produce the edited bytes with a fallback chain, best fidelity first. Each step is
     // guarded so a failure cleanly tries the next; a real "Failed to save" is shown only
     // when every path fails and no file is produced.
