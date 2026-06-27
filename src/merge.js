@@ -11,9 +11,15 @@
 import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { mergePdfBytes } from './mergeCore.js';
+import { downloadBytes } from './util/download.js';
+import {
+  deviceCapBytes, deviceCapMb, withinDeviceCap, isEditableOutput,
+  largeFileReasonSentence, DEVICE_CAP_MESSAGE,
+} from './core/limits.js';
 
-const MAX_MERGE_MB = 30;                  // per-file cap, mirrors the editor's limit
-const MAX_MERGE_BYTES = MAX_MERGE_MB * 1024 * 1024;
+// A single input file is only rejected when it can't even be held on this device. The merge
+// *output* size no longer caps merging (it caps only whether the result opens in the editor or
+// downloads) — see updateButtons()/doMerge(). deviceCapBytes() is device-, not viewport-, based.
 
 // --- Analytics: GA-ready, but a safe no-op if no analytics is installed. ----------
 function track(event, detail = {}) {
@@ -57,6 +63,8 @@ function setup() {
     progress: document.getElementById('mergeProgress'),
     progressBar: document.getElementById('mergeProgressBar'),
     go: document.getElementById('mergeGo'),
+    download: document.getElementById('mergeDownload'),
+    warn: document.getElementById('mergeWarn'),
     cancelBtn: document.getElementById('mergeCancel'),
     confirm: document.getElementById('mergeConfirm'),
     confirmTitle: document.getElementById('mergeConfirmTitle'),
@@ -105,6 +113,7 @@ function setup() {
 
   els.clear.addEventListener('click', clearAll);
   els.go.addEventListener('click', doMerge);
+  if (els.download) els.download.addEventListener('click', doMergeDownload);
 
   render();
 }
@@ -158,16 +167,22 @@ function closeDrawer() {
   hideConfirm();
   els.backdrop.classList.remove('open');
   els.openBtn.classList.remove('active');
+  // If a large file was opened straight into Merge (from the large-file dialog), its view-only editor
+  // hasn't been rendered yet — render it on close so the user isn't left looking at a blank editor.
+  try { window.pdfEditorApp && window.pdfEditorApp._ensureLargeViewRendered && window.pdfEditorApp._ensureLargeViewRendered(); } catch (_) {}
 }
 // Close, but first warn if the user added files they haven't merged (those won't load
 // into the editor unless they click Merge first).
+// Cancel / close: ABANDON the merge. If files were added, confirm first (they'll be removed). The
+// document already open in the editor stays as it is; if Merge was opened standalone, the editor
+// stays empty. (Merging only happens via the "Merge & open" button.)
 function requestClose() {
   if (!merging && hasUnmergedAdded()) {
     showConfirmDialog({
-      title: 'Discard these files?',
-      message: "You've added files but haven't merged them. They won't be loaded into the editor unless you click <b>Merge &amp; open</b> first. Close anyway?",
+      title: 'Cancel merge?',
+      message: 'These files will be removed and won’t be merged. The document open in the editor stays as it is.',
       stayLabel: 'Back to merge',
-      confirmLabel: 'Close anyway',
+      confirmLabel: 'Remove & cancel',
       onConfirm: () => { discardAll(); closeDrawer(); },
     });
   } else {
@@ -246,8 +261,8 @@ async function addFiles(fileList) {
       items.push({ id, name: file.name || 'file', size: file.size, error: 'Not a PDF file' });
       continue;
     }
-    if (file.size > MAX_MERGE_BYTES) {
-      items.push({ id, name: file.name, size: file.size, error: `Too large, over ${MAX_MERGE_MB} MB` });
+    if (file.size > deviceCapBytes()) {
+      items.push({ id, name: file.name, size: file.size, error: `Too large to process on this device (over ${deviceCapMb()} MB)` });
       continue;
     }
     const item = { id, name: file.name, size: file.size, loading: true };
@@ -430,9 +445,29 @@ function validItems() {
   return items.filter((i) => i.bytes && !i.error);
 }
 
-async function doMerge() {
+// Estimate the merged OUTPUT without actually merging (cheap, runs on every add/remove for the
+// dynamic button morph). Page count is exact (sum of inputs); byte size is the sum of input sizes
+// — a safe upper bound (pdf-lib's merge is usually a touch smaller), so we err toward "Download".
+function mergeOutputEstimate() {
+  const valid = validItems();
+  return {
+    bytes: valid.reduce((n, i) => n + (i.size || 0), 0),
+    pages: valid.reduce((n, i) => n + (i.pageCount || 0), 0),
+    count: valid.length,
+  };
+}
+// 'open'    -> merge and hand the result to the editor (a large result opens there view-only).
+// 'overcap' -> beyond what this device can process: disabled.
+function mergeMode() {
+  const { bytes } = mergeOutputEstimate();
+  return withinDeviceCap(bytes) ? 'open' : 'overcap';
+}
+
+// Shared merge runner. Combines the valid files, then hands the bytes to `onResult` (open vs download).
+async function runMerge(onResult) {
   const valid = validItems();
   if (merging || valid.length < 1) return;
+  if (mergeMode() === 'overcap') { status(DEVICE_CAP_MESSAGE, 'err'); return; }
 
   merging = true;
   updateButtons();
@@ -447,23 +482,43 @@ async function doMerge() {
       onProgress: (done, total) => showProgress(Math.round((done / total) * 88) + 2),
     });
     showProgress(100);
+    if (!withinDeviceCap(bytes.length)) {
+      track('merge_failed', { error: 'over_device_cap', bytes: bytes.length });
+      status(DEVICE_CAP_MESSAGE, 'err');
+      return;
+    }
     track('merge_completed', { fileCount: valid.length, pageCount: totalPages, bytes: bytes.length });
-    status(`Merged ${valid.length} file${valid.length === 1 ? '' : 's'}. Opening in the editor…`, 'ok');
-    loadIntoEditor(bytes);
-    // The merged document becomes the open document, so reset the list, reopening the
-    // panel then shows only it (auto-included as "Current document"), not the old sources.
-    items = [];
-    currentSig = null;
-    dismissedCurrentSig = null;
-    setTimeout(closeDrawer, 700);
+    onResult(bytes, valid.length);
   } catch (err) {
-    track('merge_failed', { error: String((err && err.message) || err) });
-    status('Sorry, merging failed. One of the files may be corrupted; remove it and try again.', 'err');
+    const msg = String((err && err.message) || err);
+    const oom = /allocation|out of memory|invalid array length|maximum call|range/i.test(msg);
+    track('merge_failed', { error: msg });
+    status(oom ? DEVICE_CAP_MESSAGE
+               : 'Sorry, merging failed. One of the files may be corrupted; remove it and try again.', 'err');
   } finally {
     merging = false;
     updateButtons();
     setTimeout(() => { if (!merging) hideProgress(); }, 900);
   }
+}
+
+// "Merge & open": combine and open the result in the editor (a large result opens there view-only).
+function doMerge() {
+  return runMerge((bytes) => {
+    loadIntoEditor(bytes);
+    items = [];
+    currentSig = null;
+    dismissedCurrentSig = null;
+    setTimeout(closeDrawer, 700);
+  });
+}
+
+// "Download": combine and download the result directly; never opens the editor.
+function doMergeDownload() {
+  return runMerge((bytes, n) => {
+    downloadBytes(bytes, 'merged.pdf');
+    status(`Downloaded the merged PDF (${n} file${n === 1 ? '' : 's'}).`, 'ok');
+  });
 }
 
 // Hand the merged bytes to the editor through the existing file pipeline (no app.js
@@ -473,6 +528,9 @@ function loadIntoEditor(bytes) {
   if (!input) return;
   const file = new File([bytes], 'merged.pdf', { type: 'application/pdf' });
   try {
+    // Tell the editor this load came from Merge: if the combined result is large, open it view-only
+    // with an "editing disabled" notice instead of the choose-a-tool dialog (the user just merged).
+    if (window.pdfEditorApp) window.pdfEditorApp._suppressLargeDialog = true;
     const dt = new DataTransfer();
     dt.items.add(file);
     input.files = dt.files;
@@ -642,16 +700,51 @@ function updateTotals() {
   }
 }
 
+// Icons kept as inline SVG (no new image assets).
+const MERGE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>';
+const DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>';
+
 function updateButtons() {
   const ready = validItems().length >= 1;   // enabled for one file too; disabled only when empty
-  els.go.disabled = merging || !ready;
-  els.go.title = merging
-    ? 'Merging…'
-    : (ready ? 'Merge the PDFs in order and open the result' : 'Add a PDF to get started');
-  // Keep the icon + label stable across states.
-  els.go.innerHTML = merging
-    ? '<span class="merge-spin" style="border-top-color:#fff;border-color:rgba(255,255,255,.5)"></span> Merging…'
-    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M12 8v8"/><path d="M8 12h8"/></svg> Merge &amp; open';
+  const over = ready && mergeMode() === 'overcap';
+  els.go.disabled = merging || !ready || over;
+  if (els.download) els.download.disabled = merging || !ready || over;
+  updateMergeWarn();
+
+  if (merging) {
+    els.go.innerHTML = '<span class="merge-spin" style="border-top-color:#fff;border-color:rgba(255,255,255,.5)"></span> Merging…';
+    els.go.title = 'Merging…';
+    return;
+  }
+  // Two actions, side by side: Merge & open (to the editor; a large result opens view-only) and
+  // Download (download the combined PDF, never opens the editor).
+  els.go.innerHTML = `${MERGE_ICON} Merge &amp; open`;
+  els.go.title = over ? DEVICE_CAP_MESSAGE
+    : (ready ? 'Combine the PDFs in order and open the result' : 'Add a PDF to get started');
+  if (els.download) {
+    els.download.innerHTML = `${DOWNLOAD_ICON} Download`;
+    els.download.title = over ? DEVICE_CAP_MESSAGE
+      : (ready ? 'Combine the PDFs and download the result' : 'Add a PDF to get started');
+  }
+}
+
+// Prominent banner shown ONLY when the merged result would be over the limit (red) or over the device
+// cap (red). Editable results show no banner (the two buttons speak for themselves). No decorative quotes.
+function updateMergeWarn() {
+  if (!els.warn) return;
+  if (!items.length || !validItems().length) { els.warn.hidden = true; return; }
+  const { bytes, pages } = mergeOutputEstimate();
+  if (!withinDeviceCap(bytes)) {
+    els.warn.textContent = DEVICE_CAP_MESSAGE;
+    els.warn.className = 'merge-warn red';
+    els.warn.hidden = false;
+  } else if (!isEditableOutput(bytes, pages)) {
+    els.warn.textContent = `${largeFileReasonSentence(bytes, pages)} Click Download to download the merged files.`;
+    els.warn.className = 'merge-warn red';
+    els.warn.hidden = false;
+  } else {
+    els.warn.hidden = true;
+  }
 }
 
 // --- Small helpers ----------------------------------------------------------------

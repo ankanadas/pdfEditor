@@ -24,7 +24,6 @@ const BOOT_TIMEOUT_MS = 90_000;
 // path, expected status, and an optional substring the body must contain.
 const CHECKS = [
   { path: '/', needs: 'id="stage"', label: 'editor home loads (existing functionality)' },
-  { path: '/bundle.js', label: 'app bundle is served (existing functionality)' },
   { path: '/about', needs: '<title>About — Quick PDF Editor' },
   { path: '/privacy', needs: '<title>Privacy Policy — Quick PDF Editor' },
   { path: '/terms', needs: '<title>Terms of Service — Quick PDF Editor' },
@@ -88,7 +87,21 @@ async function runChecks(base) {
     else if (!okBody) why = ` [missing "${needs}"]`;
     console.log(`  ${ok ? '✅' : '❌'}  ${path}${note}${why}`);
   }
-  console.log(`\n${failures === 0 ? '✅ all' : `❌ ${failures}`} of ${CHECKS.length} route checks ${failures === 0 ? 'passed' : 'FAILED'}.\n`);
+  // The app bundle is content-hashed, so resolve its name from the served index.html and verify it
+  // loads (mirrors the old static /bundle.js check, but hash-proof).
+  const home = await get(base, '/');
+  const m = /src="(\/?[^"]*bundle\.[^"]+\.js)"/.exec(home.body || '');
+  if (m) {
+    const bundlePath = m[1].startsWith('/') ? m[1] : `/${m[1]}`;
+    const { status } = await get(base, bundlePath);
+    const ok = status === 200;
+    if (!ok) failures++;
+    console.log(`  ${ok ? '✅' : '❌'}  ${bundlePath}  (app bundle is served)${ok ? '' : ` [HTTP ${status}]`}`);
+  } else {
+    failures++;
+    console.log('  ❌  (no hashed bundle script found in index.html)');
+  }
+  console.log(`\n${failures === 0 ? '✅ all' : `❌ ${failures}`} route checks ${failures === 0 ? 'passed' : 'FAILED'}.\n`);
   return failures;
 }
 

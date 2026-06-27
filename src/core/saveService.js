@@ -3,6 +3,7 @@
 import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFBackendService } from '../services/pdfBackendService.js';
+import { EDIT_LIMIT_BYTES } from './limits.js';
 
 export const SaveServiceMethods = {
   async savePDF() {
@@ -18,6 +19,16 @@ export const SaveServiceMethods = {
       return;
     }
 
+    // Bake any rotations the user previewed in the Rotate/Reorder panel but hasn't committed yet
+    // (rotation is deferred for speed) into the bytes we're about to save.
+    if (this._pendingRot && Object.keys(this._pendingRot).length) {
+      const n = this.pdfJsDoc.numPages;
+      const order = [];
+      for (let i = 0; i < n; i++) order.push({ src: i, rot: this._pendingRot[i] || 0 });
+      try { this.originalFileData = await this.applyPageOrder(order); this._pendingRot = {}; }
+      catch (e) { console.warn('Could not bake pending rotation before save:', e); }
+    }
+
     // Produce the edited bytes with a fallback chain, best fidelity first. Each step is
     // guarded so a failure cleanly tries the next; a real "Failed to save" is shown only
     // when every path fails and no file is produced.
@@ -29,8 +40,13 @@ export const SaveServiceMethods = {
     let flattened = false;
     let viaBackend = false;
 
+    // Large files (over the 30 MB edit limit, or opened view-only) NEVER go to the backend — an
+    // upload would bounce off the server's size cap (413). Force the client-side path for them.
+    const forceClientSide = this.largeFileMode || (this.originalFileData &&
+      (this.originalFileData.byteLength || this.originalFileData.length || 0) > EDIT_LIMIT_BYTES);
+
     try {
-      if (await PDFBackendService.checkHealth()) {
+      if (!forceClientSide && await PDFBackendService.checkHealth()) {
         // Serialize Fabric annotations (highlights, shapes, etc.) so the backend can
         // burn them in as native PDF annotations (real /Highlight with fill_opacity).
         const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
