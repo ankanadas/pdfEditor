@@ -14,23 +14,9 @@
 import { analyzePage, detectSpan } from './mupdfSpans.js';
 import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName } from './mupdfFontEngine.js';
 
-// ── CP1252 / WinAnsi encoding (simple fonts only encode this set, like the pdf-lib StandardFonts) ──
-const CP1252_HIGH = {
-  0x20AC: 0x80, 0x201A: 0x82, 0x0192: 0x83, 0x201E: 0x84, 0x2026: 0x85, 0x2020: 0x86, 0x2021: 0x87,
-  0x02C6: 0x88, 0x2030: 0x89, 0x0160: 0x8A, 0x2039: 0x8B, 0x0152: 0x8C, 0x017D: 0x8E, 0x2018: 0x91,
-  0x2019: 0x92, 0x201C: 0x93, 0x201D: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97, 0x02DC: 0x98,
-  0x2122: 0x99, 0x0161: 0x9A, 0x203A: 0x9B, 0x0153: 0x9C, 0x017E: 0x9E, 0x0178: 0x9F,
-};
-/** Map one code point to a WinAnsi byte, or 0x3F ('?') if unrepresentable. */
-function winAnsiByte(cp) {
-  if (cp === 0x09) return 0x20;                 // tab → space
-  if (cp >= 0x20 && cp <= 0x7E) return cp;       // ASCII
-  if (cp >= 0xA0 && cp <= 0xFF) return cp;       // Latin-1 upper
-  return CP1252_HIGH[cp] || 0x3F;
-}
 /** Normalise editable-box quirks (nbsp, zero-width, soft-hyphen, control chars) without dropping real
- *  Unicode — a reused embedded font can still draw curly quotes / em-dash / accents (the bundled simple
- *  fallback maps anything outside WinAnsi to '?'). Mirrors edit_ops.py's raw cleaning. */
+ *  Unicode — every font is embedded full-Unicode (Type0), so curly quotes / em-dash / accents / ₹ all
+ *  draw natively. Mirrors edit_ops.py's raw cleaning. */
 function normalizeText(s) {
   return String(s)
     .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')   // nbsp & friends -> space
@@ -38,23 +24,12 @@ function normalizeText(s) {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');  // control chars (keep \t,\n)
 }
 
-// ── byte builder: PDF content streams mix ASCII operators with (possibly high-byte) text strings ──
+// ── byte builder for PDF content streams ──
 class Bytes {
   constructor() { this.chunks = []; this.len = 0; }
   _raw(arr) { this.chunks.push(arr); this.len += arr.length; }
   op(str) { const a = new Uint8Array(str.length); for (let i = 0; i < str.length; i++) a[i] = str.charCodeAt(i) & 0xff; this._raw(a); }
-  /** A PDF literal string `(…)` from already-WinAnsi-sanitised text, escaping ()\ . */
-  textString(sanitized) {
-    const bytes = [0x28];
-    for (const ch of sanitized) {
-      const b = ch.charCodeAt(0);
-      if (b === 0x28 || b === 0x29 || b === 0x5C) bytes.push(0x5C);
-      bytes.push(b);
-    }
-    bytes.push(0x29);
-    this._raw(Uint8Array.from(bytes));
-  }
-  /** A PDF hex string `<…>` of 2-byte glyph ids (for a Type0/Identity reused font). */
+  /** A PDF hex string `<…>` of 2-byte glyph ids (Type0/Identity fonts). */
   glyphString(hex) { this.op('<' + hex + '>'); }
   build() {
     const out = new Uint8Array(this.len);
@@ -118,13 +93,13 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   let _charsets = null;
   const charsets = () => (_charsets || (_charsets = warmCharsets(doc)));
 
-  /** Bundled WinAnsi (simple) substitute — the catch-all that can draw any WinAnsi character. */
+  /** Bundled substitute, embedded full-Unicode (Type0/Identity) — the catch-all. */
   async function bundledOption(family, bold, italic) {
     const key = `${family}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
     if (!simpleCache.has(key)) {
       const mfont = await loadFont(family, bold, italic);
-      const ref = doc.addSimpleFont(mfont, 'Latin');
-      simpleCache.set(key, { kind: 'simple', name: 'WF' + (seq++), ref, mfont, charset: null });
+      const ref = doc.addFont(mfont);
+      simpleCache.set(key, { name: 'WF' + (seq++), ref, mfont, charset: null });
     }
     return simpleCache.get(key);
   }
@@ -161,24 +136,18 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     return opts[opts.length - 1];
   }
 
-  // Per-character draw unit for an option: a 4-hex glyph id for a reused Type0 font, or a WinAnsi byte
-  // for the bundled simple font (anything outside WinAnsi → '?'). Carries the glyph advance (em units).
+  // Per-character draw unit (every font is Type0/Identity): a 4-hex glyph id + the glyph advance.
   function unitFor(opt, cp) {
-    if (opt.kind === 'cid') {
-      let g = 0; try { g = opt.mfont.encodeCharacter(cp) & 0xffff; } catch (_) {}
-      let adv = 0; try { adv = opt.mfont.advanceGlyph(g); } catch (_) {}
-      return { hex: g.toString(16).padStart(4, '0'), adv };
-    }
-    const b = winAnsiByte(cp);
-    let adv = 0; try { adv = opt.mfont.advanceGlyph(opt.mfont.encodeCharacter(b)); } catch (_) {}
-    return { byte: b, adv };
+    let g = 0; try { g = opt.mfont.encodeCharacter(cp) & 0xffff; } catch (_) {}
+    let adv = 0; try { adv = opt.mfont.advanceGlyph(g); } catch (_) {}
+    return { hex: g.toString(16).padStart(4, '0'), adv };
   }
   function measureRun(text, opts, size) {
     let w = 0;
     for (const ch of text) { const cp = ch.codePointAt(0); w += unitFor(pickOption(cp, opts), cp).adv; }
     return w * size;
   }
-  /** Split text into maximal same-font segments, each with its emit string (hex GIDs or WinAnsi bytes). */
+  /** Split text into maximal same-font segments, each with its hex glyph-id string. */
   function segmentByFont(text, opts) {
     const segs = [];
     let cur = null;
@@ -188,10 +157,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       if (!cur || cur.opt !== o) { cur = { opt: o, units: [] }; segs.push(cur); }
       cur.units.push(unitFor(o, cp));
     }
-    for (const s of segs) {
-      if (s.opt.kind === 'cid') s.hex = s.units.map(u => u.hex).join('');
-      else s.text = String.fromCharCode(...s.units.map(u => u.byte));
-    }
+    for (const s of segs) s.hex = s.units.map(u => u.hex).join('');
     return segs;
   }
   const measureSeg = (seg, size) => seg.units.reduce((w, u) => w + u.adv, 0) * size;
@@ -292,16 +258,25 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       const boxUnderline = !!e.underline;
       const rot = +(e.rotation || 0) || 0;
 
+      // Foradian rupee convention: some Indian-bill Type1 fonts put ₹ in the grave-accent slot, so it
+      // extracts/edits as a backtick. On a REPLACE of such an (unreusable, embedded) line, map ` → ₹ so
+      // the symbol survives when redrawn with the now-full-Unicode fallback. Scoped to those fonts only.
+      const graveRupee = !isInsert && sp && (() => {
+        const i = pageFonts.get(stripName(sp.fontName || ''));
+        return i && i.ff && !i.reusable;
+      })();
+      const prep = (t) => { const n = normalizeText(t || ''); return graveRupee ? n.replace(/`/g, '₹') : n; };
+
       // Line model from runs, else the plain text (insert can be multi-line; replace is one line).
       const hasRuns = Array.isArray(e.runs) && e.runs.length;
       const lineModel = hasRuns
         ? e.runs.map(ln => (ln || []).map(r => ({
-            text: normalizeText(r.text || ''), size: r.size || boxSize,
+            text: prep(r.text), size: r.size || boxSize,
             bold: !!r.bold, italic: !!r.italic, underline: !!r.underline || boxUnderline,
             color: parseColor(r.color, null) || defColor })))
         : (isInsert
-            ? normalizeText(e.newText || '').split(/\r\n?|\n/).map(l => [{ text: l, size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }])
-            : [[{ text: normalizeText(String(e.newText || '')).replace(/[\r\n]+/g, ' '), size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }]]);
+            ? prep(e.newText).split(/\r\n?|\n/).map(l => [{ text: l, size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }])
+            : [[{ text: prep(e.newText).replace(/[\r\n]+/g, ' '), size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }]]);
 
       if (!lineModel.some(parts => parts.some(r => r.text))) continue;
 
@@ -347,7 +322,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
             const py = ph - pyTop;
             ops.op('q BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf ' + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
             ops.op(rot ? `${f2(cos)} ${f2(sin)} ${f2(-sin)} ${f2(cos)} ${f2(px)} ${f2(py)} Tm ` : `1 0 0 1 ${f2(px)} ${f2(py)} Tm `);
-            if (seg.opt.kind === 'cid') ops.glyphString(seg.hex); else ops.textString(seg.text);
+            ops.glyphString(seg.hex);
             ops.op(' Tj ET Q\n');
             const w = measureSeg(seg, r.size);
             if (r.underline && !rot) {
@@ -398,6 +373,9 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   // ── Native annotations (highlights, shapes, freehand, tables) ──
   applyAnnotations(mupdf, doc, annotations);
 
+  // Subset every embedded font down to the glyphs actually used (we embed full TTFs for Unicode
+  // coverage), so the output stays small. Best-effort — never fail the save over it.
+  try { doc.subsetFonts(); } catch (_) {}
   return doc.saveToBuffer('compress').asUint8Array().slice();
 }
 
