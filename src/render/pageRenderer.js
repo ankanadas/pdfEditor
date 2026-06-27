@@ -61,6 +61,9 @@ export const PageRendererMethods = {
    */
   async refresh() {
     if (!this.pageViews.length) return;
+    // Large/view-only docs (no edits/overlays) render LAZILY — only the pages on screen, on scroll —
+    // so opening/closing a 500-page file is instant instead of grinding through every page.
+    if (this.largeFileMode) { this._refreshLazy(); return; }
     if (this._refreshing) { this._refreshPending = true; return; }
     this._refreshing = true;
     try {
@@ -87,6 +90,27 @@ export const PageRendererMethods = {
       console.error('Error rendering pages:', error);
     } finally {
       this._refreshing = false;
+    }
+  },
+  /** Lazy bitmap render for large/view-only docs: paint each page only when it scrolls near view. */
+  _refreshLazy() {
+    if (this._lazyIO) { this._lazyIO.disconnect(); this._lazyIO = null; }
+    this.insertOverlays = [];
+    const stage = document.getElementById('stage');
+    const paint = (pv) => {
+      if (pv._paintedVp === pv.viewport) return;     // already painted this exact viewport
+      pv._paintedVp = pv.viewport;
+      pv.page.render({ canvasContext: pv.ctx, viewport: pv.viewport }).promise.catch(() => {});
+    };
+    if (typeof IntersectionObserver === 'function') {
+      const byEl = new Map(this.pageViews.map((pv) => [pv.wrapper, pv]));
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) if (e.isIntersecting) { const pv = byEl.get(e.target); if (pv) paint(pv); }
+      }, { root: stage || null, rootMargin: '900px 0px' });   // render a screen ahead/behind
+      for (const pv of this.pageViews) io.observe(pv.wrapper);
+      this._lazyIO = io;
+    } else {
+      this.pageViews.slice(0, 25).forEach(paint);              // no IO: just the first pages
     }
   },
   // Back-compat: existing call sites use renderCurrentPage() to mean "refresh overlays".

@@ -25,29 +25,10 @@ export const PagesPanelMethods = {
     // SMALL (editable) docs: bake pending rotation into the editor on close — fast for small files,
     // and the editor needs the real /Rotate to edit/save.
     if (!this.largeFileMode && this._hasPendingRot()) { await this._flushPendingRot(); return; }
-    // LARGE docs: NEVER bake on close (a full pdf-lib rebuild of a big file is the slow "Applying
-    // rotation…" spinner). Show the rotation by rendering the pdf.js viewport rotated instead; the
-    // real bake into the file happens only when the user clicks Download.
-    if (this.largeFileMode) {
-      if (!this._largeViewRendered) await this._ensureLargeViewRendered();   // first render
-      else if (this._hasPendingRot()) await this._applyPendingRotToView();   // just re-render rotated pages
-    }
-  },
-
-  /** Re-render only the already-displayed pages whose pending rotation changed (fast, no rebuild). */
-  async _applyPendingRotToView() {
-    if (!this.pageViews || !this.pageViews.length) return;
-    for (const pv of this.pageViews) {
-      const pend = (this._pendingRot && this._pendingRot[pv.pageNum]) || 0;
-      const vp = pend
-        ? pv.page.getViewport({ scale: this.scale, rotation: (pv.page.rotate + pend) % 360 })
-        : pv.page.getViewport({ scale: this.scale });
-      if (pv.viewport.rotation === vp.rotation) continue;   // unchanged — skip
-      pv.viewport = vp;
-      pv.canvas.width = vp.width;
-      pv.canvas.height = vp.height;
-      try { await pv.page.render({ canvasContext: pv.ctx, viewport: vp }).promise; } catch (_) {}
-    }
+    // LARGE docs: NEVER bake on close (a full pdf-lib rebuild is slow). Rebuild the view, which now
+    // renders LAZILY (only on-screen pages), so it's fast and reflects the pending rotation via the
+    // pdf.js viewport. The real bake into the file happens only on Download.
+    if (this.largeFileMode) { this._largeViewRendered = false; await this._ensureLargeViewRendered(); }
   },
 
   /** Build the thumbnail grid + the "insert position" dropdown from the current document. */
