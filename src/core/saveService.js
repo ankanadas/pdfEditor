@@ -3,6 +3,7 @@
 import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFBackendService } from '../services/pdfBackendService.js';
+import { EDIT_LIMIT_BYTES } from './limits.js';
 
 export const SaveServiceMethods = {
   async savePDF() {
@@ -29,8 +30,13 @@ export const SaveServiceMethods = {
     let flattened = false;
     let viaBackend = false;
 
+    // Large files (over the 30 MB edit limit, or opened view-only) NEVER go to the backend — an
+    // upload would bounce off the server's size cap (413). Force the client-side path for them.
+    const forceClientSide = this.largeFileMode || (this.originalFileData &&
+      (this.originalFileData.byteLength || this.originalFileData.length || 0) > EDIT_LIMIT_BYTES);
+
     try {
-      if (await PDFBackendService.checkHealth()) {
+      if (!forceClientSide && await PDFBackendService.checkHealth()) {
         // Serialize Fabric annotations (highlights, shapes, etc.) so the backend can
         // burn them in as native PDF annotations (real /Highlight with fill_opacity).
         const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];

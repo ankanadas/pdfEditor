@@ -11,9 +11,15 @@
 import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { mergePdfBytes } from './mergeCore.js';
+import { downloadBytes } from './util/download.js';
+import {
+  EDIT_LIMIT_BYTES, EDIT_LIMIT_PAGES, deviceCapBytes, deviceCapMb,
+  isEditableOutput, withinDeviceCap, LARGE_FILE_WARNING, DEVICE_CAP_MESSAGE,
+} from './core/limits.js';
 
-const MAX_MERGE_MB = 30;                  // per-file cap, mirrors the editor's limit
-const MAX_MERGE_BYTES = MAX_MERGE_MB * 1024 * 1024;
+// A single input file is only rejected when it can't even be held on this device. The merge
+// *output* size no longer caps merging (it caps only whether the result opens in the editor or
+// downloads) — see updateButtons()/doMerge(). deviceCapBytes() is device-, not viewport-, based.
 
 // --- Analytics: GA-ready, but a safe no-op if no analytics is installed. ----------
 function track(event, detail = {}) {
@@ -57,6 +63,7 @@ function setup() {
     progress: document.getElementById('mergeProgress'),
     progressBar: document.getElementById('mergeProgressBar'),
     go: document.getElementById('mergeGo'),
+    warn: document.getElementById('mergeWarn'),
     cancelBtn: document.getElementById('mergeCancel'),
     confirm: document.getElementById('mergeConfirm'),
     confirmTitle: document.getElementById('mergeConfirmTitle'),
@@ -246,8 +253,8 @@ async function addFiles(fileList) {
       items.push({ id, name: file.name || 'file', size: file.size, error: 'Not a PDF file' });
       continue;
     }
-    if (file.size > MAX_MERGE_BYTES) {
-      items.push({ id, name: file.name, size: file.size, error: `Too large, over ${MAX_MERGE_MB} MB` });
+    if (file.size > deviceCapBytes()) {
+      items.push({ id, name: file.name, size: file.size, error: `Too large to process on this device (over ${deviceCapMb()} MB)` });
       continue;
     }
     const item = { id, name: file.name, size: file.size, loading: true };
@@ -430,9 +437,31 @@ function validItems() {
   return items.filter((i) => i.bytes && !i.error);
 }
 
+// Estimate the merged OUTPUT without actually merging (cheap, runs on every add/remove for the
+// dynamic button morph). Page count is exact (sum of inputs); byte size is the sum of input sizes
+// — a safe upper bound (pdf-lib's merge is usually a touch smaller), so we err toward "Download".
+function mergeOutputEstimate() {
+  const valid = validItems();
+  return {
+    bytes: valid.reduce((n, i) => n + (i.size || 0), 0),
+    pages: valid.reduce((n, i) => n + (i.pageCount || 0), 0),
+    count: valid.length,
+  };
+}
+// 'open'  -> editable result, "Merge & open" hands off to the editor.
+// 'download' -> over the 30 MB / 500-page edit limit (but within the device cap): "Download" only.
+// 'overcap'  -> beyond what this device can process: disabled.
+function mergeMode() {
+  const { bytes, pages } = mergeOutputEstimate();
+  if (!withinDeviceCap(bytes)) return 'overcap';
+  return isEditableOutput(bytes, pages) ? 'open' : 'download';
+}
+
 async function doMerge() {
   const valid = validItems();
   if (merging || valid.length < 1) return;
+  const mode = mergeMode();
+  if (mode === 'overcap') { status(DEVICE_CAP_MESSAGE, 'err'); return; }
 
   merging = true;
   updateButtons();
@@ -447,18 +476,36 @@ async function doMerge() {
       onProgress: (done, total) => showProgress(Math.round((done / total) * 88) + 2),
     });
     showProgress(100);
+    // OOM-safety: a result that somehow ballooned past the device cap downloads/aborts rather
+    // than try to stream a too-big file into the editor.
+    if (!withinDeviceCap(bytes.length)) {
+      track('merge_failed', { error: 'over_device_cap', bytes: bytes.length });
+      status(DEVICE_CAP_MESSAGE, 'err');
+      return;
+    }
     track('merge_completed', { fileCount: valid.length, pageCount: totalPages, bytes: bytes.length });
-    status(`Merged ${valid.length} file${valid.length === 1 ? '' : 's'}. Opening in the editor…`, 'ok');
-    loadIntoEditor(bytes);
-    // The merged document becomes the open document, so reset the list, reopening the
-    // panel then shows only it (auto-included as "Current document"), not the old sources.
-    items = [];
-    currentSig = null;
-    dismissedCurrentSig = null;
-    setTimeout(closeDrawer, 700);
+
+    if (mode === 'download') {
+      // Large result: download the merged PDF directly, never hand off to the editor / backend.
+      downloadBytes(bytes, 'merged.pdf');
+      status('Merged. Editing is disabled for large files — downloaded the combined PDF instead.', 'ok');
+      // Keep the list so the user can adjust the selection and download again.
+    } else {
+      status(`Merged ${valid.length} file${valid.length === 1 ? '' : 's'}. Opening in the editor…`, 'ok');
+      loadIntoEditor(bytes);
+      // The merged document becomes the open document, so reset the list, reopening the
+      // panel then shows only it (auto-included as "Current document"), not the old sources.
+      items = [];
+      currentSig = null;
+      dismissedCurrentSig = null;
+      setTimeout(closeDrawer, 700);
+    }
   } catch (err) {
-    track('merge_failed', { error: String((err && err.message) || err) });
-    status('Sorry, merging failed. One of the files may be corrupted; remove it and try again.', 'err');
+    const msg = String((err && err.message) || err);
+    const oom = /allocation|out of memory|invalid array length|maximum call|range/i.test(msg);
+    track('merge_failed', { error: msg });
+    status(oom ? DEVICE_CAP_MESSAGE
+               : 'Sorry, merging failed. One of the files may be corrupted; remove it and try again.', 'err');
   } finally {
     merging = false;
     updateButtons();
@@ -642,16 +689,47 @@ function updateTotals() {
   }
 }
 
+// Icons kept as inline SVG (no new image assets).
+const MERGE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>';
+const DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>';
+
 function updateButtons() {
   const ready = validItems().length >= 1;   // enabled for one file too; disabled only when empty
-  els.go.disabled = merging || !ready;
-  els.go.title = merging
-    ? 'Merging…'
-    : (ready ? 'Merge the PDFs in order and open the result' : 'Add a PDF to get started');
-  // Keep the icon + label stable across states.
-  els.go.innerHTML = merging
-    ? '<span class="merge-spin" style="border-top-color:#fff;border-color:rgba(255,255,255,.5)"></span> Merging…'
-    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M12 8v8"/><path d="M8 12h8"/></svg> Merge &amp; open';
+  const mode = ready ? mergeMode() : 'open'; // 'open' | 'download' | 'overcap'
+  const over = mode === 'overcap';
+  els.go.disabled = merging || !ready || over;
+  updateMergeWarn(ready ? mode : 'open');
+
+  if (merging) {
+    els.go.innerHTML = '<span class="merge-spin" style="border-top-color:#fff;border-color:rgba(255,255,255,.5)"></span> Merging…';
+    els.go.title = 'Merging…';
+    return;
+  }
+  // Same single button morphs between "Merge & open" (editable) and "Download" (large result).
+  if (mode === 'download') {
+    els.go.innerHTML = `${DOWNLOAD_ICON} Download`;
+    els.go.title = 'Download the merged PDF (too large to open in the editor)';
+  } else {
+    els.go.innerHTML = `${MERGE_ICON} Merge &amp; open`;
+    els.go.title = over ? DEVICE_CAP_MESSAGE
+      : (ready ? 'Merge the PDFs in order and open the result' : 'Add a PDF to get started');
+  }
+}
+
+// In-drawer warning banner that mirrors the button mode.
+function updateMergeWarn(mode) {
+  if (!els.warn) return;
+  if (mode === 'download') {
+    els.warn.textContent = LARGE_FILE_WARNING;
+    els.warn.className = 'merge-warn';
+    els.warn.hidden = false;
+  } else if (mode === 'overcap') {
+    els.warn.textContent = DEVICE_CAP_MESSAGE;
+    els.warn.className = 'merge-warn err';
+    els.warn.hidden = false;
+  } else {
+    els.warn.hidden = true;
+  }
 }
 
 // --- Small helpers ----------------------------------------------------------------
