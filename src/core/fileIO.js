@@ -183,12 +183,13 @@ export const FileIOMethods = {
         this.controller.isLoaded = true;
         this.currentPage = 0;
         this.setMode('view');
-        await this.buildPages();
-        document.getElementById('stage')?.scrollTo({ top: 0 });
         this.enableUiAfterLoad(true);
         this.updateModeIndicator();
-        // The dialog explains the large-file state — no extra status toast (keeps the screen uncluttered).
+        // Show the dialog IMMEDIATELY — the decision is known from the page count, so don't make the
+        // user wait for buildPages() to render every (possibly huge) page first. Render behind it.
         this._openLargeFileDialog();
+        await this.buildPages();
+        document.getElementById('stage')?.scrollTo({ top: 0 });
         return;
       }
 
