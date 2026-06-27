@@ -25,6 +25,9 @@ export const PagesPanelMethods = {
     // Editable docs bake any pending rotation into the editor on close (one rebuild). Large/view-only
     // docs keep it pending — it's baked into the file by the Download button instead.
     if (!this.largeFileMode && this._hasPendingRot()) await this._flushPendingRot();
+    // A large file opened straight into this tool (from the dialog) hasn't rendered its view yet —
+    // render it now so closing the drawer shows the document instead of a blank editor.
+    if (this.largeFileMode && !this._largeViewRendered) await this._ensureLargeViewRendered();
   },
 
   /** Build the thumbnail grid + the "insert position" dropdown from the current document. */

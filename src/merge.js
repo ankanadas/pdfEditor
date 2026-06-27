@@ -166,6 +166,9 @@ function closeDrawer() {
   hideConfirm();
   els.backdrop.classList.remove('open');
   els.openBtn.classList.remove('active');
+  // If a large file was opened straight into Merge (from the large-file dialog), its view-only editor
+  // hasn't been rendered yet — render it on close so the user isn't left looking at a blank editor.
+  try { window.pdfEditorApp && window.pdfEditorApp._ensureLargeViewRendered && window.pdfEditorApp._ensureLargeViewRendered(); } catch (_) {}
 }
 // Close, but first warn if the user added files they haven't merged (those won't load
 // into the editor unless they click Merge first).
