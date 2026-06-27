@@ -46,7 +46,13 @@ export function isEditableOutput(bytes, pageCount) {
 export function overEditLimit(bytes, pageCount) { return !isEditableOutput(bytes, pageCount); }
 export function withinDeviceCap(bytes) { return bytes <= deviceCapBytes(); }
 
-// The standard warning copy shown wherever a large result is downloaded instead of edited.
-export const LARGE_FILE_WARNING =
-  'Editing is disabled for large files (30 MB or more, or over 500 pages). You can download the file instead.';
+// The leading "editing is disabled…" sentence, naming the SPECIFIC limit the document/result crosses.
+// Used identically by the Merge and Rotate/Reorder banners (each appends its own action sentence).
+export function largeFileReasonSentence(bytes, pageCount) {
+  const overSize = bytes > EDIT_LIMIT_BYTES;
+  const overPages = pageCount != null && pageCount > EDIT_LIMIT_PAGES;
+  if (overSize && overPages) return 'Editing is disabled for files larger than 30 MB and having more than 500 pages.';
+  if (overPages) return 'Editing is disabled for files having more than 500 pages.';
+  return 'Editing is disabled for files larger than 30 MB.';
+}
 export const DEVICE_CAP_MESSAGE = 'This file is too large to process on this device.';
