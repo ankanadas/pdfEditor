@@ -37,22 +37,50 @@ export const TextToolbarMethods = {
     on('tt-del', 'click', () => this.deleteActiveText());
     document.getElementById('stage')?.addEventListener('scroll', () => this._positionTextToolbar());
     window.addEventListener('resize', () => this._positionTextToolbar());
-    document.addEventListener('selectionchange', () => { if (this._ttTarget) this._positionTextToolbar(); });
+    document.addEventListener('selectionchange', () => {
+      if (!this._ttTarget) return;
+      // Mobile: do NOT chase the caret/selection — it fires constantly while picking a font or typing and
+      // makes the toolbar jump up/down. The visualViewport listeners keep it placed when the keyboard moves.
+      if (window.matchMedia && window.matchMedia('(max-width: 767px)').matches) return;
+      this._positionTextToolbar();
+    });
+    // Mobile: lock the page scale the instant a finger lands on ANY editable box (existing-text line or
+    // add-text editor), BEFORE the browser focuses it — Safari decides whether to auto-zoom at focus time,
+    // so locking on pointerdown (capture, ahead of focus) is the only reliable moment.
+    document.addEventListener('pointerdown', (e) => {
+      if (e.target && e.target.closest && e.target.closest('.editable-text-box, .insert-editor')) this._setViewportZoom(true);
+    }, true);
     // Mobile: the soft keyboard resizes/shifts the VISUAL viewport without firing window 'resize' or
     // 'scroll'. Track it so the floating toolbar follows the visible area (and stays above the keyboard).
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', () => { if (this._ttTarget) this._positionTextToolbar(); });
       window.visualViewport.addEventListener('scroll', () => { if (this._ttTarget) this._positionTextToolbar(); });
     }
-    // Hide on a click outside both the toolbar and the active text (an open Add-text editor commits
-    // itself via its own outside-mousedown handler; line/overlay just deselect).
+    // Dismiss the toolbar when the user finishes editing. A click/tap OUTSIDE both the toolbar (and its
+    // pop-overs) and the active text deselects (an open Add-text editor commits via its own handler).
+    const isOutside = (target) => {
+      const t = this._ttTarget; if (!t) return false;
+      if (target.closest && (target.closest('#textToolbar') || target.closest('.tt-font-pop,.tt-color-pop,.tt-link-pop'))) return false;
+      const el = t.kind === 'overlay' ? this._overlayElFor(t.edit) : t.el;
+      if (el && (target === el || el.contains(target))) return false;
+      return true;
+    };
+    const dismiss = () => { const t = this._ttTarget; if (!t) return; if (t.kind === 'overlay') this.selectInsert(null); else this.hideTextToolbar(); };
     document.addEventListener('mousedown', (e) => {
       const t = this._ttTarget;
       if (!t || t.kind === 'editor') return;
-      if (e.target.closest && e.target.closest('#textToolbar')) return;
-      const el = t.kind === 'overlay' ? this._overlayElFor(t.edit) : t.el;
-      if (el && (e.target === el || el.contains(e.target))) return;
-      if (t.kind === 'overlay') this.selectInsert(null); else this.hideTextToolbar();
+      if (window.matchMedia && window.matchMedia('(max-width: 767px)').matches) return;   // mobile handled by the touch logic below
+      if (isOutside(e.target)) dismiss();
+    }, true);
+    // Mobile: dismiss on a deliberate TAP outside, but NOT on a scroll/drag — the pinned toolbar must stay
+    // while you scroll yet exit the edit when you tap blank space. Tracking the touch tells tap from scroll.
+    let _ts = null;
+    document.addEventListener('touchstart', (e) => { const p = e.touches[0]; _ts = p ? { x: p.clientX, y: p.clientY, moved: false } : null; }, true);
+    document.addEventListener('touchmove', (e) => { const p = e.touches[0]; if (_ts && p && Math.abs(p.clientX - _ts.x) + Math.abs(p.clientY - _ts.y) > 12) _ts.moved = true; }, true);
+    document.addEventListener('touchend', (e) => {
+      const t = this._ttTarget, ts = _ts; _ts = null;
+      if (!t || t.kind === 'editor' || !ts || ts.moved) return;       // no edit / add-editor (own handler) / a scroll → keep
+      if (isOutside(e.target)) dismiss();
     }, true);
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this._ttTarget && this._ttTarget.kind !== 'editor') this.hideTextToolbar(); });
   },
@@ -102,11 +130,21 @@ export const TextToolbarMethods = {
     custom.querySelector('input').addEventListener('input', (e) => onPick(e.target.value));
 
     btn.addEventListener('mousedown', (e) => e.preventDefault());
-    btn.addEventListener('click', () => { pop.hidden = !pop.hidden; });
-    // Close on a click outside THIS colour control's own wrap.
     const wrap = btn.closest('.tt-color-wrap');
+    btn.addEventListener('click', () => {
+      if (pop.hidden) {
+        if (window.matchMedia && window.matchMedia('(max-width: 767px)').matches) {
+          const ae = document.activeElement; if (ae && ae.blur) ae.blur();   // close keyboard → full grid visible
+          // iOS clamps a position:fixed element to a `-webkit-overflow-scrolling` ancestor (the highlight
+          // action bar), cramming the grid into one row. Re-parent to <body> so it anchors to the viewport.
+          if (pop.parentElement !== document.body) document.body.appendChild(pop);
+        }
+        pop.hidden = false;
+      } else pop.hidden = true;
+    });
+    // Close on a click/tap outside the colour control's wrap AND the popover itself (it may now live in body).
     document.addEventListener('mousedown', (e) => {
-      if (!pop.hidden && (!wrap || !wrap.contains(e.target))) pop.hidden = true;
+      if (!pop.hidden && !pop.contains(e.target) && (!wrap || !wrap.contains(e.target))) pop.hidden = true;
     }, true);
   },
   _setColorSwatch(hex, id = 'tt-color-sw') { const sw = document.getElementById(id); if (sw) sw.style.background = hex; },
@@ -128,6 +166,9 @@ export const TextToolbarMethods = {
       const cur = this._ttStyle().link || '';
       input.value = cur;
       remove.hidden = !cur;                         // only offer Remove when a link exists
+      // Mobile: re-parent to <body> so iOS doesn't clamp this fixed sheet to the toolbar's overflow-scroll
+      // container (which hid it). The URL input still gets focus so the user can type.
+      if (window.matchMedia && window.matchMedia('(max-width: 767px)').matches && pop.parentElement !== document.body) document.body.appendChild(pop);
       pop.hidden = false;
       setTimeout(() => { input.focus(); input.select(); }, 20);
     };
@@ -139,7 +180,7 @@ export const TextToolbarMethods = {
       if (e.key === 'Enter') { e.preventDefault(); commit(this._normalizeUrl(input.value)); }
       else if (e.key === 'Escape') { e.preventDefault(); close(); }
     });
-    document.addEventListener('mousedown', (e) => { if (!pop.hidden && !e.target.closest('.tt-link-wrap')) close(); }, true);
+    document.addEventListener('mousedown', (e) => { if (!pop.hidden && !pop.contains(e.target) && !e.target.closest('.tt-link-wrap')) close(); }, true);
   },
   /** Add a scheme to a bare URL/email so it forms a valid clickable link ('example.com' -> https://…,
    *  'a@b.com' -> mailto:…). Empty stays empty (= remove). */
@@ -179,7 +220,9 @@ export const TextToolbarMethods = {
     this._ttTarget = null;
     const tb = document.getElementById('textToolbar');
     if (tb) { tb.classList.remove('show'); tb.hidden = true; }
-    const lp = document.getElementById('tt-link-pop'); if (lp) lp.hidden = true;
+    // Also close the text toolbar's pop-overs (the colour one may have been re-parented to <body> on mobile,
+    // so it wouldn't hide with the toolbar otherwise — it would linger as an overlay over the next mode).
+    ['tt-link-pop', 'tt-color-pop', 'tt-font-pop'].forEach(id => { const e = document.getElementById(id); if (e) e.hidden = true; });
     this._setViewportZoom(false);                // editing done — restore pinch-zoom of the PDF (mobile)
   },
   /** Style of the active target, used to light up the toolbar buttons. */
@@ -245,33 +288,23 @@ export const TextToolbarMethods = {
   _positionTextToolbar() {
     const t = this._ttTarget, tb = document.getElementById('textToolbar');
     if (!t || !tb || tb.hidden) return;
+    // MOBILE: the toolbar is CSS-PINNED as a fixed bar at the top. Never reposition it and — crucially —
+    // never auto-hide it here when the edited line scrolls out of view: it must STAY put while the user
+    // scrolls. Return BEFORE the isConnected check below (which was hiding it on scroll). Desktop keeps
+    // tracking the element.
+    if (window.matchMedia && window.matchMedia('(max-width: 767px)').matches) {
+      // MOBILE: pin to the TOP of the VISUAL viewport so the bar stays visible when the keyboard scrolls
+      // the page up (a plain position:fixed top:0 ends up ABOVE the visible area on iOS Safari). The
+      // visualViewport 'resize'/'scroll' listeners re-run this so it tracks the keyboard. Never auto-hide.
+      const vv = window.visualViewport;
+      if (vv) { tb.style.top = Math.round(vv.offsetTop) + 'px'; tb.style.left = Math.round(vv.offsetLeft) + 'px'; tb.style.width = Math.round(vv.width) + 'px'; }
+      else { tb.style.top = '0px'; tb.style.left = '0px'; }
+      return;
+    }
     const el = t.kind === 'overlay' ? this._overlayElFor(t.edit) : t.el;
     if (!el || !el.isConnected) { this.hideTextToolbar(); return; }
     const r = el.getBoundingClientRect();
     const tw = tb.offsetWidth || 360, th = tb.offsetHeight || 40;
-    const vv = window.visualViewport;
-    const isMobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
-    if (isMobile && vv) {
-      // MOBILE: anchor to the VISUAL viewport, not the document. When the soft keyboard opens it shrinks
-      // the visual viewport (and shifts it), so a document-anchored toolbar scrolls off-screen. position:
-      // fixed is relative to the layout viewport, so add vv.offset* to land inside the visible band, and
-      // _initTextToolbar re-runs this on vv 'resize'/'scroll'. Keep it above the text when that fits in the
-      // visible area; otherwise dock it just above the keyboard (bottom edge of the visual viewport).
-      const pad = 6;
-      const visTop = vv.offsetTop, visLeft = vv.offsetLeft, visW = vv.width, visH = vv.height;
-      let left = r.left + r.width / 2 - tw / 2;
-      left = Math.max(visLeft + pad, Math.min(left, visLeft + visW - tw - pad));
-      const minTop = visTop + pad, maxTop = visTop + visH - th - pad;
-      let top = r.top - th - 8;                       // preferred: above the text
-      if (top < minTop || top > maxTop) {
-        const below = r.bottom + 8;
-        top = (below >= minTop && below <= maxTop) ? below : maxTop;   // else below, else dock at keyboard
-      }
-      top = Math.max(minTop, Math.min(top, maxTop));
-      tb.style.left = left + 'px';
-      tb.style.top = top + 'px';
-      return;
-    }
     // DESKTOP (unchanged): anchor within the stage, flipping below if it would clip the top.
     const stage = document.getElementById('stage');
     const sr = stage ? stage.getBoundingClientRect() : { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };

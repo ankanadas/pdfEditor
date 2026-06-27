@@ -55,7 +55,11 @@ export const InsertEditorMethods = {
     div.setAttribute('data-placeholder', 'Type here… (Enter for a new line)');
     div.style.left = (edit.x * unit) + 'px';
     div.style.top = (edit.baseline * unit - baseFontPx * 0.9) + 'px';
-    div.style.fontSize = baseFontPx + 'px';                 // base style for un-spanned (typed) text
+    // Base size for un-spanned (typed) text. Typed characters get wrapped in spans at the box default,
+    // so this only affects the empty placeholder — which lets us floor it at 16px on mobile so Safari
+    // can't focus-zoom an empty add-text box (the visible typed text keeps its real per-run size).
+    const _mob = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
+    div.style.fontSize = (_mob ? Math.max(16, baseFontPx) : baseFontPx) + 'px';
     div.style.fontWeight = edit.bold ? 'bold' : 'normal';
     div.style.fontStyle = edit.italic ? 'italic' : 'normal';
     div.style.fontFamily = this._familyCss(edit.fontFamily);   // preview in the chosen face (any catalogue font)
@@ -219,6 +223,10 @@ export const InsertEditorMethods = {
 
     pv.wrapper.appendChild(div);
     grow();
+    // Mobile: lock the page scale BEFORE focusing the editor. Safari decides whether to auto-zoom at
+    // focus time, so the viewport must already be locked — locking it afterwards (in _showTextToolbar)
+    // was too late and the page still zoomed. hideTextToolbar restores pinch-zoom when editing ends.
+    if (this._setViewportZoom) this._setViewportZoom(true);
     div.focus();
     if (!isNew) {
       // Re-opening: drop the caret at the very end of the text (inside the last run) so appended
@@ -251,6 +259,9 @@ export const InsertEditorMethods = {
       if (done) return;
       done = true;
       document.removeEventListener('mousedown', onDocDown, true);
+      document.removeEventListener('touchstart', onTS, true);
+      document.removeEventListener('touchmove', onTM, true);
+      document.removeEventListener('touchend', onTE, true);
       document.body.classList.remove('editing-insert');
       if (this._ttTarget && this._ttTarget.kind === 'editor') this.hideTextToolbar();
       this._activeInsertEditor = null;
@@ -284,14 +295,28 @@ export const InsertEditorMethods = {
 
     // Commit when the user mouses down anywhere that isn't this editor or the Add-text toolbar
     // (so adjusting size/B/I keeps the box open). Esc cancels.
+    const onStyleControl = (tgt) => tgt.closest && tgt.closest('.ctx-text, #textToolbar, .tt-font-pop, .tt-color-pop, .tt-link-pop');
     const onDocDown = (e) => {
       if (done || div.contains(e.target)) return;
-      // Don't commit when the click is on a styling control (top Add bar or the floating toolbar).
-      if (e.target.closest && e.target.closest('.ctx-text, #textToolbar')) return;
+      // Don't commit when the click is on a styling control (Add bar, floating toolbar, or a picker sheet).
+      if (onStyleControl(e.target)) return;
       this._lastInsertCommitAt = Date.now();   // suppress the chain-open on this same canvas click
       finish(true);
     };
     document.addEventListener('mousedown', onDocDown, true);
+    // Mobile: also commit on a deliberate TAP outside — on iOS the keyboard-dismiss can eat the mousedown,
+    // so one tap on blank space wouldn't close the box ("can't exit add mode"). Track touch to tell tap/scroll.
+    const onTS = (e) => { const p = e.touches && e.touches[0]; this._etap = p ? { x: p.clientX, y: p.clientY, moved: false } : null; };
+    const onTM = (e) => { const p = e.touches && e.touches[0]; if (this._etap && p && Math.abs(p.clientX - this._etap.x) + Math.abs(p.clientY - this._etap.y) > 12) this._etap.moved = true; };
+    const onTE = (e) => {
+      const ts = this._etap; this._etap = null;
+      if (done || !ts || ts.moved || div.contains(e.target) || onStyleControl(e.target)) return;
+      this._lastInsertCommitAt = Date.now();
+      finish(true);
+    };
+    document.addEventListener('touchstart', onTS, true);
+    document.addEventListener('touchmove', onTM, true);
+    document.addEventListener('touchend', onTE, true);
 
     // When a pen style is armed (size/B/I set with no selection), insert typed characters in a
     // span of that style so the new text — not the existing text — picks up the change. This is
