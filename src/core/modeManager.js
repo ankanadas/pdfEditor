@@ -110,6 +110,12 @@ export const ModeManagerMethods = {
       this.showStatus('Pick a tool on the left first — Edit, Add, or Sign — then click the page.', 'error');
       return;
     }
+    // Editing is disabled on ROTATED pages: a click maps to the unrotated coordinate space, so an
+    // added edit would save in the wrong place. Block it cleanly (the page still views fine).
+    if (((pv.page && pv.page.rotate) || 0) % 360 !== 0) {
+      this.showStatus('Editing is disabled on rotated pages. Un-rotate the page to edit it.', 'info');
+      return;
+    }
     // Edit mode owns existing text via the per-line boxes; a click that reaches the bare
     // canvas here is blank space, and Edit must NOT add new text there.
     if (this.mode === 'edit') return;

@@ -75,6 +75,10 @@ export class AnnotationManager {
     // Remove any previous canvas for this page (e.g. re-load)
     this._unmountPage(pv.pageNum);
 
+    // Don't mount the annotation layer on ROTATED pages: highlights/shapes are stored in the
+    // unrotated coordinate space and would save in the wrong place. (The page still renders fine.)
+    if (((pv.page && pv.page.rotate) || 0) % 360 !== 0) return;
+
     const wrapper = pv.wrapper;
     const w = pv.canvas.width;   // intrinsic canvas pixels
     const h = pv.canvas.height;
