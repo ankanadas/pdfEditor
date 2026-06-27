@@ -996,9 +996,11 @@
     .merge-clear:hover { background: #fdeced; }
     .merge-progress { height: 7px; border-radius: 999px; background: #eceef5; overflow: hidden; }
     .merge-progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--brand), #19b36b); transition: width .2s ease; }
-    .merge-warn { margin: 2px 0 0; padding: 9px 12px; border-radius: 10px; font-size: 13px; line-height: 1.35;
-                  color: #92480a; background: #fff4e5; border: 1px solid #f6d6a8; font-weight: 600; }
-    .merge-warn.err { color: var(--danger); background: #fdecec; border-color: #f6c2c2; }
+    .merge-warn { margin: 4px 0 0; padding: 12px 14px; border-radius: 11px; font-size: 14.5px;
+                  line-height: 1.45; font-weight: 700; text-align: center; border: 1.5px solid; }
+    /* Editable result -> purple text on light purple. Over the limit / cap -> red on light red. */
+    .merge-warn.purple { color: #5a3fd6; background: #f3f1ff; border-color: #cdc2ff; }
+    .merge-warn.red    { color: #c0291f; background: #fdecec; border-color: #f3b6b1; }
     .merge-warn[hidden] { display: none; }
     .merge-actions { display: flex; gap: 8px; align-items: center; }
     .merge-actions .spacer { flex: 1; }

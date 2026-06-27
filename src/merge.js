@@ -11,10 +11,8 @@
 import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { mergePdfBytes } from './mergeCore.js';
-import { downloadBytes } from './util/download.js';
 import {
-  EDIT_LIMIT_BYTES, EDIT_LIMIT_PAGES, deviceCapBytes, deviceCapMb,
-  isEditableOutput, withinDeviceCap, LARGE_FILE_WARNING, DEVICE_CAP_MESSAGE,
+  deviceCapBytes, deviceCapMb, withinDeviceCap, isEditableOutput, DEVICE_CAP_MESSAGE,
 } from './core/limits.js';
 
 // A single input file is only rejected when it can't even be held on this device. The merge
@@ -173,20 +171,13 @@ function closeDrawer() {
 // Close, but first warn if the user added files they haven't merged (those won't load
 // into the editor unless they click Merge first).
 function requestClose() {
-  if (!merging && hasUnmergedAdded()) {
-    const download = mergeMode() === 'download';   // large result -> the action is Download, not "open"
-    showConfirmDialog({
-      title: 'Discard these files?',
-      message: download
-        ? "You've added files but haven't downloaded the combined PDF yet. Closing will clear them. Close anyway?"
-        : "You've added files but haven't combined them yet. Closing will clear them — click <b>Merge &amp; open</b> first to keep the result. Close anyway?",
-      stayLabel: 'Back to merge',
-      confirmLabel: 'Close anyway',
-      onConfirm: () => { discardAll(); closeDrawer(); },
-    });
-  } else {
-    closeDrawer();
+  // No "discard?" nag. If files were added, closing AUTO-MERGES them into the editor (the merged
+  // result opens there, large ones view-only). Nothing to merge, or over the device cap -> just close.
+  if (!merging && hasUnmergedAdded() && mergeMode() !== 'overcap') {
+    doMerge();
+    return;
   }
+  closeDrawer();
 }
 function hasUnmergedAdded() {
   return items.some((i) => !i.isCurrent && i.bytes && !i.error);
@@ -455,13 +446,11 @@ function mergeOutputEstimate() {
     count: valid.length,
   };
 }
-// 'open'  -> editable result, "Merge & open" hands off to the editor.
-// 'download' -> over the 30 MB / 500-page edit limit (but within the device cap): "Download" only.
-// 'overcap'  -> beyond what this device can process: disabled.
+// 'open'    -> merge and hand the result to the editor (a large result opens there view-only).
+// 'overcap' -> beyond what this device can process: disabled.
 function mergeMode() {
-  const { bytes, pages } = mergeOutputEstimate();
-  if (!withinDeviceCap(bytes)) return 'overcap';
-  return isEditableOutput(bytes, pages) ? 'open' : 'download';
+  const { bytes } = mergeOutputEstimate();
+  return withinDeviceCap(bytes) ? 'open' : 'overcap';
 }
 
 async function doMerge() {
@@ -492,21 +481,16 @@ async function doMerge() {
     }
     track('merge_completed', { fileCount: valid.length, pageCount: totalPages, bytes: bytes.length });
 
-    if (mode === 'download') {
-      // Large result: download the merged PDF directly, never hand off to the editor / backend.
-      downloadBytes(bytes, 'merged.pdf');
-      status('Merged. Editing is disabled for large files — downloaded the combined PDF instead.', 'ok');
-      // Keep the list so the user can adjust the selection and download again.
-    } else {
-      status(`Merged ${valid.length} file${valid.length === 1 ? '' : 's'}. Opening in the editor…`, 'ok');
-      loadIntoEditor(bytes);
-      // The merged document becomes the open document, so reset the list, reopening the
-      // panel then shows only it (auto-included as "Current document"), not the old sources.
-      items = [];
-      currentSig = null;
-      dismissedCurrentSig = null;
-      setTimeout(closeDrawer, 700);
-    }
+    // Always hand the combined result to the editor. A large result opens there view-only (the
+    // editor's large-file flow), so the user always sees what they merged.
+    status(`Merged ${valid.length} file${valid.length === 1 ? '' : 's'}. Opening in the editor…`, 'ok');
+    loadIntoEditor(bytes);
+    // The merged document becomes the open document, so reset the list, reopening the
+    // panel then shows only it (auto-included as "Current document"), not the old sources.
+    items = [];
+    currentSig = null;
+    dismissedCurrentSig = null;
+    setTimeout(closeDrawer, 700);
   } catch (err) {
     const msg = String((err && err.message) || err);
     const oom = /allocation|out of memory|invalid array length|maximum call|range/i.test(msg);
@@ -527,6 +511,9 @@ function loadIntoEditor(bytes) {
   if (!input) return;
   const file = new File([bytes], 'merged.pdf', { type: 'application/pdf' });
   try {
+    // Tell the editor this load came from Merge: if the combined result is large, open it view-only
+    // with an "editing disabled" notice instead of the choose-a-tool dialog (the user just merged).
+    if (window.pdfEditorApp) window.pdfEditorApp._suppressLargeDialog = true;
     const dt = new DataTransfer();
     dt.items.add(file);
     input.files = dt.files;
@@ -702,44 +689,39 @@ const DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor
 
 function updateButtons() {
   const ready = validItems().length >= 1;   // enabled for one file too; disabled only when empty
-  const mode = ready ? mergeMode() : 'open'; // 'open' | 'download' | 'overcap'
-  const over = mode === 'overcap';
+  const over = ready && mergeMode() === 'overcap';
   els.go.disabled = merging || !ready || over;
-  updateMergeWarn(ready ? mode : 'open');
+  updateMergeWarn();
 
   if (merging) {
     els.go.innerHTML = '<span class="merge-spin" style="border-top-color:#fff;border-color:rgba(255,255,255,.5)"></span> Merging…';
     els.go.title = 'Merging…';
     return;
   }
-  // Same single button morphs between "Merge & open" (editable) and "Download" (large result).
-  if (mode === 'download') {
-    els.go.innerHTML = `${DOWNLOAD_ICON} Download`;
-    els.go.title = 'Download the merged PDF (too large to open in the editor)';
-  } else {
-    els.go.innerHTML = `${MERGE_ICON} Merge &amp; open`;
-    els.go.title = over ? DEVICE_CAP_MESSAGE
-      : (ready ? 'Merge the PDFs in order and open the result' : 'Add a PDF to get started');
-  }
+  // Always "Merge & open": the result always goes to the editor (a large one opens there view-only).
+  els.go.innerHTML = `${MERGE_ICON} Merge &amp; open`;
+  els.go.title = over ? DEVICE_CAP_MESSAGE
+    : (ready ? 'Combine the PDFs in order and open the result' : 'Add a PDF to get started');
 }
 
-// In-drawer banner that mirrors the button mode. Only ONE message shows at a time: the neutral
-// "not combined yet" note for an editable result, OR the amber large-file warning for a download.
-function updateMergeWarn(mode) {
-  const big = mode === 'download' || mode === 'overcap';
-  if (els.note) els.note.hidden = big || !items.length;   // hide the blue note when the amber one shows
+// A clear, prominent banner that tells the user what "Merge & open" will do with the current
+// selection: PURPLE when the result is editable, RED when it'll open view-only (over the 30 MB /
+// 500-page edit limit) or can't be processed at all (over the device cap).
+function updateMergeWarn() {
   if (!els.warn) return;
-  if (mode === 'download') {
-    els.warn.textContent = LARGE_FILE_WARNING;
-    els.warn.className = 'merge-warn';
-    els.warn.hidden = false;
-  } else if (mode === 'overcap') {
+  if (!items.length || !validItems().length) { els.warn.hidden = true; return; }
+  const { bytes, pages } = mergeOutputEstimate();
+  if (!withinDeviceCap(bytes)) {
     els.warn.textContent = DEVICE_CAP_MESSAGE;
-    els.warn.className = 'merge-warn err';
-    els.warn.hidden = false;
+    els.warn.className = 'merge-warn red';
+  } else if (!isEditableOutput(bytes, pages)) {
+    els.warn.textContent = 'These files are larger than 30 MB or over 500 pages, so editing is disabled. Click “Merge & open” below to combine them and view the result.';
+    els.warn.className = 'merge-warn red';
   } else {
-    els.warn.hidden = true;
+    els.warn.textContent = 'Click “Merge & open” below to combine these files and open the result in the editor.';
+    els.warn.className = 'merge-warn purple';
   }
+  els.warn.hidden = false;
 }
 
 // --- Small helpers ----------------------------------------------------------------

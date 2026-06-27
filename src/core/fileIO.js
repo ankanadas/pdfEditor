@@ -210,7 +210,16 @@ export const FileIOMethods = {
         this.setMode('view');
         this.enableUiAfterLoad(true);
         this.updateModeIndicator();
-        this._openLargeFileDialog();
+        if (this._suppressLargeDialog) {
+          // Came from Merge: don't show the choose-a-tool dialog AND don't pop an editor toast
+          // (the Merge box already shows the "editing disabled" banner). Just open it view-only.
+          this._suppressLargeDialog = false;
+          this._largeViewRendered = true;
+          await this.buildPages();
+          document.getElementById('stage')?.scrollTo({ top: 0 });
+        } else {
+          this._openLargeFileDialog();
+        }
         return;
       }
 
