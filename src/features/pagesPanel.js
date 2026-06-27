@@ -1,5 +1,6 @@
-// Pages panel — open/close the reorder drawer, render thumbnails, drag-to-reorder, insert-pos
-// options, move/delete pages. Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js.
+// Pages panel — open/close the Rotate/Reorder drawer, render thumbnails, drag-to-reorder, rotate,
+// insert-pos options, move/delete pages. Assembled onto PDFEditorApp.prototype (mixin).
+import { LARGE_FILE_WARNING } from '../core/limits.js';
 
 export const PagesPanelMethods = {
   togglePagesPanel() {
@@ -32,6 +33,7 @@ export const PagesPanelMethods = {
     const count = document.getElementById('pagesCount');
     if (count) count.textContent = `${n} page${n === 1 ? '' : 's'}`;
     this.rebuildInsertPosOptions(n);
+    this._reflectPagesLargeUI();
 
     grid.innerHTML = '';
     const hint = document.createElement('div');
@@ -57,6 +59,22 @@ export const PagesPanelMethods = {
       del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="m7 7 1 13h8l1-13"/></svg>';
       del.addEventListener('click', (e) => { e.stopPropagation(); this.deletePage(i); });
       thumb.appendChild(del);
+
+      const rotL = document.createElement('button');
+      rotL.className = 'page-thumb-rot left';
+      rotL.title = 'Rotate left';
+      rotL.setAttribute('aria-label', `Rotate page ${i + 1} left`);
+      rotL.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"/></svg>';
+      rotL.addEventListener('click', (e) => { e.stopPropagation(); this.rotatePage(i, -1); });
+      thumb.appendChild(rotL);
+
+      const rotR = document.createElement('button');
+      rotR.className = 'page-thumb-rot right';
+      rotR.title = 'Rotate right';
+      rotR.setAttribute('aria-label', `Rotate page ${i + 1} right`);
+      rotR.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0-5 5v0a5 5 0 0 0 5 5h6"/></svg>';
+      rotR.addEventListener('click', (e) => { e.stopPropagation(); this.rotatePage(i, 1); });
+      thumb.appendChild(rotR);
 
       const num = document.createElement('div');
       num.className = 'thumb-num';
@@ -88,6 +106,25 @@ export const PagesPanelMethods = {
       await page.render({ canvasContext: ctx, viewport: vp }).promise;
     } catch (e) {
       console.warn('Thumbnail render failed for page', pageIndex, e);
+    }
+  },
+
+  /**
+   * In large/view-only mode the page tool can't route results back into the editor, so it shows a
+   * warning banner + a Download button (the only way to save the rotated/reordered result). In normal
+   * mode both are hidden. Wired idempotently via onclick.
+   */
+  _reflectPagesLargeUI() {
+    const large = !!this.largeFileMode;
+    const warn = document.getElementById('pagesLargeWarn');
+    const dl = document.getElementById('pagesDownload');
+    if (warn) {
+      warn.textContent = large ? LARGE_FILE_WARNING : '';
+      warn.hidden = !large;
+    }
+    if (dl) {
+      dl.hidden = !large;
+      dl.onclick = () => this.downloadCurrentPdf();
     }
   },
 
@@ -173,6 +210,26 @@ export const PagesPanelMethods = {
     }
     if (insertBefore >= n) order.push({ src: from });   // moved to the very end
     this.commitPageOrder(order, 'Pages reordered.', 'Reordering pages…');
+  },
+
+  /**
+   * Rotate one page in place. dir = +1 (right / +90°) or -1 (left / −90°). Lossless: applyPageOrder
+   * bakes it as PDF /Rotate combined with the page's existing rotation. Committed immediately through
+   * the same path reorder/delete use (so it persists across later reorder/delete/insert and reaches
+   * the saved/downloaded output); a CSS transform on the thumbnail gives instant feedback meanwhile.
+   */
+  rotatePage(index, dir) {
+    const n = this.pdfJsDoc.numPages;
+    const delta = dir > 0 ? 90 : 270;        // right = +90; left = −90 ≡ +270
+    // Instant visual cue on this thumbnail (the commit re-render replaces it with the baked rotation).
+    const cv = document.querySelector(`#pagesGrid .page-thumb[data-index="${index}"] .thumb-canvas`);
+    if (cv) {
+      const cur = /rotate\((-?\d+)deg\)/.exec(cv.style.transform);
+      cv.style.transform = `rotate(${((cur ? +cur[1] : 0) + delta) % 360}deg)`;
+    }
+    const order = [];
+    for (let i = 0; i < n; i++) order.push(i === index ? { src: i, rot: delta } : { src: i });
+    this.commitPageOrder(order, `Page ${index + 1} rotated ${dir > 0 ? 'right' : 'left'}.`, 'Rotating page…');
   },
 
   /** Remove a page (never the last remaining one). */

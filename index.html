@@ -775,6 +775,17 @@
     }
     .page-thumb-del svg { width: 13px; height: 13px; }
     .page-thumb:hover .page-thumb-del { display: grid; }
+    /* Per-page rotate handles, styled like the delete handle but in the bottom corners. */
+    .page-thumb-rot {
+      position: absolute; bottom: -8px; width: 24px; height: 24px; border-radius: 50%;
+      border: 2px solid #fff; background: var(--brand, #6c4cf0); color: #fff; cursor: pointer; padding: 0;
+      display: none; place-items: center; box-shadow: 0 2px 6px rgba(0, 0, 0, .2); z-index: 2;
+    }
+    .page-thumb-rot.left { left: -8px; }
+    .page-thumb-rot.right { right: -8px; }
+    .page-thumb-rot svg { width: 13px; height: 13px; }
+    .page-thumb:hover .page-thumb-rot { display: grid; }
+    .page-thumb .thumb-canvas { transition: transform .15s ease; }   /* instant rotate preview */
     .pages-foot {
       flex: 0 0 auto; border-top: 1px solid var(--line); padding: 12px 20px;
       display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -1329,7 +1340,7 @@
 
     <!-- Right tool rail: document-level tools. Reorder (top); Merge. (Moved inside .tool-dock.) -->
     <aside class="rightbar" aria-label="Document tools">
-      <button class="tool" id="pagesPanelBtn" disabled title="Reorder pages: drag to reorder, delete, or insert blank pages">
+      <button class="tool" id="pagesPanelBtn" disabled title="Rotate/Reorder: rotate, drag to reorder, delete, or insert blank pages">
         <img class="tool-ico" src="/assets/fun-ui/reorder.png" alt="" aria-hidden="true">
         Reorder
       </button>
@@ -1718,8 +1729,8 @@
     <aside class="pages-drawer" id="pagesDrawer" role="dialog" aria-label="Manage pages">
       <div class="pages-head">
         <span class="pages-heading">
-          <span class="pages-title">Reorder pages</span>
-          <span class="pages-subtitle">Drag to reorder · hover a page to delete</span>
+          <span class="pages-title">Rotate/Reorder</span>
+          <span class="pages-subtitle">Drag to reorder · rotate, delete, or insert pages</span>
         </span>
         <span class="count" id="pagesCount"></span>
         <span class="spacer"></span>
@@ -1729,6 +1740,7 @@
       </div>
       <div class="pages-grid" id="pagesGrid"></div>
       <div class="pages-foot">
+        <div class="merge-warn" id="pagesLargeWarn" role="status" hidden></div>
         <div class="row">
           <label for="insertPos">Insert at</label>
           <select id="insertPos" class="field"></select>
@@ -1737,6 +1749,10 @@
         <button class="btn primary" id="insertBlankBtn" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
           Insert blank page
+        </button>
+        <button class="btn primary" id="pagesDownload" type="button" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          Download
         </button>
       </div>
     </aside>
@@ -1855,7 +1871,7 @@
         { sel: '#eraseModeBtn',      title: 'Erase',         desc: 'Drag a box over old content, like a stale signature, to white it out.' },
         { sel: '#stampModeBtn',      title: 'Stamp',         desc: 'Drop a mark such as Approved, Rejected, Final, Draft or Copy.' },
         { sel: '#clearSignatureBtn', title: 'Discard',       desc: 'Remove all your unsaved changes at once. You can always Undo afterwards.' },
-        { sel: '#pagesPanelBtn',     title: 'Reorder pages', desc: 'Open the page manager to drag, delete or insert blank pages.' },
+        { sel: '#pagesPanelBtn',     title: 'Rotate/Reorder', desc: 'Open the page manager to rotate, drag, delete or insert blank pages.' },
         { sel: '#mergeBtn',          title: 'Merge PDFs',    desc: 'Combine several PDFs into a single document, in any order you like.' }
       ];
 
