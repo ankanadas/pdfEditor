@@ -9,6 +9,8 @@
 // Resolved by a webpack alias to node_modules/mupdf/dist/mupdf-wasm.wasm (the package's exports map
 // hides the .wasm subpath); emitted as a content-hashed asset whose URL we fetch below.
 import wasmUrl from 'mupdf-wasm-binary';
+import { applyEdits } from './mupdfEdit.js';
+import { loadEditFont } from './mupdfFonts.js';
 
 let _mupdfPromise = null;
 async function getMupdf() {
@@ -29,6 +31,25 @@ async function getMupdf() {
  * the WASM equivalent of the backend `/decrypt` (PyMuPDF authenticate + tobytes(ENCRYPT_NONE)).
  * Mirrors PDFBackendService.decryptPDF's return shape so it's a drop-in fallback.
  */
+/**
+ * Apply text edits + Fabric annotations to a PDF entirely in the browser (the WASM equivalent of the
+ * backend /edit-pdf). Throws if it can't do the edit set faithfully so the caller falls through to the
+ * pdf-lib tier. Returns a standalone Uint8Array of the edited PDF.
+ */
+async function edit(bytes, edits, annotations) {
+  const mupdf = await getMupdf();
+  const doc = mupdf.Document.openDocument(new Uint8Array(bytes), 'application/pdf');
+  try {
+    if (!(doc instanceof mupdf.PDFDocument)) throw new Error('not a PDF');
+    const loadFont = (family, bold, italic) => loadEditFont(mupdf, family, bold, italic, self.location.origin);
+    // MUST await: applyEdits is async (font fetch), so returning the bare promise would let the
+    // `finally` destroy the doc mid-operation. await keeps it alive until the work completes.
+    return await applyEdits(mupdf, doc, { edits, annotations }, loadFont);
+  } finally {
+    try { doc.destroy(); } catch (_) {}
+  }
+}
+
 async function decrypt(bytes, password) {
   const mupdf = await getMupdf();
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), 'application/pdf');
@@ -49,7 +70,7 @@ async function decrypt(bytes, password) {
 }
 
 self.onmessage = async (e) => {
-  const { id, type, bytes, password } = e.data || {};
+  const { id, type, bytes, password, edits, annotations } = e.data || {};
   try {
     if (type === 'ping') {
       await getMupdf();
@@ -60,6 +81,11 @@ self.onmessage = async (e) => {
       const res = await decrypt(bytes, password);
       const transfer = res.bytes ? [res.bytes.buffer] : [];
       self.postMessage({ id, ok: true, result: res }, transfer);
+      return;
+    }
+    if (type === 'edit') {
+      const out = await edit(bytes, edits, annotations);
+      self.postMessage({ id, ok: true, result: out }, [out.buffer]);
       return;
     }
     self.postMessage({ id, ok: false, error: `unknown message type: ${type}` });

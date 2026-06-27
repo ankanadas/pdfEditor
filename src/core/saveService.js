@@ -3,6 +3,7 @@
 import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFBackendService } from '../services/pdfBackendService.js';
+import { MupdfService } from '../services/mupdfService.js';
 import { EDIT_LIMIT_BYTES } from './limits.js';
 
 export const SaveServiceMethods = {
@@ -33,8 +34,11 @@ export const SaveServiceMethods = {
     // guarded so a failure cleanly tries the next; a real "Failed to save" is shown only
     // when every path fails and no file is produced.
     //  1) PyMuPDF backend  - truly removes replaced text (clean for copy/paste & ATS).
-    //  2) pdf-lib (client) - covers the original and redraws (works offline / static host).
-    //  3) Flatten to image - last resort for PDFs pdf-lib can't traverse (odd page trees,
+    //  2) mupdf-wasm (client) - same engine in the browser; redaction true-removal, no server. Only
+    //     runs when the backend is unavailable, and DECLINES (falls through) on edits it can't yet do
+    //     faithfully, so it never regresses the pdf-lib result.
+    //  3) pdf-lib (client) - covers the original and redraws (works offline / static host).
+    //  4) Flatten to image - last resort for PDFs pdf-lib can't traverse (odd page trees,
     //     encryption, etc.). This is what handles "Pages tree contains circular reference".
     let editedPdfBytes = null;
     let flattened = false;
@@ -54,6 +58,15 @@ export const SaveServiceMethods = {
         viaBackend = true;
       }
     } catch (e) { console.warn('Backend save failed, trying client-side:', e); }
+
+    // 2) mupdf-wasm tier — only when the backend didn't produce bytes (down/unhealthy) and this isn't a
+    //    forced-client large file. Rejects when it can't do the edit set faithfully → falls to pdf-lib.
+    if (!editedPdfBytes && !forceClientSide && MupdfService.isSupported()) {
+      try {
+        const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
+        editedPdfBytes = await MupdfService.editPDF(this.originalFileData, this.edits, fabricAnnotations);
+      } catch (e) { console.warn('WASM save unavailable/declined, trying pdf-lib:', e); }
+    }
 
     if (!editedPdfBytes) {
       try {

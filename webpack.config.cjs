@@ -63,6 +63,9 @@ module.exports = {
     static: [
       { directory: path.join(__dirname, 'dist') },
       { directory: __dirname },
+      // The WASM edit tier fetches bundled fonts from /assets/edit-fonts/ (copy:static ships them to
+      // dist for prod); serve them straight from backend/fonts in dev so the path matches.
+      { directory: path.join(__dirname, 'backend/fonts'), publicPath: '/assets/edit-fonts' },
     ],
     // Clean URLs in dev: /about -> /about.html, etc. (mirrors the Netlify _redirects).
     // Requests that contain a dot, like /about.html or /favicon.svg, are served
