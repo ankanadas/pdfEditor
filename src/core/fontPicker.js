@@ -76,8 +76,20 @@ export const FontPickerMethods = {
 
     const close = () => { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
     const open = () => {
+      const isMobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
+      if (isMobile) {
+        // Mobile: blur the editor so the keyboard CLOSES — the full-screen font sheet then shows the whole
+        // list. Do NOT auto-focus the search box (focusing an input inside a fixed popover makes iOS
+        // scroll-to-input and clip the sheet). The user can tap the search field to filter.
+        const ae = document.activeElement; if (ae && ae.blur && ae !== search) ae.blur();
+        // iOS clamps a position:fixed element to its overflow-scrolling ancestor — the text toolbar is now a
+        // horizontal scroll row, so the font list rendered as a thin clipped strip (or not at all). Re-parent
+        // to <body> so it anchors to the viewport and shows the full list.
+        if (pop.parentElement !== document.body) document.body.appendChild(pop);
+      }
       pop.hidden = false; btn.setAttribute('aria-expanded', 'true');
-      search.value = ''; this._renderFontList(''); setTimeout(() => search.focus(), 20);
+      search.value = ''; this._renderFontList('');
+      if (!isMobile) setTimeout(() => search.focus(), 20);
     };
     btn.addEventListener('click', (e) => { e.stopPropagation(); pop.hidden ? open() : close(); });
     search.addEventListener('input', () => this._renderFontList(search.value));
@@ -102,7 +114,7 @@ export const FontPickerMethods = {
       opts.forEach(o => o.classList.remove('active'));
       if (opts[i]) { opts[i].classList.add('active'); opts[i].scrollIntoView({ block: 'nearest' }); }
     });
-    document.addEventListener('click', (e) => { if (!pop.hidden && !e.target.closest('#tt-fontpick')) close(); });
+    document.addEventListener('click', (e) => { if (!pop.hidden && !pop.contains(e.target) && !e.target.closest('#tt-fontpick')) close(); });
     this.__fontPickerEls = { btn, pop, search, list, empty };
   },
   _renderFontList(filter) {
