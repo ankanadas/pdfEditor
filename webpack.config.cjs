@@ -1,4 +1,5 @@
 const path = require('path');
+const webpack = require('webpack');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 
 module.exports = {
@@ -19,9 +20,36 @@ module.exports = {
           loader: 'babel-loader',
         },
       },
+      {
+        // mupdf-wasm binary: emit as a content-hashed standalone asset. The worker fetches this URL
+        // and hands the bytes to mupdf via `wasmBinary` (see src/services/mupdfWorker.js), so the
+        // engine never has to guess its own path inside the bundle.
+        test: /mupdf-wasm\.wasm$/,
+        type: 'asset/resource',
+        generator: { filename: 'mupdf-wasm.[contenthash][ext]' },
+      },
     ],
   },
+  // mupdf.js / mupdf-wasm.js carry node-only branches (await import('node:fs') / 'module') guarded by
+  // a runtime platform check (process.versions.node). They never run in the browser; alias the bare
+  // 'module' specifier to empty and (below) IgnorePlugin drops the `node:` scheme imports so webpack
+  // doesn't try to bundle node core into the web/worker target.
+  resolve: {
+    extensions: ['.js'],
+    fallback: { fs: false, path: false, url: false, crypto: false, module: false },
+    alias: {
+      module: false,
+      // The mupdf package's `exports` map doesn't expose the .wasm subpath, so deep-importing it is
+      // blocked. Alias a virtual name straight to the file so the asset/resource rule can hash + emit it.
+      'mupdf-wasm-binary': path.resolve(__dirname, 'node_modules/mupdf/dist/mupdf-wasm.wasm'),
+    },
+  },
+  // mupdf.js uses top-level await to initialise the WASM module.
+  experiments: { topLevelAwait: true },
   plugins: [
+    // Drop mupdf's node-only `await import("node:fs")` (guarded, never reached in the browser) so the
+    // web/worker build doesn't choke on the unhandled `node:` scheme.
+    new webpack.IgnorePlugin({ resourceRegExp: /^node:/ }),
     new HtmlWebpackPlugin({
       template: './index.html',
       filename: 'index.html',
@@ -50,8 +78,5 @@ module.exports = {
     compress: true,
     port: 9000,
     open: true,
-  },
-  resolve: {
-    extensions: ['.js'],
   },
 };
