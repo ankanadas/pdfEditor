@@ -12,6 +12,7 @@
 // Font loading is injected (`loadFont(family,bold,italic) → Promise<mupdf.Font>`) so this module is
 // engine-pure and testable in Node — the worker supplies a fetch-based loader (see mupdfFonts.js).
 import { analyzePage, detectSpan } from './mupdfSpans.js';
+import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName } from './mupdfFontEngine.js';
 
 // ── CP1252 / WinAnsi encoding (simple fonts only encode this set, like the pdf-lib StandardFonts) ──
 const CP1252_HIGH = {
@@ -27,11 +28,14 @@ function winAnsiByte(cp) {
   if (cp >= 0xA0 && cp <= 0xFF) return cp;       // Latin-1 upper
   return CP1252_HIGH[cp] || 0x3F;
 }
-/** Sanitise to a string of only WinAnsi-encodable chars (matches what we actually draw + measure). */
-function sanitizeWinAnsi(s) {
-  let out = '';
-  for (const ch of String(s)) out += String.fromCharCode(winAnsiByte(ch.codePointAt(0)));
-  return out;
+/** Normalise editable-box quirks (nbsp, zero-width, soft-hyphen, control chars) without dropping real
+ *  Unicode — a reused embedded font can still draw curly quotes / em-dash / accents (the bundled simple
+ *  fallback maps anything outside WinAnsi to '?'). Mirrors edit_ops.py's raw cleaning. */
+function normalizeText(s) {
+  return String(s)
+    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')   // nbsp & friends -> space
+    .replace(/[\u200b\u200c\u200d\u2060\ufeff\u00ad]/g, '')           // zero-width / soft hyphen
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');  // control chars (keep \t,\n)
 }
 
 // ── byte builder: PDF content streams mix ASCII operators with (possibly high-byte) text strings ──
@@ -50,6 +54,8 @@ class Bytes {
     bytes.push(0x29);
     this._raw(Uint8Array.from(bytes));
   }
+  /** A PDF hex string `<…>` of 2-byte glyph ids (for a Type0/Identity reused font). */
+  glyphString(hex) { this.op('<' + hex + '>'); }
   build() {
     const out = new Uint8Array(this.len);
     let o = 0;
@@ -60,15 +66,6 @@ class Bytes {
 }
 
 const f2 = (n) => (Math.round(n * 1000) / 1000).toString();   // compact fixed number for ops
-
-/** Width of a WinAnsi-sanitised string at `size`, in points, via the font's own advances. */
-function measure(font, sanitized, size) {
-  let w = 0;
-  for (const ch of sanitized) {
-    try { w += font.advanceGlyph(font.encodeCharacter(ch.charCodeAt(0))); } catch (_) {}
-  }
-  return w * size;
-}
 
 // ── colour helpers ──
 function parseColor(str, fallback) {
@@ -108,18 +105,94 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     }
   }
 
-  // Embedded simple fonts, deduped per (family,bold,italic) across the whole doc.
-  const embedded = new Map();   // key -> { name, ref, font }
+  // ── Font options ──────────────────────────────────────────────────────────────────────────────
+  // Each option = { kind:'simple'|'cid', name, ref, mfont, charset }. Per character we pick the
+  // document's OWN embedded font (real outlines) when it drew that character, else a bundled
+  // metric-compatible substitute (the catch-all, charset:null). Mirrors fonts.py _resolve_fonts/_pick_font.
   let seq = 0;
-  async function fontFor(family, bold, italic) {
+  const simpleCache = new Map();   // 'family|b|i'   -> {kind:'simple',name,ref,mfont,charset:null}
+  const cidCache = new Map();      // strippedName   -> {kind:'cid',...} | null  (per-doc, reused across pages)
+  let _charsets = null;
+  const charsets = () => (_charsets || (_charsets = warmCharsets(doc)));
+
+  /** Bundled WinAnsi (simple) substitute — the catch-all that can draw any WinAnsi character. */
+  async function bundledOption(family, bold, italic) {
     const key = `${family}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
-    if (!embedded.has(key)) {
-      const font = await loadFont(family, bold, italic);
-      const ref = doc.addSimpleFont(font, 'Latin');
-      embedded.set(key, { name: 'WF' + (seq++), ref, font });
+    if (!simpleCache.has(key)) {
+      const mfont = await loadFont(family, bold, italic);
+      const ref = doc.addSimpleFont(mfont, 'Latin');
+      simpleCache.set(key, { kind: 'simple', name: 'WF' + (seq++), ref, mfont, charset: null });
     }
-    return embedded.get(key);
+    return simpleCache.get(key);
   }
+
+  /** Reuse the original line's OWN embedded TrueType (real outlines) — Type0/Identity, drawn by GID. */
+  function reusedOption(span, pageFonts) {
+    if (!span || !span.fontName) return null;
+    const key = stripName(span.fontName);
+    if (cidCache.has(key)) return cidCache.get(key);
+    let opt = null;
+    const info = pageFonts.get(key);
+    if (info && info.reusable && info.ff) {
+      const bytes = extractFontBytes(info.ff);
+      if (bytes) {
+        try {
+          const mfont = new mupdf.Font(key, bytes);
+          const ref = doc.addFont(mfont);
+          opt = { kind: 'cid', name: 'RF' + (seq++), ref, mfont, charset: charsets().get(key) || new Set() };
+        } catch (_) { opt = null; }
+      }
+    }
+    cidCache.set(key, opt);
+    return opt;
+  }
+
+  /** Pick the option to draw one code point with (reused-embedded if it drew it, else catch-all). */
+  function pickOption(cp, opts) {
+    if (cp === 0x20) { for (const o of opts) if (o.charset === null) return o; return opts[opts.length - 1]; }
+    const ch = String.fromCodePoint(cp);
+    for (const o of opts) {
+      if (o.charset === null) return o;                                   // catch-all (always last)
+      if (o.charset.has(ch)) { try { if (o.mfont.encodeCharacter(cp) !== 0) return o; } catch (_) {} }
+    }
+    return opts[opts.length - 1];
+  }
+
+  // Per-character draw unit for an option: a 4-hex glyph id for a reused Type0 font, or a WinAnsi byte
+  // for the bundled simple font (anything outside WinAnsi → '?'). Carries the glyph advance (em units).
+  function unitFor(opt, cp) {
+    if (opt.kind === 'cid') {
+      let g = 0; try { g = opt.mfont.encodeCharacter(cp) & 0xffff; } catch (_) {}
+      let adv = 0; try { adv = opt.mfont.advanceGlyph(g); } catch (_) {}
+      return { hex: g.toString(16).padStart(4, '0'), adv };
+    }
+    const b = winAnsiByte(cp);
+    let adv = 0; try { adv = opt.mfont.advanceGlyph(opt.mfont.encodeCharacter(b)); } catch (_) {}
+    return { byte: b, adv };
+  }
+  function measureRun(text, opts, size) {
+    let w = 0;
+    for (const ch of text) { const cp = ch.codePointAt(0); w += unitFor(pickOption(cp, opts), cp).adv; }
+    return w * size;
+  }
+  /** Split text into maximal same-font segments, each with its emit string (hex GIDs or WinAnsi bytes). */
+  function segmentByFont(text, opts) {
+    const segs = [];
+    let cur = null;
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      const o = pickOption(cp, opts);
+      if (!cur || cur.opt !== o) { cur = { opt: o, units: [] }; segs.push(cur); }
+      cur.units.push(unitFor(o, cp));
+    }
+    for (const s of segs) {
+      if (s.opt.kind === 'cid') s.hex = s.units.map(u => u.hex).join('');
+      else s.text = String.fromCharCode(...s.units.map(u => u.byte));
+    }
+    return segs;
+  }
+  const measureSeg = (seg, size) => seg.units.reduce((w, u) => w + u.adv, 0) * size;
+
   const familyOf = (e) => (e.fontFamily === 'serif' || (e.fontFamily == null && e.serif)) ? 'serif'
     : e.fontFamily === 'mono' ? 'mono' : 'sans';
 
@@ -136,6 +209,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     // 0) Detect each replace edit's ORIGINAL span (size/colour/family/weight) BEFORE redaction removes
     //    it, so the replacement matches the original instead of the frontend's geometric guesses.
     const analysis = analyzePage(page);
+    const pageFonts = enumeratePageFonts(page);   // for embedded-font reuse lookup
     for (const e of pageEdits) {
       if (e.redact === false) continue;
       e._span = detectSpan(analysis, +(e.x || 0), +(e.baseline || 0));
@@ -209,23 +283,30 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       const hasRuns = Array.isArray(e.runs) && e.runs.length;
       const lineModel = hasRuns
         ? e.runs.map(ln => (ln || []).map(r => ({
-            text: sanitizeWinAnsi(r.text || ''), size: r.size || boxSize,
+            text: normalizeText(r.text || ''), size: r.size || boxSize,
             bold: !!r.bold, italic: !!r.italic, underline: !!r.underline || boxUnderline,
             color: parseColor(r.color, null) || defColor })))
         : (isInsert
-            ? String(e.newText || '').split(/\r\n?|\n/).map(l => [{ text: sanitizeWinAnsi(l), size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }])
-            : [[{ text: sanitizeWinAnsi(String(e.newText || '').replace(/[\r\n]+/g, ' ')), size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }]]);
+            ? normalizeText(e.newText || '').split(/\r\n?|\n/).map(l => [{ text: l, size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }])
+            : [[{ text: normalizeText(String(e.newText || '')).replace(/[\r\n]+/g, ' '), size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }]]);
 
       if (!lineModel.some(parts => parts.some(r => r.text))) continue;
 
-      // Resolve the font for every run up front (async), keyed by variant.
-      for (const parts of lineModel) for (const r of parts) r._f = await fontFor(family, r.bold, r.italic);
+      // Reuse the original line's OWN embedded font (real outlines) for the characters it drew; the
+      // bundled substitute is the per-run catch-all. Reuse only when the run's weight/slant matches the
+      // detected original (so an italic run on a non-italic original still gets a proper italic).
+      const reused = (!isInsert && sp) ? reusedOption(sp, pageFonts) : null;
+      for (const parts of lineModel) for (const r of parts) {
+        const bundled = await bundledOption(family, r.bold, r.italic);
+        const useReused = reused && sp && r.bold === sp.bold && r.italic === sp.italic;
+        r._opts = useReused ? [reused, bundled] : [bundled];
+      }
 
       // Overflow: if the widest line exceeds the space to the right margin, scale every run down.
       const avail = pw - x - 4;
       if (avail > 8) {
         let widest = 0;
-        for (const parts of lineModel) widest = Math.max(widest, parts.reduce((w, r) => w + measure(r._f, r.text, r.size), 0));
+        for (const parts of lineModel) widest = Math.max(widest, parts.reduce((w, r) => w + measureRun(r.text, r._opts, r.size), 0));
         if (widest > avail) {
           const s = Math.max(0.05, avail / widest);
           for (const parts of lineModel) for (const r of parts) r.size = Math.max(4, r.size * s);
@@ -245,24 +326,23 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         let adv = 0;
         for (const r of parts) {
           if (!r.text) continue;
-          const px = lx + adv * cos, pyTop = lyTop + adv * sin;
-          const py = ph - pyTop;
-          const fEntry = r._f;
-          const fam = embedded.get(`${family}|${r.bold ? 1 : 0}|${r.italic ? 1 : 0}`);
-          usedFonts.add(fam);
-          ops.op('q BT /' + fam.name + ' ' + f2(r.size) + ' Tf ' + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
-          if (rot) ops.op(`${f2(cos)} ${f2(sin)} ${f2(-sin)} ${f2(cos)} ${f2(px)} ${f2(py)} Tm `);
-          else ops.op(`1 0 0 1 ${f2(px)} ${f2(py)} Tm `);
-          ops.textString(r.text);
-          ops.op(' Tj ET Q\n');
-          const w = measure(fEntry, r.text, r.size);
-          if (r.underline) {
-            const ut = Math.max(0.4, r.size * 0.06);
-            const uy = py - r.size * 0.12;
-            // underline drawn in the run's own (unrotated) frame for simplicity
-            if (!rot) ops.op(`q ${f2(r.color[0])} ${f2(r.color[1])} ${f2(r.color[2])} rg ${f2(px)} ${f2(uy - ut)} ${f2(w)} ${f2(ut)} re f Q\n`);
+          // Split the run into maximal same-font segments (per-character pick), drawing each with the
+          // right encoding: a hex glyph-id string for a reused Type0 font, a WinAnsi literal otherwise.
+          for (const seg of segmentByFont(r.text, r._opts)) {
+            usedFonts.add(seg.opt);
+            const px = lx + adv * cos, pyTop = lyTop + adv * sin;
+            const py = ph - pyTop;
+            ops.op('q BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf ' + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
+            ops.op(rot ? `${f2(cos)} ${f2(sin)} ${f2(-sin)} ${f2(cos)} ${f2(px)} ${f2(py)} Tm ` : `1 0 0 1 ${f2(px)} ${f2(py)} Tm `);
+            if (seg.opt.kind === 'cid') ops.glyphString(seg.hex); else ops.textString(seg.text);
+            ops.op(' Tj ET Q\n');
+            const w = measureSeg(seg, r.size);
+            if (r.underline && !rot) {
+              const ut = Math.max(0.4, r.size * 0.06), uy = py - r.size * 0.12;
+              ops.op(`q ${f2(r.color[0])} ${f2(r.color[1])} ${f2(r.color[2])} rg ${f2(px)} ${f2(uy - ut)} ${f2(w)} ${f2(ut)} re f Q\n`);
+            }
+            adv += w;
           }
-          adv += w;
         }
       }
     }
