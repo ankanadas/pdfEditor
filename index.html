@@ -1778,6 +1778,9 @@
       <div class="merge-body">
         <input id="mergeFileInput" type="file" accept="application/pdf,.pdf" multiple hidden />
 
+        <!-- Always-on banner at the TOP of the merge box: purple (editable) / red (over the limit). -->
+        <div class="merge-warn" id="mergeWarn" role="status" hidden></div>
+
         <p class="merge-status" id="mergeStatus" role="status" aria-live="polite"></p>
 
         <div class="merge-dropzone" id="mergeDrop">
@@ -1794,7 +1797,6 @@
         <div class="merge-progress" id="mergeProgress" hidden aria-hidden="true">
           <div class="merge-progress-bar" id="mergeProgressBar"></div>
         </div>
-        <div class="merge-warn" id="mergeWarn" role="status" hidden></div>
         <div class="merge-actions">
           <button class="btn" id="mergeCancel" type="button">Cancel</button>
           <span class="spacer"></span>
