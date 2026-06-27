@@ -481,9 +481,8 @@ async function doMerge() {
     }
     track('merge_completed', { fileCount: valid.length, pageCount: totalPages, bytes: bytes.length });
 
-    // Always hand the combined result to the editor. A large result opens there view-only (the
-    // editor's large-file flow), so the user always sees what they merged.
-    status(`Merged ${valid.length} file${valid.length === 1 ? '' : 's'}. Opening in the editor…`, 'ok');
+    // Always hand the combined result to the editor (a large result opens there view-only). No
+    // status message — the editor opening the result is feedback enough.
     loadIntoEditor(bytes);
     // The merged document becomes the open document, so reset the list, reopening the
     // panel then shows only it (auto-included as "Current document"), not the old sources.
