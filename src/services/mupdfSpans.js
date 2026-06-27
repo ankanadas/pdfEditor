@@ -47,6 +47,7 @@ export function analyzePage(page) {
         ox: ln.x, oy: ln.y,                      // baseline origin
         bbox: ln.bbox,                            // {x,y,w,h} top-left
         size: +ln.font.size || 0,
+        fontName: ln.font.name || '',             // for embedded-font reuse lookup
         hasText: text.trim().length > 0,
         ...st,
       });
@@ -87,5 +88,5 @@ export function detectSpan(analysis, x, baseline) {
     const d = Math.abs(c.x - best.ox) + Math.abs(c.y - best.oy);
     if (d < cD) { cD = d; color = c.rgb; }
   }
-  return { size: best.size, family: best.family, bold: best.bold, italic: best.italic, color };
+  return { size: best.size, family: best.family, bold: best.bold, italic: best.italic, color, fontName: best.fontName };
 }
