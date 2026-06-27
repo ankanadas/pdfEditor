@@ -12,8 +12,8 @@
 // Font loading is injected (`loadFont(family,bold,italic) → Promise<mupdf.Font>`) so this module is
 // engine-pure and testable in Node — the worker supplies a fetch-based loader (see mupdfFonts.js).
 import { analyzePage, detectSpan } from './mupdfSpans.js';
-import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName, latexProfile } from './mupdfFontEngine.js';
-import { bundledCandidates } from './mupdfFonts.js';
+import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName, latexProfile, standardFamily } from './mupdfFontEngine.js';
+import { bundledCandidates, stemForName } from './mupdfFonts.js';
 
 /** Normalise editable-box quirks (nbsp, zero-width, soft-hyphen, control chars) without dropping real
  *  Unicode — every font is embedded full-Unicode (Type0), so curly quotes / em-dash / accents / ₹ all
@@ -25,6 +25,22 @@ function normalizeText(s) {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');  // control chars (keep \t,\n)
 }
 
+// ── WinAnsi encoding — used ONLY by the Base-14 re-emit path (a non-embedded standard font is kept as
+// name-only Helvetica/Times/Courier, which is a simple WinAnsi font). Reused + bundled fonts are Type0. ──
+const CP1252_HIGH = {
+  0x20AC: 0x80, 0x201A: 0x82, 0x0192: 0x83, 0x201E: 0x84, 0x2026: 0x85, 0x2020: 0x86, 0x2021: 0x87,
+  0x02C6: 0x88, 0x2030: 0x89, 0x0160: 0x8A, 0x2039: 0x8B, 0x0152: 0x8C, 0x017D: 0x8E, 0x2018: 0x91,
+  0x2019: 0x92, 0x201C: 0x93, 0x201D: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97, 0x02DC: 0x98,
+  0x2122: 0x99, 0x0161: 0x9A, 0x203A: 0x9B, 0x0153: 0x9C, 0x017E: 0x9E, 0x0178: 0x9F,
+};
+/** Map one code point to a WinAnsi byte, or 0x3F ('?') if unrepresentable in WinAnsi. */
+function winAnsiByte(cp) {
+  if (cp === 0x09) return 0x20;
+  if (cp >= 0x20 && cp <= 0x7E) return cp;
+  if (cp >= 0xA0 && cp <= 0xFF) return cp;
+  return CP1252_HIGH[cp] || 0x3F;
+}
+
 // ── byte builder for PDF content streams ──
 class Bytes {
   constructor() { this.chunks = []; this.len = 0; }
@@ -32,6 +48,13 @@ class Bytes {
   op(str) { const a = new Uint8Array(str.length); for (let i = 0; i < str.length; i++) a[i] = str.charCodeAt(i) & 0xff; this._raw(a); }
   /** A PDF hex string `<…>` of 2-byte glyph ids (Type0/Identity fonts). */
   glyphString(hex) { this.op('<' + hex + '>'); }
+  /** A PDF literal string `(…)` of WinAnsi bytes (Base-14 simple fonts), escaping ()\ . */
+  textString(bytes) {
+    const out = [0x28];
+    for (const b of bytes) { if (b === 0x28 || b === 0x29 || b === 0x5C) out.push(0x5C); out.push(b); }
+    out.push(0x29);
+    this._raw(Uint8Array.from(out));
+  }
   build() {
     const out = new Uint8Array(this.len);
     let o = 0;
@@ -94,6 +117,14 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   let _charsets = null;
   const charsets = () => (_charsets || (_charsets = warmCharsets(doc)));
 
+  // Fonts are embedded LAZILY — `embed(opt)` runs addFont/addSimpleFont only when a glyph actually uses
+  // the option, so an option we build but never draw with (e.g. the bundled catch-all when the original
+  // is fully reused) never bloats the output with an unused font.
+  function embed(opt) {
+    if (opt.ref == null) opt.ref = opt.simple ? doc.addSimpleFont(opt.mfont, 'Latin') : doc.addFont(opt.mfont);
+    return opt;
+  }
+
   /** Bundled substitute, embedded full-Unicode (Type0/Identity) — the catch-all. `spec` selects the
    *  family: an explicit toolbar key, a LaTeX profile, or the generic sans/serif/mono. */
   async function bundledOption(spec, bold, italic) {
@@ -101,8 +132,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     const key = candidates[0] + '|' + (bold ? 1 : 0) + '|' + (italic ? 1 : 0);
     if (!simpleCache.has(key)) {
       const mfont = await loadFont(candidates);
-      const ref = doc.addFont(mfont);
-      simpleCache.set(key, { name: 'WF' + (seq++), ref, mfont, charset: null });
+      simpleCache.set(key, { name: 'WF' + (seq++), ref: null, simple: false, mfont, charset: null });
     }
     return simpleCache.get(key);
   }
@@ -119,8 +149,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       if (bytes) {
         try {
           const mfont = new mupdf.Font(key, bytes);
-          const ref = doc.addFont(mfont);
-          opt = { kind: 'cid', name: 'RF' + (seq++), ref, mfont, charset: charsets().get(key) || new Set() };
+          opt = { kind: 'cid', name: 'RF' + (seq++), ref: null, simple: false, mfont, charset: charsets().get(key) || new Set() };
         } catch (_) { opt = null; }
       }
     }
@@ -128,19 +157,49 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     return opt;
   }
 
-  /** Pick the option to draw one code point with (reused-embedded if it drew it, else catch-all). */
+  // Base-14 re-emit: a NON-embedded standard font (Helvetica/Times/Courier) is kept under its own name
+  // (name-only, not embedded) so a 'Helvetica-Bold' heading saves back as Helvetica-Bold — NOT a
+  // substituted, embedded Arial. It's a simple WinAnsi font (mirrors fonts.py level-2 Base-14 re-emit).
+  const B14 = {
+    sans: ['Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique'],
+    serif: ['Times-Roman', 'Times-Bold', 'Times-Italic', 'Times-BoldItalic'],
+    mono: ['Courier', 'Courier-Bold', 'Courier-Oblique', 'Courier-BoldOblique'],
+  };
+  function base14Option(family, bold, italic) {
+    const name = (B14[family] || B14.sans)[(bold ? 1 : 0) + (italic ? 2 : 0)];
+    const key = 'b14:' + name;
+    if (!simpleCache.has(key)) {
+      const mfont = new mupdf.Font(name);
+      simpleCache.set(key, { kind: 'simple', winAnsi: true, simple: true, name: 'WF' + (seq++), ref: null, mfont, charset: null });
+    }
+    return simpleCache.get(key);
+  }
+
+  /** Pick the option to draw one code point with. Order: reused-embedded (drew it AND has the glyph) →
+   *  Base-14 (WinAnsi) → bundled catch-all (Type0, full Unicode). The encodeCharacter≠0 guard means a
+   *  reused subset font keeps a character (incl. space) only when it really has that glyph — so we never
+   *  embed a bundled substitute just to draw a space the original font could draw itself. */
   function pickOption(cp, opts) {
-    if (cp === 0x20) { for (const o of opts) if (o.charset === null) return o; return opts[opts.length - 1]; }
     const ch = String.fromCodePoint(cp);
     for (const o of opts) {
-      if (o.charset === null) return o;                                   // catch-all (always last)
-      if (o.charset.has(ch)) { try { if (o.mfont.encodeCharacter(cp) !== 0) return o; } catch (_) {} }
+      if (o.charset !== null) {                                            // reused embedded (has a charset)
+        if (o.charset.has(ch)) { try { if (o.mfont.encodeCharacter(cp) !== 0) return o; } catch (_) {} }
+      } else if (o.winAnsi) {                                             // Base-14 (WinAnsi only)
+        if (cp === 0x3F || winAnsiByte(cp) !== 0x3F) return o;
+      } else {
+        return o;                                                         // bundled catch-all (Type0)
+      }
     }
     return opts[opts.length - 1];
   }
 
-  // Per-character draw unit (every font is Type0/Identity): a 4-hex glyph id + the glyph advance.
+  // Per-character draw unit: WinAnsi byte for a Base-14 simple font, else a 4-hex glyph id (Type0).
   function unitFor(opt, cp) {
+    if (opt.winAnsi) {
+      const b = winAnsiByte(cp);
+      let adv = 0; try { adv = opt.mfont.advanceGlyph(opt.mfont.encodeCharacter(b)); } catch (_) {}
+      return { byte: b, adv };
+    }
     let g = 0; try { g = opt.mfont.encodeCharacter(cp) & 0xffff; } catch (_) {}
     let adv = 0; try { adv = opt.mfont.advanceGlyph(g); } catch (_) {}
     return { hex: g.toString(16).padStart(4, '0'), adv };
@@ -150,7 +209,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     for (const ch of text) { const cp = ch.codePointAt(0); w += unitFor(pickOption(cp, opts), cp).adv; }
     return w * size;
   }
-  /** Split text into maximal same-font segments, each with its hex glyph-id string. */
+  /** Split text into maximal same-font segments; each carries either a hex glyph string or WinAnsi bytes. */
   function segmentByFont(text, opts) {
     const segs = [];
     let cur = null;
@@ -160,7 +219,10 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       if (!cur || cur.opt !== o) { cur = { opt: o, units: [] }; segs.push(cur); }
       cur.units.push(unitFor(o, cp));
     }
-    for (const s of segs) s.hex = s.units.map(u => u.hex).join('');
+    for (const s of segs) {
+      if (s.opt.winAnsi) s.bytes = s.units.map(u => u.byte);
+      else s.hex = s.units.map(u => u.hex).join('');
+    }
     return segs;
   }
   const measureSeg = (seg, size) => seg.units.reduce((w, u) => w + u.adv, 0) * size;
@@ -168,6 +230,12 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   // Group edits by page.
   const byPage = new Map();
   for (const e of edits) { const p = e.pageIndex | 0; if (!byPage.has(p)) byPage.set(p, []); byPage.get(p).push(e); }
+
+  // Warm every font's drawn-character set from the ORIGINAL doc NOW — BEFORE any page is redacted.
+  // Redaction removes an edited line's text, so building charsets afterwards would make the line's OWN
+  // glyphs look undrawable by their own font and scatter them to the bundled substitute (the
+  // "edited footer word turns to Arial" bug). Only needed when there's a replace edit.
+  if (edits.some((e) => e.redact !== false && e.kind !== 'image')) charsets();
 
   for (const [pageNum, pageEdits] of byPage) {
     if (pageNum < 0 || pageNum >= doc.countPages()) continue;
@@ -248,7 +316,11 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         bundleSpec = { key: String(e.fontFamily).toLowerCase() };
       } else {
         const lp = (!isInsert && sp && sp.fontName) ? latexProfile(sp.fontName) : null;
-        bundleSpec = lp ? { latex: lp } : { family: sp ? sp.family : (e.serif ? 'serif' : 'sans') };
+        // If the original embedded font is a family we ship (e.g. Carlito/Caladea), substitute the SAME
+        // bundled face when we can't reuse it — visually identical, not a generic Arimo/Tinos.
+        const stem = (!isInsert && sp && sp.fontName) ? stemForName(sp.fontName) : null;
+        const family = sp ? sp.family : (e.serif ? 'serif' : 'sans');
+        bundleSpec = lp ? { latex: lp } : stem ? { stem, family } : { family };
       }
       // Size: keep the original's exact size by default (the frontend's geometric guess runs big); an
       // explicit toolbar size change (sizeOverride) or added text uses the frontend size.
@@ -287,14 +359,23 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
 
       if (!lineModel.some(parts => parts.some(r => r.text))) continue;
 
-      // Reuse the original line's OWN embedded font (real outlines) for the characters it drew; the
-      // bundled substitute is the per-run catch-all. Reuse only when the run's weight/slant matches the
-      // detected original (so an italic run on a non-italic original still gets a proper italic).
+      // Primary font for a REPLACE edit: (1) reuse the original's OWN embedded outlines for the chars it
+      // drew, else (2) for a NON-embedded standard font with no toolbar override, re-emit Base-14 under
+      // its own name (keeps Helvetica as Helvetica, not a substituted Arial). The bundled Type0 substitute
+      // is always the per-run catch-all (full Unicode).
       const reused = (!isInsert && sp) ? reusedOption(sp, pageFonts) : null;
+      const b14Family = (!isInsert && sp && !reused && e.fontFamily == null) ? (() => {
+        const fam = standardFamily(sp.fontName);
+        const info = pageFonts.get(stripName(sp.fontName || ''));
+        return (fam && (!info || !info.ff)) ? fam : null;   // standard AND not embedded
+      })() : null;
       for (const parts of lineModel) for (const r of parts) {
         const bundled = await bundledOption(bundleSpec, r.bold, r.italic);
-        const useReused = reused && sp && r.bold === sp.bold && r.italic === sp.italic;
-        r._opts = useReused ? [reused, bundled] : [bundled];
+        const opts = [];
+        if (reused && sp && r.bold === sp.bold && r.italic === sp.italic) opts.push(reused);
+        else if (b14Family) opts.push(base14Option(b14Family, r.bold, r.italic));
+        opts.push(bundled);
+        r._opts = opts;
       }
 
       // Overflow: if the widest line exceeds the space to the right margin, scale every run down.
@@ -324,12 +405,12 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
           // Split the run into maximal same-font segments (per-character pick), drawing each with the
           // right encoding: a hex glyph-id string for a reused Type0 font, a WinAnsi literal otherwise.
           for (const seg of segmentByFont(r.text, r._opts)) {
-            usedFonts.add(seg.opt);
+            usedFonts.add(embed(seg.opt));   // embed the font into the doc only now that a glyph uses it
             const px = lx + adv * cos, pyTop = lyTop + adv * sin;
             const py = ph - pyTop;
             ops.op('q BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf ' + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
             ops.op(rot ? `${f2(cos)} ${f2(sin)} ${f2(-sin)} ${f2(cos)} ${f2(px)} ${f2(py)} Tm ` : `1 0 0 1 ${f2(px)} ${f2(py)} Tm `);
-            ops.glyphString(seg.hex);
+            if (seg.opt.winAnsi) ops.textString(seg.bytes); else ops.glyphString(seg.hex);
             ops.op(' Tj ET Q\n');
             const w = measureSeg(seg, r.size);
             if (r.underline && !rot) {

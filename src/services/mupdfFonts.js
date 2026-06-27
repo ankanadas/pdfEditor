@@ -31,6 +31,24 @@ const LATEX = {
   times: 'TeXGyreTermes', helvetica: 'TeXGyreHeros', courier: 'TeXGyreCursor',
 };
 
+// Detected embedded-font name → bundled stem, when it's a family we actually ship (or its proprietary
+// twin). Used as the fallback when an embedded font can't be reused, so the substitute is visually
+// identical — a doc embedding Carlito we can't re-encode falls back to bundled Carlito, not Arimo.
+const NAME_STEMS = [
+  ['carlito', 'Carlito'], ['calibri', 'Carlito'], ['caladea', 'Caladea'], ['cambria', 'Caladea'],
+  ['gelasio', 'Gelasio'], ['georgia', 'Gelasio'], ['arimo', 'Arimo'], ['tinos', 'Tinos'], ['cousine', 'Cousine'],
+  ['ebgaramond', 'EBGaramond'], ['librebaskerville', 'LibreBaskerville'], ['merriweather', 'Merriweather'],
+  ['playfair', 'PlayfairDisplay'], ['comicneue', 'ComicNeue'], ['roboto', 'Roboto'], ['lato', 'Lato'],
+  ['poppins', 'Poppins'], ['nunito', 'Nunito'], ['montserrat', 'Montserrat'], ['inter', 'Inter'],
+  ['ubuntu', 'Ubuntu'], ['firacode', 'FiraCode'], ['jetbrains', 'JetBrainsMono'], ['ibmplex', 'IBMPlexMono'],
+  ['notoserif', 'NotoSerif'], ['sourcecode', 'SourceCodePro'], ['sourcesans', 'SourceSans3'],
+];
+export function stemForName(fontName) {
+  const nm = (fontName || '').split('+').pop().toLowerCase().replace(/[\s-]/g, '');
+  for (const [k, stem] of NAME_STEMS) if (nm.includes(k)) return stem;
+  return null;
+}
+
 const VARIANT = (b, i) => (b && i ? 'BoldItalic' : b ? 'Bold' : i ? 'Italic' : 'Regular');
 // In-family fallback chain so a stem shipping fewer weights stays in its own face, not a substitute.
 const CHAIN = { BoldItalic: ['BoldItalic', 'Bold', 'Italic', 'Regular'], Bold: ['Bold', 'Regular'], Italic: ['Italic', 'Regular'], Regular: ['Regular'] };
@@ -47,6 +65,9 @@ function files(stem, bold, italic, ext) {
  * Falls back to the generic trio when a toolbar stem isn't shipped.
  */
 export function bundledCandidates(spec, bold, italic) {
+  if (spec && spec.stem) {
+    return files(spec.stem, bold, italic, 'ttf').concat(files(GENERIC[spec.family] || 'Arimo', bold, italic, 'ttf'));
+  }
   if (spec && spec.latex) {
     const { shape, family } = spec.latex;
     const stem = shape === 'cm' ? LATEX.cm[family] || LATEX.cm.serif : LATEX[shape];
