@@ -22,11 +22,12 @@ export const PagesPanelMethods = {
   async closePagesPanel() {
     document.getElementById('pagesBackdrop')?.classList.remove('open');
     document.getElementById('pagesDrawer')?.classList.remove('open');
-    // Editable docs bake any pending rotation into the editor on close (one rebuild). Large/view-only
-    // docs keep it pending — it's baked into the file by the Download button instead.
-    if (!this.largeFileMode && this._hasPendingRot()) await this._flushPendingRot();
-    // A large file opened straight into this tool (from the dialog) hasn't rendered its view yet —
-    // render it now so closing the drawer shows the document instead of a blank editor.
+    // Bake any pending rotation on close (one rebuild) so the editor view actually shows the rotated
+    // pages — for large/view-only docs too (the baked bytes are also what Download then saves). For
+    // small docs this rebuild already re-renders the editable view.
+    if (this._hasPendingRot()) await this._flushPendingRot();
+    // Large docs defer their (heavy) main-view render: a fresh open, or any page op above, leaves it
+    // stale. Render it once now so closing the drawer shows the current document, not blank/stale.
     if (this.largeFileMode && !this._largeViewRendered) await this._ensureLargeViewRendered();
   },
 
