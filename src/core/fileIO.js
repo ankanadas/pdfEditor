@@ -210,6 +210,7 @@ export const FileIOMethods = {
         this.setMode('view');
         this.enableUiAfterLoad(true);
         this.updateModeIndicator();
+        this.showStatus('', '');   // clear the "Loading PDF…" toast (no controller 'loaded' fires here)
         if (this._suppressLargeDialog) {
           // Came from Merge: don't show the choose-a-tool dialog AND don't pop an editor toast
           // (the Merge box already shows the "editing disabled" banner). Just open it view-only.
