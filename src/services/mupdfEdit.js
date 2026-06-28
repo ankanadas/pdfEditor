@@ -404,7 +404,12 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // Weight/slant: union the frontend flag with the detected original (only ADDS — never un-bolds a
       // correct line), recovering a bold heading on a non-embedded standard font the frontend missed.
       let wantBold = !!e.bold, wantItalic = !!e.italic;
-      if (sp && !isInsert) { wantBold = wantBold || sp.bold; wantItalic = wantItalic || sp.italic; }
+      // Union with the detected original ONLY recovers a weight/slant the frontend MISSED — never when the
+      // user explicitly set it (boldSet/italicSet), so turning a bold/italic line OFF actually sticks.
+      if (sp && !isInsert) {
+        if (!e.boldSet) wantBold = wantBold || sp.bold;
+        if (!e.italicSet) wantItalic = wantItalic || sp.italic;
+      }
       const boxOpacity = (typeof e.opacity === 'number' && e.opacity >= 0 && e.opacity < 1) ? e.opacity : 1;
       const boxColor = parseColor(e.color, null);
       // Colour: an explicit toolbar colour wins; else the original span's colour (white-on-dark); added

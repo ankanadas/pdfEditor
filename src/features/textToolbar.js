@@ -448,6 +448,10 @@ export const TextToolbarMethods = {
   _applyLineStyle(t, kind, value) {
     const l = t.line, div = t.el;
     const wasUnderlined = !!l.underline;   // capture BEFORE the toggle, to know if an old rule needs covering
+    // Mark bold/italic as EXPLICITLY set by the user so the save honours it verbatim (incl. turning a
+    // bold/italic line OFF). Otherwise the engine's "recover a missed bold" union would re-bold it.
+    if (kind === 'bold') l.boldSet = true;
+    if (kind === 'italic') l.italicSet = true;
     const rich = !!(l.styleRuns && l.styleRuns.length) &&
       div.querySelector('span[data-bold],span[data-italic],span[data-underline]');
     if (rich && (kind === 'bold' || kind === 'italic' || kind === 'underline')) {
