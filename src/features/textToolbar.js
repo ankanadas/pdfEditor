@@ -232,8 +232,10 @@ export const TextToolbarMethods = {
     if (t.kind === 'editor') {
       const s = this._activeInsertEditor ? this._activeInsertEditor.style() : {};
       const e = t.edit || {};
-      return { bold: s.bold, italic: s.italic, size: s.size, underline: !!e.underline,
-               color: e.color, opacity: e.opacity, align: e.align, link: e.link ? e.link.uri : '',
+      // Underline reflects the SELECTION's run (so a partial underline toggles correctly); fall back to the
+      // box-level flag at a plain caret. Same for colour.
+      return { bold: s.bold, italic: s.italic, size: s.size, underline: s.underline != null ? !!s.underline : !!e.underline,
+               color: s.color != null ? s.color : e.color, opacity: e.opacity, align: e.align, link: e.link ? e.link.uri : '',
                family: this._displayFontKey(e.fontFamily, e.fontName) };
     }
     const o = t.kind === 'overlay' ? t.edit : t.line;
@@ -390,8 +392,14 @@ export const TextToolbarMethods = {
     if (!t) return;
     if (kind === 'link') { this._applyLink(t, value); this._reflectTextToolbar(); this._positionTextToolbar(); return; }
     if (t.kind === 'editor') {
+      const ie = this._activeInsertEditor;
+      const partial = !!(ie && ie.hasSelection && ie.hasSelection());
       if (kind === 'bold' || kind === 'italic' || kind === 'size') {
-        if (this._activeInsertEditor) this._activeInsertEditor.applyStyle(kind, value);
+        if (ie) ie.applyStyle(kind, value);
+      } else if ((kind === 'underline' || kind === 'color') && partial) {
+        // Add-text PARTIAL underline/colour: a real selection styles just that run (the insert editor's
+        // run model). With no selection these fall through to the whole-box path below.
+        ie.applyStyle(kind, value);
       } else {
         this._setBoxField(t.edit, kind, value);
         this._restyleEditorDiv(t.el, kind, value);
@@ -451,7 +459,9 @@ export const TextToolbarMethods = {
   _applyPartialLineStyle(t, kind, value) {
     if (!['bold', 'italic', 'underline', 'color', 'family'].includes(kind)) return false;
     const div = t.el, l = t.line;
-    const sel = this._captureLineSelection();              // { el, start, end } char offsets, or null
+    // Font-family: the font picker's search input collapses the live selection on open, so fall back to the
+    // selection captured when the picker opened (_pendingFontSel). B/I/U/colour keep the live selection.
+    const sel = this._captureLineSelection() || (kind === 'family' ? this._pendingFontSel : null);
     if (!sel || sel.el !== div || !(sel.end > sel.start)) return false;
     // Per-character style from the current DOM (inherits each ancestor span's data-*/face/colour/family).
     const chars = [];
