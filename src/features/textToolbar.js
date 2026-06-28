@@ -43,6 +43,8 @@ export const TextToolbarMethods = {
       // makes the toolbar jump up/down. The visualViewport listeners keep it placed when the keyboard moves.
       if (window.matchMedia && window.matchMedia('(max-width: 767px)').matches) return;
       this._positionTextToolbar();
+      // Show the style (font/colour/weight) of the word the selection is currently on, for a line edit.
+      if (this._ttTarget.kind === 'line') this._reflectTextToolbar();
     });
     // Mobile: lock the page scale the instant a finger lands on ANY editable box (existing-text line or
     // add-text editor), BEFORE the browser focuses it — Safari decides whether to auto-zoom at focus time,
@@ -267,18 +269,59 @@ export const TextToolbarMethods = {
     }
     // Prefer the REAL font name (from PDF.js's rendered font object) so a saved+reopened font
     // re-selects in the picker; fall back to the generic guess before the page has resolved.
-    const famKey = this._displayFontKey(o.fontFamily, this._realFontName(o) || o.fontFamilyName || o.fontName);
-    return { bold, italic, underline, size,
-             // Reflect the line's REAL ink colour (sampled into textColor) when the user hasn't set an
-             // explicit toolbar colour yet — otherwise the swatch shows black on first open for a
-             // white/grey/coloured line until you change it.
-             color: o.color || o.textColor, opacity: o.opacity, align: o.align,
+    let famKey = this._displayFontKey(o.fontFamily, this._realFontName(o) || o.fontFamilyName || o.fontName);
+    // Reflect the line's REAL ink colour (sampled into textColor) when the user hasn't set an explicit
+    // toolbar colour yet — otherwise the swatch shows black on first open for a coloured line.
+    let color = o.color || o.textColor;
+    let fontOriginal = (t.kind === 'line' && !famKey);
+    // PARTIAL SELECTION: when a sub-range of an existing line is selected, reflect the SELECTED run's own
+    // style (font / colour / weight / slant) so the toolbar shows the style of the word under the caret —
+    // not the whole-line summary. (A whole-line selection keeps the summary above.)
+    if (t.kind === 'line') {
+      const ss = this._lineSelectionStyle(t.el);
+      if (ss) {
+        bold = ss.bold; italic = ss.italic; underline = ss.underline;
+        if (ss.color) color = ss.color;
+        famKey = ss.hasFamily ? this._displayFontKey(ss.family, null) : famKey;
+        fontOriginal = !famKey;
+      }
+    }
+    return { bold, italic, underline, size, color, opacity: o.opacity, align: o.align,
              link: o.link ? o.link.uri : '',
              family: famKey,
              // Existing text whose original font isn't in the dropdown (LaTeX/Computer-Modern or any
              // other unmapped embedded face) is REDRAWN in its own/closest original face on save, so
              // the picker shows "Original" instead of an unset Arial-looking placeholder.
-             fontOriginal: (t.kind === 'line' && !famKey) };
+             fontOriginal };
+  },
+  /** Style of the run under the current sub-range selection in a line box (null at a caret or a
+   *  whole-line selection). Used to reflect the selected word's own font/colour/weight in the toolbar. */
+  _lineSelectionStyle(el) {
+    if (!el) return null;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const r = sel.getRangeAt(0);
+    if (r.collapsed || !el.contains(r.commonAncestorContainer)) return null;
+    // ignore a whole-line selection — that should reflect the line summary, not a single run
+    const full = (el.textContent || '').length;
+    const pre = document.createRange(); pre.selectNodeContents(el); pre.setEnd(r.startContainer, r.startOffset);
+    const start = pre.toString().length, len = r.toString().length;
+    if (start === 0 && len >= full) return null;
+    let node = r.startContainer;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
+    const span = node && node !== el && node.closest ? node.closest('span') : null;
+    if (!span || !el.contains(span)) return null;
+    const cs = getComputedStyle(span);
+    const dataColor = span.getAttribute('data-color');
+    let color; if (dataColor) { try { color = hexToRgb(dataColor); } catch (_) {} }
+    return {
+      bold: span.getAttribute('data-bold') === '1' || cs.fontWeight === 'bold' || parseInt(cs.fontWeight, 10) >= 600,
+      italic: span.getAttribute('data-italic') === '1' || cs.fontStyle === 'italic',
+      underline: span.getAttribute('data-underline') === '1' || /underline/.test(cs.textDecorationLine || cs.textDecoration || ''),
+      hasFamily: span.hasAttribute('data-family'),
+      family: span.getAttribute('data-family') || null,
+      color,
+    };
   },
   _reflectTextToolbar() {
     const s = this._ttStyle();
@@ -512,8 +555,33 @@ export const TextToolbarMethods = {
     l.bold = runs.every(r => r.bold); l.italic = runs.every(r => r.italic); l.underline = runs.every(r => r.underline);
     l.boldSet = true; l.italicSet = true;
     div.innerHTML = runs.map(r => this._lineRunSpanHTML(r, l.serif)).join('');
+    // Re-apply the SAME character range as the live selection onto the freshly-rebuilt run spans. Without
+    // this, a follow-up partial op on the same word (e.g. colour right after font, or vice-versa) finds no
+    // selection: colour would bleed onto the WHOLE line and a font pick would be swallowed. Keeping the
+    // selection (and the pending pop-over captures) lets "select once, then style repeatedly" work.
+    this._restoreLineSelection(div, sel.start, sel.end);
     this.trackEdit(this.lineToEdit(l, this.cleanEditableText(div.textContent), runs));
     return true;
+  },
+  /** Re-select characters [start,end) inside a line box after its run spans were rebuilt, and sync the
+   *  font/link pop-over captures to that range so the next partial op targets the same word. */
+  _restoreLineSelection(el, start, end) {
+    try {
+      el.focus();
+      const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      const range = document.createRange();
+      let node, acc = 0, haveStart = false;
+      while ((node = tw.nextNode())) {
+        const len = node.nodeValue.length;
+        if (!haveStart && acc + len >= start) { range.setStart(node, Math.max(0, start - acc)); haveStart = true; }
+        if (haveStart && acc + len >= end) { range.setEnd(node, Math.max(0, end - acc)); break; }
+        acc += len;
+      }
+      if (!haveStart) return;
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(range);
+      const cap = { el, start, end };
+      this._pendingFontSel = cap; this._pendingLinkSel = cap;     // keep pop-over fallbacks on the same range
+    } catch (_) { /* selection restore is best-effort */ }
   },
   /** Whole-line styling for a focused existing-text line box (updates CSS in place + tracks the edit
    *  immediately; trackEdit does not re-render, so the box keeps focus). */
