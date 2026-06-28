@@ -452,6 +452,15 @@ export const TextToolbarMethods = {
     // bold/italic line OFF). Otherwise the engine's "recover a missed bold" union would re-bold it.
     if (kind === 'bold') l.boldSet = true;
     if (kind === 'italic') l.italicSet = true;
+    // The box is styled with the PAGE's OWN font (pdf.js loadedName, e.g. a baked Helvetica-Bold face —
+    // carried in BOTH l.fontName and l.fontCss) whose weight/slant is BAKED IN, so CSS font-weight/style
+    // can't restyle it and the box keeps LOOKING bold after an unbold (editor ≠ what the save produces).
+    // The moment the user overrides bold/italic, switch the preview to a purely GENERIC, weight-respecting
+    // family stack (dropping the baked face) so it renders the chosen weight — matching the saved output.
+    if (kind === 'bold' || kind === 'italic') {
+      div.style.fontFamily = l.fontFamily ? this._familyCss(l.fontFamily)
+        : (l.serif ? '"Times New Roman", Times, serif' : 'Arial, Helvetica, sans-serif');
+    }
     const rich = !!(l.styleRuns && l.styleRuns.length) &&
       div.querySelector('span[data-bold],span[data-italic],span[data-underline]');
     if (rich && (kind === 'bold' || kind === 'italic' || kind === 'underline')) {
