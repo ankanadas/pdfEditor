@@ -160,7 +160,7 @@ export const TextEditingMethods = {
       } else if (line.styleRuns && line.styleRuns.length) {
         // Mixed-style line: render per-run styled spans so its bold/italic/underline shows while
         // editing and serialises back on commit. (Editing keeps each span's data-* style markers.)
-        div.innerHTML = line.styleRuns.map(r => this._lineRunSpanHTML(r)).join('');
+        div.innerHTML = line.styleRuns.map(r => this._lineRunSpanHTML(r, line.serif)).join('');
       }
 
       const fontSizePx = line.fontSizePx * displayScale;
