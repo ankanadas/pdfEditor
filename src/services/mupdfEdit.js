@@ -317,6 +317,22 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
 
     const ops = new Bytes();
     const usedFonts = new Set();   // embedded entries to register in this page's Resources
+    const usedEgs = new Map();     // opacity → { name, dict } ExtGStates to register in this page
+    let egsSeq = 0;
+    // An ExtGState that sets fill+stroke alpha, so semi-transparent ("faded") edited/added text renders
+    // translucent (the toolbar opacity control). Deduped per opacity value per page.
+    const egsFor = (op) => {
+      let e = usedEgs.get(op);
+      if (!e) {
+        const d = doc.newDictionary();
+        d.put('Type', doc.newName('ExtGState'));
+        d.put('ca', doc.newReal ? doc.newReal(op) : op);
+        d.put('CA', doc.newReal ? doc.newReal(op) : op);
+        e = { name: 'GS' + (egsSeq++), dict: d };
+        usedEgs.set(op, e);
+      }
+      return e;
+    };
 
     // 1b) Erase tool: white-out the region (text already redacted above). And underline-cover strips:
     //     because we keep line-art, an existing underline survives redaction — cover it with the line's
@@ -367,6 +383,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // correct line), recovering a bold heading on a non-embedded standard font the frontend missed.
       let wantBold = !!e.bold, wantItalic = !!e.italic;
       if (sp && !isInsert) { wantBold = wantBold || sp.bold; wantItalic = wantItalic || sp.italic; }
+      const boxOpacity = (typeof e.opacity === 'number' && e.opacity >= 0 && e.opacity < 1) ? e.opacity : 1;
       const boxColor = parseColor(e.color, null);
       // Colour: an explicit toolbar colour wins; else the original span's colour (white-on-dark); added
       // text stays black.
@@ -462,7 +479,8 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
             usedFonts.add(embed(seg.opt));   // embed the font into the doc only now that a glyph uses it
             const px = lx + adv * cos, pyTop = lyTop + adv * sin;
             const py = ph - pyTop;
-            ops.op('q BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf ' + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
+            const egs = boxOpacity < 1 ? egsFor(boxOpacity) : null;
+            ops.op('q ' + (egs ? '/' + egs.name + ' gs ' : '') + 'BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf ' + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
             ops.op(rot ? `${f2(cos)} ${f2(sin)} ${f2(-sin)} ${f2(cos)} ${f2(px)} ${f2(py)} Tm ` : `1 0 0 1 ${f2(px)} ${f2(py)} Tm `);
             if (seg.opt.winAnsi) ops.textString(seg.bytes); else ops.glyphString(seg.hex);
             ops.op(' Tj ET Q\n');
@@ -487,6 +505,13 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       let fdict = res.get('Font');
       if (!fdict || fdict.isNull()) { fdict = doc.newDictionary(); res.put('Font', fdict); }
       for (const fam of usedFonts) fdict.put(fam.name, fam.ref);
+      // Register the alpha ExtGStates referenced by `/GSx gs` (semi-transparent text), else mupdf throws
+      // "cannot find ExtGState resource" and the gs is dropped → text renders fully opaque.
+      if (usedEgs.size) {
+        let egd = res.get('ExtGState');
+        if (!egd || egd.isNull()) { egd = doc.newDictionary(); res.put('ExtGState', egd); }
+        for (const eg of usedEgs.values()) egd.put(eg.name, doc.addObject(eg.dict));
+      }
       const stream = doc.addStream(ops.build(), doc.newDictionary());
       appendContents(doc, pageObj, stream);
     }
