@@ -68,9 +68,12 @@ const f2 = (n) => (Math.round(n * 1000) / 1000).toString();   // compact fixed n
 
 // Added text in a standard-equivalent family → the Base-14 standard font (name-only), so adding bold
 // text looks IDENTICAL to editing a standard line bold (both Helvetica-Bold), not Helvetica vs Arimo.
-// Proprietary/branded families (Calibri/Georgia/Roboto…) are NOT here — they keep their bundled clone.
+// ONLY the TRUE Base-14 standards belong here (they're spec-guaranteed name-only in every viewer). A
+// NON-standard family — proprietary (Calibri/Georgia/Roboto…) OR a Windows sans/mono we don't truly have
+// (Verdana/Tahoma/Trebuchet/Consolas) — keeps its bundled OPEN clone instead: a consistent embedded face
+// renders the same everywhere, vs a name-only Base-14 substitute that varies per viewer.
 const ADD_B14 = { sans: 'sans', serif: 'serif', mono: 'mono', arial: 'sans', helvetica: 'sans',
-  verdana: 'sans', tahoma: 'sans', trebuchet: 'sans', times: 'serif', courier: 'mono', consolas: 'mono' };
+  times: 'serif', courier: 'mono' };
 
 // ── colour helpers ── accepts what the frontend actually sends: an [r,g,b] ARRAY (0-255 or already
 // 0-1) OR a '#rrggbb' / 'rgb()/rgba()' string. (Mirrors backend _parse_color. The array form is the
