@@ -67,11 +67,11 @@ export const SaveServiceMethods = {
       } catch (e) { console.warn('Backend save failed, trying client-side:', e); }
     };
 
-    // Tier order. WASM_EDIT_FIRST flips the chain to WASM-primary — the Phase-5 cutover toggle. It is
-    // OFF by default so production keeps the proven backend-first behaviour (WASM is the no-server
-    // fallback beneath it); set window.WASM_EDIT_FIRST = true to promote WASM once parity is signed off.
-    // (Phase 1b+ declines edits it can't do faithfully, so even WASM-first cleanly falls through.)
-    const wasmFirst = typeof window !== 'undefined' && window.WASM_EDIT_FIRST === true;
+    // Tier order: WASM-FIRST by default (everything runs in the browser, no server). The PyMuPDF
+    // backend is kept as the FALLBACK beneath it — used when WASM declines an edit it can't do
+    // faithfully yet (image/signature) or isn't supported — then pdf-lib, then flatten. Set
+    // window.WASM_EDIT_FIRST = false to go back to backend-first.
+    const wasmFirst = typeof window === 'undefined' || window.WASM_EDIT_FIRST !== false;
     if (wasmFirst) { await tryWasm(); await tryBackend(); }
     else { await tryBackend(); await tryWasm(); }
 

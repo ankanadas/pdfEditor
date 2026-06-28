@@ -173,20 +173,21 @@ export const FileIOMethods = {
       let workingData = arrayBuffer.slice(0);
       if (enteredPassword) {
         this.showStatus('Unlocking PDF…', 'info');
-        // Hybrid-first: the live backend stays primary. If it's unreachable or can't unlock, fall back
-        // to in-browser mupdf-wasm (same MuPDF engine, no server) so a protected PDF still opens unlocked
-        // with no network at all. Only if BOTH fail do we keep the locked doc and let the save flatten.
+        // WASM-first: unlock in the browser (mupdf-wasm, no server). The backend is the FALLBACK if
+        // WASM is unsupported or fails. Only if BOTH fail do we keep the locked doc and let save flatten.
         let res = null;
-        try {
-          res = await PDFBackendService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
-        } catch (e) {
-          console.warn('Backend decrypt unavailable; trying in-browser WASM:', e);
-        }
-        if ((!res || !res.bytes) && MupdfService.isSupported()) {
+        if (MupdfService.isSupported()) {
           try {
             res = await MupdfService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
           } catch (e) {
-            console.warn('WASM decrypt failed; protected PDF will save as a flattened copy:', e);
+            console.warn('WASM decrypt unavailable; trying the backend:', e);
+          }
+        }
+        if (!res || !res.bytes) {
+          try {
+            res = await PDFBackendService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
+          } catch (e) {
+            console.warn('Backend decrypt unavailable; protected PDF will save as a flattened copy:', e);
           }
         }
         if (res && res.bytes) {
