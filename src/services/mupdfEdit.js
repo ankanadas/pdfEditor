@@ -442,12 +442,20 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // is always the per-run catch-all (full Unicode).
       const reused = (!isInsert && sp) ? reusedOption(sp, pageFonts) : null;
       let b14Family = null;
-      if (!isInsert && sp && !reused && e.fontFamily == null) {
+      if (e.fontFamily != null) {
+        // EXPLICIT toolbar family that IS a Base-14 standard (Helvetica/Arial→sans, Times→serif,
+        // Courier→mono) re-emits the standard font NAME-ONLY — NOT the bundled Arimo/Tinos clone. Without
+        // this, picking "Helvetica" from the font picker embeds Arimo, so a save→reopen→pick-Helvetica→save
+        // round-trip silently degrades the line to an embedded Arial. A non-standard pick (Georgia,
+        // Roboto, …) has no Base-14 equivalent → bundled clone (b14Family stays null). Applies to BOTH
+        // editing an existing line and added text (add-bold == edit-bold == Helvetica-Bold).
+        b14Family = ADD_B14[String(e.fontFamily).toLowerCase()] || null;
+      } else if (isInsert) {
+        b14Family = ADD_B14.sans;                                     // added text, no explicit family → Helvetica
+      } else if (sp && !reused) {
         const fam = standardFamily(sp.fontName);
         const info = pageFonts.get(stripName(sp.fontName || ''));
         b14Family = (fam && (!info || !info.ff)) ? fam : null;        // editing a non-embedded standard font
-      } else if (isInsert) {
-        b14Family = ADD_B14[String(e.fontFamily || 'sans').toLowerCase()] || null;   // add-text consistency
       }
       for (const parts of lineModel) for (const r of parts) {
         const bundled = await bundledOption(bundleSpec, r.bold, r.italic);
