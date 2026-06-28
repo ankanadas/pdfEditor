@@ -93,24 +93,46 @@ function parseColor(c, fallback) {
 }
 
 // ToUnicode repair (port of text_runs.py _clean_tounicode): the engine writes inter-word spaces into a
-// freshly-embedded font's ToUnicode CMap as U+00A0 (nbsp), and a reused hyphen as U+00AD (soft hyphen) —
-// both render fine but make the edited text COPY/EXTRACT as "unreadable unicode". Rewrite those bfchar/
-// bfrange DESTINATIONS back to plain space / hyphen. Length-preserving (4 hex → 4 hex) so /Length stays
-// valid. Operates on a decompressed save so the CMap streams are plain bytes.
-function cleanToUnicodeBytes(bytes) {
-  let s = '';
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);   // latin1
-  // Length-preserving (<00a0>→<0020>, <00ad>→<002d>). CRITICAL: consume EVERY pair/triple (not just the
-  // 00a0 ones) so we never mis-align a SOURCE code as a destination — matching only the 00a0 ones shifts
-  // the regex onto a following source and corrupts unrelated mappings (the roboto-gibberish bug).
+// font's ToUnicode CMap as U+00A0 (nbsp), and the hyphen as U+00AD (soft hyphen) — both render fine but
+// make the edited text COPY/EXTRACT/SEARCH as "unreadable unicode" (e.g. "To\xa0Whom\xa0It"). Rewrite
+// those bfchar/bfrange DESTINATIONS back to plain space / hyphen. Length-preserving (4 hex → 4 hex).
+// CRITICAL: we patch each CMap STREAM OBJECT in place via readStream()/writeStream() — NOT a whole-file
+// byte pass. saveToBuffer('decompress') does NOT expose CMap streams as plaintext (they stay flate-coded),
+// so the old byte approach was a silent no-op; the object API decompresses on read and re-stores on write.
+function cleanCMapText(s) {
+  // Length-preserving. CRITICAL: consume EVERY pair/triple (not just the 00a0 ones) so we never mis-align
+  // a SOURCE code as a destination — matching only the 00a0 ones shifts the regex onto a following source
+  // and corrupts unrelated mappings (the roboto-gibberish bug).
   const fixDst = (dst) => { const d = dst.toLowerCase(); return d === '00a0' ? '0020' : d === '00ad' ? '002d' : dst; };
   s = s.replace(/beginbfchar[\s\S]*?endbfchar/g, (blk) =>          // bfchar:  <src> <dst>  → fix dst
     blk.replace(/(<[0-9a-fA-F]+>)(\s*)<([0-9a-fA-F]{4})>/g, (m, src, ws, dst) => `${src}${ws}<${fixDst(dst)}>`));
   s = s.replace(/beginbfrange[\s\S]*?endbfrange/g, (blk) =>        // bfrange: <lo> <hi> <dst>  → fix dst
     blk.replace(/(<[0-9a-fA-F]+>)(\s*)(<[0-9a-fA-F]+>)(\s*)<([0-9a-fA-F]{4})>/g, (m, lo, w1, hi, w2, dst) => `${lo}${w1}${hi}${w2}<${fixDst(dst)}>`));
-  const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
-  return out;
+  return s;
+}
+function repairToUnicode(doc) {
+  const dec = (b) => { let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s; };   // latin1
+  const enc = (s) => { const o = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) o[i] = s.charCodeAt(i) & 0xff; return o; };
+  const seen = new Set();
+  const patchFont = (fontDict) => {
+    if (!fontDict || fontDict.isNull()) return;
+    const tu = fontDict.get('ToUnicode');
+    if (!tu || tu.isNull() || !(tu.isStream && tu.isStream())) return;
+    let key; try { key = tu.toString(); } catch (_) { key = null; }
+    if (key) { if (seen.has(key)) return; seen.add(key); }
+    let s; try { s = dec(tu.readStream().asUint8Array()); } catch (_) { return; }
+    if (s.indexOf('beginbfchar') < 0 && s.indexOf('beginbfrange') < 0) return;
+    const c = cleanCMapText(s);
+    if (c !== s) { try { tu.writeStream(enc(c)); } catch (_) {} }
+  };
+  const n = doc.countPages();
+  for (let p = 0; p < n; p++) {
+    let res; try { res = doc.loadPage(p).getObject().get('Resources'); } catch (_) { continue; }
+    if (!res || res.isNull()) continue;
+    const fonts = res.get('Font');
+    if (!fonts || fonts.isNull()) continue;
+    try { fonts.forEach((val) => patchFont(val)); } catch (_) {}
+  }
 }
 
 const rectsIntersect = (a, b) => !(a[2] < b[0] || b[2] < a[0] || a[3] < b[1] || b[3] < a[1]);
@@ -545,16 +567,10 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   // Subset every embedded font down to the glyphs actually used (we embed full TTFs for Unicode
   // coverage), so the output stays small. Best-effort — never fail the save over it.
   try { doc.subsetFonts(); } catch (_) {}
-  // Repair the new fonts' ToUnicode (nbsp/soft-hyphen → space/hyphen) so the edited text copies/extracts
-  // as clean ASCII: save decompressed (CMaps as plain bytes), byte-fix, reopen, save compressed.
-  if (typeof globalThis !== 'undefined' && globalThis.__SKIP_TOUNI) return doc.saveToBuffer('compress').asUint8Array().slice();
-  try {
-    const raw = doc.saveToBuffer('decompress').asUint8Array();
-    const cleaned = cleanToUnicodeBytes(raw);
-    return mupdf.Document.openDocument(cleaned, 'application/pdf').saveToBuffer('compress').asUint8Array().slice();
-  } catch (_) {
-    return doc.saveToBuffer('compress').asUint8Array().slice();   // fall back if the repair pass fails
-  }
+  // Repair the fonts' ToUnicode (nbsp/soft-hyphen → space/hyphen) in place so the edited text copies/
+  // extracts/searches as clean ASCII. Best-effort — never fail the save over it.
+  try { repairToUnicode(doc); } catch (_) {}
+  return doc.saveToBuffer('compress').asUint8Array().slice();
 }
 
 function applyAnnotations(mupdf, doc, annotations) {
