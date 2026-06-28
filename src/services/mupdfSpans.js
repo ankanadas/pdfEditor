@@ -79,6 +79,41 @@ function normColor(c) {
  * { size, family, bold, italic, color } or null if nothing is within range (matches _find_original_span,
  * threshold 25). Mirrors edit_ops step 0 + _span_color.
  */
+/**
+ * Best-effort alignment of the edited LINE so a replacement of a different length keeps it: 'right'
+ * for a right-aligned column (several rows ending at the same x while starting at varying x — e.g.
+ * résumé dates), 'center' for a line centred + indented from both margins, else 'left'. Conservative.
+ * Ported from spans.py _detect_align. lineLeft/lineRight are the edit's own line box.
+ */
+export function detectAlign(analysis, lineLeft, lineRight) {
+  // Collapse spans into one [left,right] per text line (by baseline) — far less noisy than raw spans.
+  const byY = new Map();
+  for (const s of analysis.spans) {
+    if (!s.hasText) continue;
+    const key = Math.round(s.oy);
+    let g = byY.get(key);
+    if (!g) { g = { left: Infinity, right: -Infinity }; byY.set(key, g); }
+    g.left = Math.min(g.left, s.bbox.x);
+    g.right = Math.max(g.right, s.bbox.x + s.bbox.w);
+  }
+  const lines = [...byY.values()];
+  if (lines.length < 3) return 'left';
+  const marginLeft = Math.min(...lines.map((l) => l.left));
+  const contentRight = Math.max(...lines.map((l) => l.right));
+  if (contentRight - marginLeft > 1 && (lineRight - lineLeft) > 0.6 * (contentRight - marginLeft)) return 'left'; // full-width/justified
+  if (lines.filter((l) => Math.abs(l.left - lineLeft) < 1.5).length >= 3) return 'left';                          // shares a common left margin
+  const indent = lineLeft - marginLeft;
+  const sameRight = lines.filter((l) => Math.abs(l.right - lineRight) < 1.5);
+  if (sameRight.length >= 2 && indent > 30) {
+    const lSpread = Math.max(...sameRight.map((l) => l.left)) - Math.min(...sameRight.map((l) => l.left));
+    const rSpread = Math.max(...sameRight.map((l) => l.right)) - Math.min(...sameRight.map((l) => l.right));
+    if (lSpread > rSpread + 1.0) return 'right';
+  }
+  const center = (lineLeft + lineRight) / 2;
+  if (Math.abs(center - (marginLeft + contentRight) / 2) < 8 && indent > 25 && (contentRight - lineRight) > 25) return 'center';
+  return 'left';
+}
+
 export function detectSpan(analysis, x, baseline) {
   let best = null, bestD = 1e9;
   for (const s of analysis.spans) {
