@@ -1,6 +1,7 @@
 // Line-style detection — underline detection, cover-strip state, build/read per-line style runs.
 // Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js (this = the app).
 import { readRegion } from '../util/canvas.js';
+import { rgbCss, rgbToHex, hexToRgb } from '../util/color.js';
 
 export const LineStyleMethods = {
   /**
@@ -150,9 +151,13 @@ export const LineStyleMethods = {
     // would close the attribute early (the run would silently fall back to the box's faux-bold clone).
     const fb = serif ? "'Times New Roman', Times, serif" : 'Arial, Helvetica, sans-serif';
     const css = [`font-weight:${r.bold ? 'bold' : 'normal'}`, `font-style:${r.italic ? 'italic' : 'normal'}`];
-    if (r.font) css.push(`font-family:'${r.font}', ${fb}`);
+    // A per-run font FAMILY (partial font change) wins over the page face; else the run's own face (r.font).
+    if (r.family) { const fam = this._familyCss(r.family).replace(/"/g, "'"); css.push(`font-family:${fam}`); }
+    else if (r.font) css.push(`font-family:'${r.font}', ${fb}`);
+    if (r.color) css.push(`color:${rgbCss(r.color)}`);             // per-run colour (partial colour change)
     if (r.underline) css.push('text-decoration:underline');
-    const attrs = `data-bold="${r.bold ? 1 : 0}" data-italic="${r.italic ? 1 : 0}"${r.underline ? ' data-underline="1"' : ''}`;
+    const attrs = `data-bold="${r.bold ? 1 : 0}" data-italic="${r.italic ? 1 : 0}"${r.underline ? ' data-underline="1"' : ''}` +
+      `${r.family ? ` data-family="${esc(r.family)}"` : ''}${r.color ? ` data-color="${rgbToHex(r.color)}"` : ''}`;
     return `<span ${attrs} style="${css.join(';')}">${esc(r.text)}</span>`;
   },
   /**
@@ -164,11 +169,13 @@ export const LineStyleMethods = {
   _readLineRuns(div) {
     if (!div || !div.querySelector('span[data-bold],span[data-italic],span[data-underline]')) return null;
     const runs = [];
+    const same = (a, b) => a.bold === b.bold && a.italic === b.italic && a.underline === b.underline &&
+      (a.family || null) === (b.family || null) && JSON.stringify(a.color || null) === JSON.stringify(b.color || null);
     const push = (text, st) => {
       if (!text) return;
       const last = runs[runs.length - 1];
-      if (last && last.bold === st.bold && last.italic === st.italic && last.underline === st.underline) { last.text += text; if (!last.font && st.font) last.font = st.font; }
-      else runs.push({ text, bold: st.bold, italic: st.italic, underline: st.underline, font: st.font || null });
+      if (last && same(last, st)) { last.text += text; if (!last.font && st.font) last.font = st.font; }
+      else runs.push({ text, bold: st.bold, italic: st.italic, underline: st.underline, font: st.font || null, family: st.family || null, color: st.color || null });
     };
     const walk = (node, inh) => {
       node.childNodes.forEach((child) => {
@@ -184,6 +191,9 @@ export const LineStyleMethods = {
         // Carry the run's OWN face (PDF.js loadedName) through an edit so each run keeps its real weight.
         const ff = child.style && child.style.fontFamily;
         if (ff) { const tok = ff.split(',')[0].replace(/["']/g, '').trim(); if (tok) st.font = tok; }
+        // Carry a partial font/colour change through an edit (data-* markers).
+        if (child.hasAttribute && child.hasAttribute('data-family')) st.family = child.getAttribute('data-family') || null;
+        if (child.hasAttribute && child.hasAttribute('data-color')) { try { st.color = hexToRgb(child.getAttribute('data-color')); } catch (_) {} }
         walk(child, st);
       });
     };
