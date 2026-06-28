@@ -11,7 +11,7 @@
 //
 // Font loading is injected (`loadFont(family,bold,italic) → Promise<mupdf.Font>`) so this module is
 // engine-pure and testable in Node — the worker supplies a fetch-based loader (see mupdfFonts.js).
-import { analyzePage, detectSpan } from './mupdfSpans.js';
+import { analyzePage, detectSpan, detectAlign } from './mupdfSpans.js';
 import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName, latexProfile, standardFamily } from './mupdfFontEngine.js';
 import { bundledCandidates, stemForName } from './mupdfFonts.js';
 
@@ -66,13 +66,23 @@ class Bytes {
 
 const f2 = (n) => (Math.round(n * 1000) / 1000).toString();   // compact fixed number for ops
 
-// ── colour helpers ──
-function parseColor(str, fallback) {
-  if (!str || typeof str !== 'string') return fallback;
-  const hex = str.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-  if (hex) return [parseInt(hex[1], 16) / 255, parseInt(hex[2], 16) / 255, parseInt(hex[3], 16) / 255];
-  const m = str.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-  if (m) return [+m[1] / 255, +m[2] / 255, +m[3] / 255];
+// ── colour helpers ── accepts what the frontend actually sends: an [r,g,b] ARRAY (0-255 or already
+// 0-1) OR a '#rrggbb' / 'rgb()/rgba()' string. (Mirrors backend _parse_color. The array form is the
+// one Add-text / the toolbar colour picker uses — missing it made coloured added text save as black.)
+function parseColor(c, fallback) {
+  if (c == null) return fallback;
+  if (Array.isArray(c) && c.length >= 3) {
+    let [r, g, b] = c.map(Number);
+    if ([r, g, b].some(Number.isNaN)) return fallback;
+    if (Math.max(r, g, b) > 1.0001) { r /= 255; g /= 255; b /= 255; }  // 0-255 ints → 0-1
+    return [r, g, b];
+  }
+  if (typeof c === 'string') {
+    const hex = c.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+    if (hex) return [parseInt(hex[1], 16) / 255, parseInt(hex[2], 16) / 255, parseInt(hex[3], 16) / 255];
+    const m = c.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+    if (m) return [+m[1] / 255, +m[2] / 255, +m[3] / 255];
+  }
   return fallback;
 }
 
@@ -378,26 +388,38 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         r._opts = opts;
       }
 
+      // Per-line widths (used for overflow scaling AND alignment re-anchoring).
+      const lineWidth = (parts) => parts.reduce((w, r) => w + measureRun(r.text, r._opts, r.size), 0);
+      let widths = lineModel.map(lineWidth);
+      let widest = Math.max(0, ...widths);
       // Overflow: if the widest line exceeds the space to the right margin, scale every run down.
-      const avail = pw - x - 4;
-      if (avail > 8) {
-        let widest = 0;
-        for (const parts of lineModel) widest = Math.max(widest, parts.reduce((w, r) => w + measureRun(r.text, r._opts, r.size), 0));
-        if (widest > avail) {
-          const s = Math.max(0.05, avail / widest);
-          for (const parts of lineModel) for (const r of parts) r.size = Math.max(4, r.size * s);
-        }
+      const availW = pw - x - 4;
+      if (availW > 8 && widest > availW) {
+        const s = Math.max(0.05, availW / widest);
+        for (const parts of lineModel) for (const r of parts) r.size = Math.max(4, r.size * s);
+        widths = lineModel.map(lineWidth);
+        widest = Math.max(0, ...widths);
       }
+
+      // Alignment: keep a right-/centre-aligned line anchored when the replacement length differs. An
+      // explicit toolbar align wins; else (replace only) detect it from the page layout; else left. A
+      // REPLACE re-anchors within the original line box (x .. right); an ADDED box within its widest line.
+      const editRight = +(e.right || x);
+      const align = (e.align === 'left' || e.align === 'center' || e.align === 'right') ? e.align
+        : (!isInsert && sp) ? detectAlign(analysis, x, editRight) : 'left';
+      const alignAvail = isInsert ? widest : Math.max(0, editRight - x);
 
       const rad = rot * Math.PI / 180;
       const cos = Math.cos(-rad), sin = Math.sin(-rad);   // CSS clockwise → PDF (negate)
       let drop = 0, prevMax = null;
-      for (const parts of lineModel) {
+      lineModel.forEach((parts, idx) => {
         const thisMax = Math.max(4, ...parts.map(r => r.size));
         if (prevMax !== null) drop += Math.max(prevMax, thisMax) * 1.2;
         prevMax = thisMax;
-        // Line origin (top-left coords) dropped down the page, then flipped to PDF bottom-left.
-        const lx = x + (rot ? -drop * Math.sin(rad) : 0);
+        // Line origin (top-left), shifted for alignment, then dropped down the page and flipped to PDF.
+        const off = align === 'right' ? (alignAvail - widths[idx]) : align === 'center' ? (alignAvail - widths[idx]) / 2 : 0;
+        const ax = x + Math.max(0, off);
+        const lx = ax + (rot ? -drop * Math.sin(rad) : 0);
         const lyTop = baseline + (rot ? drop * Math.cos(rad) : drop);
         let adv = 0;
         for (const r of parts) {
@@ -420,7 +442,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
             adv += w;
           }
         }
-      }
+      });
     }
 
     // Register used fonts in the page Resources, then append the content stream.
