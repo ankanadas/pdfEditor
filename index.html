@@ -776,6 +776,9 @@
     }
     .page-thumb-del svg { width: 13px; height: 13px; }
     .page-thumb:hover .page-thumb-del { display: grid; }
+    /* Touch grab handle — desktop reorders by dragging the whole tile, so it's hidden there; mobile
+       shows it (drag-and-drop doesn't fire for touch — see touchReorder.js + MobilePlatform). */
+    .thumb-grip { display: none; }
     .page-thumb .thumb-canvas { transition: transform .15s ease; }   /* instant rotate preview */
     /* Always-visible rotate bar at the bottom of every page tile (purple, labelled L/R). */
     .thumb-rotbar { display: flex; gap: 6px; width: 100%; margin-top: 2px; }
@@ -1121,6 +1124,30 @@
       .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 28px; height: 28px; }
       /* Keep the landing clean: only show the (disabled) dock once a PDF is open. */
       body:not(.has-pdf) .tool-dock { display: none; }
+
+      /* Mobile dock ORDER: bring the document tools (Merge, Rotate/Reorder) up BEFORE Erase so they're
+         not buried at the far end of the scroll row. Mobile-only — desktop keeps its side-rail layout. */
+      #editModeBtn { order: 1; }
+      #textModeBtn { order: 2; }
+      #annotateModeBtn { order: 3; }
+      #signatureModeBtn { order: 4; }
+      #mergeBtn { order: 5; }
+      #pagesPanelBtn { order: 6; }
+      #eraseModeBtn { order: 7; }
+      #stampModeBtn { order: 8; }
+      #clearSignatureBtn { order: 9; }
+
+      /* Touch reorder affordances: show the page grip + keep the delete button always reachable (no
+         hover on touch), and make both reorder handles a no-scroll grab zone. */
+      .thumb-grip {
+        display: grid; place-items: center; position: absolute; top: -8px; left: -8px;
+        width: 26px; height: 26px; border-radius: 50%; border: 2px solid #fff; padding: 0;
+        background: var(--brand, #6c4cf0); color: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.2);
+        z-index: 2; cursor: grab; touch-action: none;
+      }
+      .thumb-grip svg { width: 15px; height: 15px; }
+      .page-thumb-del { display: grid; }                 /* always reachable by tap on touch */
+      .merge-handle { touch-action: none; font-size: 22px; padding: 4px 6px; min-width: 32px; text-align: center; }
 
       /* The bottom status toast covers the tools/content on small screens — hide it on mobile. */
       #status, #status.show { display: none !important; }

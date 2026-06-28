@@ -12,6 +12,8 @@ import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { mergePdfBytes } from './mergeCore.js';
 import { downloadBytes } from './util/download.js';
+import { bindHandleReorder } from './util/touchReorder.js';
+import { detectPlatform } from './platform/detect.js';
 import {
   deviceCapBytes, deviceCapMb, withinDeviceCap, isEditableOutput,
   largeFileReasonSentence, DEVICE_CAP_MESSAGE,
@@ -576,6 +578,15 @@ function render() {
       handle.title = 'Drag to reorder';
       handle.textContent = '⠿';
       card.appendChild(handle);
+      // Touch reorder: HTML5 DnD doesn't fire for touch, so drag the grip via pointer events. Same
+      // reorder(fromId, toId, after) the desktop DnD calls — only the gesture differs.
+      if (detectPlatform() === 'mobile') {
+        card.draggable = false;
+        bindHandleReorder(handle, {
+          item: card, container: els.list, itemSelector: '.merge-card', axis: 'y',
+          onDrop: (from, to, after) => reorder(Number(from.dataset.id), Number(to.dataset.id), after),
+        });
+      }
     }
 
     const thumb = document.createElement('div');

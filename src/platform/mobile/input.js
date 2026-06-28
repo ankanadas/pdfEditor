@@ -1,4 +1,5 @@
 import { DesktopPlatform } from '../desktop/input.js';
+import { bindHandleReorder } from '../../util/touchReorder.js';
 
 /**
  * MobilePlatform — same interface as desktop. The app is already responsive via the
@@ -9,9 +10,25 @@ import { DesktopPlatform } from '../desktop/input.js';
 export class MobilePlatform extends DesktopPlatform {
   get name() { return 'mobile'; }
 
-  // MOBILE-TODO (awaiting spec): touch long-press + drag page reorder. For now inherit the
-  // desktop HTML5 drag-and-drop (bindPageReorder) — touch devices that support DnD still work.
-  // bindPageReorder(thumb) { /* touch reorder */ }
+  /**
+   * Touch page reorder: HTML5 drag-and-drop doesn't fire for touch, so drag from the per-tile grip
+   * handle via pointer events instead. movePage(from, insertBefore) is the same engine-agnostic
+   * reorder the desktop DnD calls — only the gesture differs.
+   */
+  bindPageReorder(thumb) {
+    thumb.draggable = false;                          // touch: don't let the browser start a native drag
+    const grip = thumb.querySelector('.thumb-grip');
+    const grid = document.getElementById('pagesGrid');
+    if (!grip || !grid) return;
+    bindHandleReorder(grip, {
+      item: thumb, container: grid, itemSelector: '.page-thumb', axis: 'x',
+      onDrop: (from, to, after) => {
+        const f = Number(from.dataset.index), j = Number(to.dataset.index);
+        if (Number.isNaN(f) || Number.isNaN(j)) return;
+        this.app.movePage(f, after ? j + 1 : j);
+      },
+    });
+  }
 
   // MOBILE-TODO (awaiting spec): pinch-zoom + long-press on the page canvas.
   // bindPageInput(pv) { /* touch gestures */ }

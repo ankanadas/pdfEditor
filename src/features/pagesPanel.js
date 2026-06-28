@@ -45,7 +45,12 @@ export const PagesPanelMethods = {
     grid.innerHTML = '';
     const hint = document.createElement('div');
     hint.className = 'pages-hint';
-    hint.textContent = 'Drag to reorder · use the purple bar to rotate · hover a page to delete';
+    // Mobile uses the grip handle (drag-and-drop doesn't work by touch); desktop drags the whole tile.
+    const touch = typeof window !== 'undefined' && window.matchMedia &&
+      (window.matchMedia('(max-width: 767px)').matches || window.matchMedia('(pointer: coarse)').matches);
+    hint.textContent = touch
+      ? 'Drag the ⠿ grip to reorder · use the purple bar to rotate · tap 🗑 to delete'
+      : 'Drag to reorder · use the purple bar to rotate · hover a page to delete';
     grid.appendChild(hint);
 
     for (let i = 0; i < n; i++) {
@@ -58,6 +63,16 @@ export const PagesPanelMethods = {
       const canvas = document.createElement('canvas');
       canvas.className = 'thumb-canvas';
       thumb.appendChild(canvas);
+
+      // Touch grab handle (mobile): HTML5 drag-and-drop doesn't fire for touch, so a press-drag on this
+      // grip reorders the page (see MobilePlatform.bindPageReorder). Hidden on desktop (whole-tile DnD).
+      const grip = document.createElement('button');
+      grip.className = 'thumb-grip';
+      grip.type = 'button';
+      grip.title = 'Drag to reorder';
+      grip.setAttribute('aria-label', `Drag to reorder page ${i + 1}`);
+      grip.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
+      thumb.appendChild(grip);
 
       const del = document.createElement('button');
       del.className = 'page-thumb-del';
