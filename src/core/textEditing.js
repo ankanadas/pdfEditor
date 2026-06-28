@@ -326,7 +326,8 @@ export const TextEditingMethods = {
       edit.runs = [runs.map(r => ({ text: r.text, bold: !!r.bold, italic: !!r.italic,
         ...(r.underline ? { underline: true } : {}),
         ...(r.color ? { color: r.color } : {}),                 // partial colour change (per-run)
-        ...(r.family ? { fontFamily: r.family } : {}) }))];      // partial font change (per-run, catalogue key)
+        ...(r.family ? { fontFamily: r.family } : {}),          // partial font change (per-run, catalogue key)
+        ...(r.link ? { link: r.link } : {}) }))];               // partial hyperlink (per-run)
     }
     // PARTIAL hyperlink: split the line into runs so only the selected range is linked + blue/underlined.
     if (line.linkRange) {

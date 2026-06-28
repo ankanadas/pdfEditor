@@ -157,8 +157,9 @@ export const LineStyleMethods = {
     if (r.color) css.push(`color:${rgbCss(r.color)}`);             // per-run colour (partial colour change)
     if (r.underline) css.push('text-decoration:underline');
     const attrs = `data-bold="${r.bold ? 1 : 0}" data-italic="${r.italic ? 1 : 0}"${r.underline ? ' data-underline="1"' : ''}` +
-      `${r.family ? ` data-family="${esc(r.family)}"` : ''}${r.color ? ` data-color="${rgbToHex(r.color)}"` : ''}`;
-    return `<span ${attrs} style="${css.join(';')}">${esc(r.text)}</span>`;
+      `${r.family ? ` data-family="${esc(r.family)}"` : ''}${r.color ? ` data-color="${rgbToHex(r.color)}"` : ''}${r.link ? ` data-link="${esc(r.link)}"` : ''}`;
+    const cls = r.link ? ' class="tt-has-link"' : '';
+    return `<span${cls} ${attrs} style="${css.join(';')}">${esc(r.text)}</span>`;
   },
   /**
    * Read a focused existing-line box back into a single line of style runs [{text,bold,italic,
@@ -170,12 +171,12 @@ export const LineStyleMethods = {
     if (!div || !div.querySelector('span[data-bold],span[data-italic],span[data-underline]')) return null;
     const runs = [];
     const same = (a, b) => a.bold === b.bold && a.italic === b.italic && a.underline === b.underline &&
-      (a.family || null) === (b.family || null) && JSON.stringify(a.color || null) === JSON.stringify(b.color || null);
+      (a.family || null) === (b.family || null) && JSON.stringify(a.color || null) === JSON.stringify(b.color || null) && (a.link || null) === (b.link || null);
     const push = (text, st) => {
       if (!text) return;
       const last = runs[runs.length - 1];
       if (last && same(last, st)) { last.text += text; if (!last.font && st.font) last.font = st.font; }
-      else runs.push({ text, bold: st.bold, italic: st.italic, underline: st.underline, font: st.font || null, family: st.family || null, color: st.color || null });
+      else runs.push({ text, bold: st.bold, italic: st.italic, underline: st.underline, font: st.font || null, family: st.family || null, color: st.color || null, link: st.link || null });
     };
     const walk = (node, inh) => {
       node.childNodes.forEach((child) => {
@@ -194,6 +195,7 @@ export const LineStyleMethods = {
         // Carry a partial font/colour change through an edit (data-* markers).
         if (child.hasAttribute && child.hasAttribute('data-family')) st.family = child.getAttribute('data-family') || null;
         if (child.hasAttribute && child.hasAttribute('data-color')) { try { st.color = hexToRgb(child.getAttribute('data-color')); } catch (_) {} }
+        if (child.hasAttribute && child.hasAttribute('data-link')) st.link = child.getAttribute('data-link') || null;
         walk(child, st);
       });
     };

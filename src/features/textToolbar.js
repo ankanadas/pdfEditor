@@ -349,14 +349,10 @@ export const TextToolbarMethods = {
     const l = t.line, div = t.el;
     const text = this.cleanEditableText(div.textContent);
     const psel = this._pendingLinkSel;
-    if (uri && psel && psel.el === div && psel.end > psel.start && psel.end <= text.length) {
-      // Partial: link ONLY the selected character range of the line (blue + underline that range).
-      l.linkRange = { uri, start: psel.start, end: psel.end };
-      l.link = null; l.linkRemoved = false;
-      this.trackEdit(this.lineToEdit(l, text));
-      this.refresh();                              // re-render so the partial style shows
-      return;
-    }
+    // Partial: link ONLY the selected range — route through the per-run model so it COMPOSES with any
+    // partial bold/colour/font already on the selection (the old linkRange path overrode them) and renders
+    // as distinct spans. _applyPartialLineStyle uses _pendingLinkSel.
+    if (uri && psel && psel.el === div && psel.end > psel.start && this._applyPartialLineStyle(t, 'link', uri)) return;
     // Whole line (no/whole selection, or removing).
     l.linkRange = null;
     this._setLink(l, uri);
@@ -457,11 +453,11 @@ export const TextToolbarMethods = {
    *  tracks. Returns false when there's no usable selection so the caller falls back to whole-line.
    *  `value`: bold/italic/underline → boolean; color → [r,g,b]; family → catalogue key. */
   _applyPartialLineStyle(t, kind, value) {
-    if (!['bold', 'italic', 'underline', 'color', 'family'].includes(kind)) return false;
+    if (!['bold', 'italic', 'underline', 'color', 'family', 'link'].includes(kind)) return false;
     const div = t.el, l = t.line;
-    // Font-family: the font picker's search input collapses the live selection on open, so fall back to the
-    // selection captured when the picker opened (_pendingFontSel). B/I/U/colour keep the live selection.
-    const sel = this._captureLineSelection() || (kind === 'family' ? this._pendingFontSel : null);
+    // Font-family / link: their pop-overs steal the live selection on open, so fall back to the selection
+    // captured when the pop-over opened (_pendingFontSel / _pendingLinkSel). B/I/U/colour keep the live one.
+    const sel = this._captureLineSelection() || (kind === 'family' ? this._pendingFontSel : kind === 'link' ? this._pendingLinkSel : null);
     if (!sel || sel.el !== div || !(sel.end > sel.start)) return false;
     // Per-character style from the current DOM (inherits each ancestor span's data-*/face/colour/family).
     const chars = [];
@@ -478,22 +474,24 @@ export const TextToolbarMethods = {
       const ff = ch.style && ch.style.fontFamily; if (ff) { const tok = ff.split(',')[0].replace(/["']/g, '').trim(); if (tok) st.font = tok; }
       if (ch.hasAttribute('data-family')) st.family = ch.getAttribute('data-family') || null;
       if (ch.hasAttribute('data-color')) { try { st.color = hexToRgb(ch.getAttribute('data-color')); } catch (_) {} }
+      if (ch.hasAttribute('data-link')) st.link = ch.getAttribute('data-link') || null;
       walk(ch, st);
     });
-    walk(div, { bold: !!l.bold, italic: !!l.italic, underline: !!l.underline, font: l.fontName || null, family: null, color: null });
+    walk(div, { bold: !!l.bold, italic: !!l.italic, underline: !!l.underline, font: l.fontName || null, family: null, color: null, link: null });
     if (!chars.length) return false;
     for (let i = sel.start; i < sel.end && i < chars.length; i++) {                              // the selection only
       if (kind === 'color') chars[i].color = value;
       else if (kind === 'family') { chars[i].family = value; chars[i].font = null; }             // a chosen family overrides the page face
+      else if (kind === 'link') { chars[i].link = value || null; if (value) { chars[i].underline = true; if (!chars[i].color) chars[i].color = LINK_BLUE; } }  // links: underline + blue (unless coloured)
       else chars[i][kind] = !!value;
     }
     const eq = (a, b) => a.bold === b.bold && a.italic === b.italic && a.underline === b.underline &&
-      a.font === b.font && (a.family || null) === (b.family || null) && JSON.stringify(a.color || null) === JSON.stringify(b.color || null);
+      a.font === b.font && (a.family || null) === (b.family || null) && JSON.stringify(a.color || null) === JSON.stringify(b.color || null) && (a.link || null) === (b.link || null);
     const runs = [];
     for (const ch of chars) {
       const last = runs[runs.length - 1];
       if (last && eq(last, ch)) last.text += ch.c;
-      else runs.push({ text: ch.c, bold: ch.bold, italic: ch.italic, underline: ch.underline, font: ch.font || null, family: ch.family || null, color: ch.color || null });
+      else runs.push({ text: ch.c, bold: ch.bold, italic: ch.italic, underline: ch.underline, font: ch.font || null, family: ch.family || null, color: ch.color || null, link: ch.link || null });
     }
     l.styleRuns = runs;
     l.bold = runs.every(r => r.bold); l.italic = runs.every(r => r.italic); l.underline = runs.every(r => r.underline);
