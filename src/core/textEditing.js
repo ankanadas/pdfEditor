@@ -189,11 +189,20 @@ export const TextEditingMethods = {
       // @font-face PDF.js injected (line.fontCss -> real Helvetica); an embedded font uses its
       // loadedName web font. Either way the edit box matches the page; fall back if neither resolves.
       // A toolbar font-family override wins over the page's own font; otherwise mirror PDF.js.
+      // EXCEPTION — a MIXED-style line (per-run bold/italic): the page's single baked face (e.g. a
+      // Calibri-Bold loadedName, when the line STARTS bold) can't render BOTH weights, so the regular
+      // runs inherit it and CSS font-weight:normal can't un-bold them → the whole line looks bold. Use a
+      // WEIGHT-RESPECTING family instead: the matching catalogue face (Calibri→Carlito) when the real font
+      // is known, else a generic sans/serif stack, so each run's own weight/slant renders.
+      const mixed = !!(line.styleRuns && line.styleRuns.length);
+      const mixedKey = mixed ? this._displayFontKey(line.fontFamily, this._realFontName(line)) : '';
       div.style.fontFamily = line.fontFamily
         ? this._familyCss(line.fontFamily)
-        : (line.fontCss
-          ? `${line.fontCss}, ${fallbackFamily}`
-          : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily));
+        : mixed
+          ? (mixedKey ? this._familyCss(mixedKey) : fallbackFamily)
+          : (line.fontCss
+            ? `${line.fontCss}, ${fallbackFamily}`
+            : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily));
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
       // Show the editable text in the line's REAL colour so the box blends into the page (e.g.
