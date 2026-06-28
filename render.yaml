@@ -8,12 +8,12 @@ services:
     rootDir: backend
     # NOTE: this line is the source of truth for the service plan — Render resets the dashboard
     # plan to match it on every Blueprint sync, so keep it at the plan you are paying for.
-    plan: standard
+    plan: starter
     buildCommand: pip install -r requirements.txt
     # 1 worker: each worker holds a whole base64 PDF + PyMuPDF's multiple-of-that working set in
-    # RAM, so a couple of concurrent large uploads per worker are memory-heavy. Standard (2 GB)
-    # has headroom over the old free tier, but we keep a single worker because it also makes the
-    # in-memory rate limiter exact (no per-worker x N). Raise --workers if you need more concurrency.
+    # RAM, so a couple of concurrent large uploads per worker are memory-heavy. Starter (512 MB) is
+    # tighter, so the single worker also keeps peak memory predictable, and it makes the in-memory
+    # rate limiter exact (no per-worker x N). Raise --workers/plan if you need more concurrency.
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1
     healthCheckPath: /health
     envVars:
