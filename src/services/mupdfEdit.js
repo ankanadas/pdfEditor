@@ -66,6 +66,12 @@ class Bytes {
 
 const f2 = (n) => (Math.round(n * 1000) / 1000).toString();   // compact fixed number for ops
 
+// Added text in a standard-equivalent family → the Base-14 standard font (name-only), so adding bold
+// text looks IDENTICAL to editing a standard line bold (both Helvetica-Bold), not Helvetica vs Arimo.
+// Proprietary/branded families (Calibri/Georgia/Roboto…) are NOT here — they keep their bundled clone.
+const ADD_B14 = { sans: 'sans', serif: 'serif', mono: 'mono', arial: 'sans', helvetica: 'sans',
+  verdana: 'sans', tahoma: 'sans', trebuchet: 'sans', times: 'serif', courier: 'mono', consolas: 'mono' };
+
 // ── colour helpers ── accepts what the frontend actually sends: an [r,g,b] ARRAY (0-255 or already
 // 0-1) OR a '#rrggbb' / 'rgb()/rgba()' string. (Mirrors backend _parse_color. The array form is the
 // one Add-text / the toolbar colour picker uses — missing it made coloured added text save as black.)
@@ -374,11 +380,14 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // its own name (keeps Helvetica as Helvetica, not a substituted Arial). The bundled Type0 substitute
       // is always the per-run catch-all (full Unicode).
       const reused = (!isInsert && sp) ? reusedOption(sp, pageFonts) : null;
-      const b14Family = (!isInsert && sp && !reused && e.fontFamily == null) ? (() => {
+      let b14Family = null;
+      if (!isInsert && sp && !reused && e.fontFamily == null) {
         const fam = standardFamily(sp.fontName);
         const info = pageFonts.get(stripName(sp.fontName || ''));
-        return (fam && (!info || !info.ff)) ? fam : null;   // standard AND not embedded
-      })() : null;
+        b14Family = (fam && (!info || !info.ff)) ? fam : null;        // editing a non-embedded standard font
+      } else if (isInsert) {
+        b14Family = ADD_B14[String(e.fontFamily || 'sans').toLowerCase()] || null;   // add-text consistency
+      }
       for (const parts of lineModel) for (const r of parts) {
         const bundled = await bundledOption(bundleSpec, r.bold, r.italic);
         const opts = [];
