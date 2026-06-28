@@ -428,6 +428,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         ? e.runs.map(ln => (ln || []).map(r => ({
             text: prep(r.text), size: r.size || boxSize,
             bold: !!r.bold, italic: !!r.italic, underline: !!r.underline || boxUnderline,
+            link: (typeof r.link === 'string' && r.link) ? r.link : null,
             color: parseColor(r.color, null) || defColor })))
         : (isInsert
             ? prep(e.newText).split(/\r\n?|\n/).map(l => [{ text: l, size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }])
@@ -482,6 +483,9 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
 
       const rad = rot * Math.PI / 180;
       const cos = Math.cos(-rad), sin = Math.sin(-rad);   // CSS clockwise → PDF (negate)
+      // Per-run hyperlink areas: a partial link (a linked run inside a box) gets its OWN clickable rect
+      // measured from the drawn glyphs (top-origin), merging contiguous same-uri runs. Mirrors edit_ops.py.
+      const runLinkSpans = [];
       let drop = 0, prevMax = null;
       lineModel.forEach((parts, idx) => {
         const thisMax = Math.max(4, ...parts.map(r => r.size));
@@ -492,6 +496,8 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         const ax = x + Math.max(0, off);
         const lx = ax + (rot ? -drop * Math.sin(rad) : 0);
         const lyTop = baseline + (rot ? drop * Math.cos(rad) : drop);
+        let cur = null;   // [uri, x0, x1, top, bottom] — merge contiguous same-uri runs on this line
+        const flush = () => { if (cur) { runLinkSpans.push({ rect: [cur[1], cur[3], cur[2], cur[4]], uri: cur[0] }); cur = null; } };
         let adv = 0;
         for (const r of parts) {
           if (!r.text) continue;
@@ -513,10 +519,30 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
               const uw = Math.max(0.4, r.size * 0.055), uy = py - r.size * 0.12;
               ops.op(`q ${f2(r.color[0])} ${f2(r.color[1])} ${f2(r.color[2])} RG ${f2(uw)} w ${f2(px)} ${f2(uy)} m ${f2(px + w)} ${f2(uy)} l S Q\n`);
             }
+            if (r.link && !rot) {     // accumulate the clickable area for a partially-linked run (top-origin)
+              const lt = pyTop - r.size * 0.8, lb = pyTop + r.size * 0.3;
+              if (cur && cur[0] === r.link) { cur[2] = px + w; cur[3] = Math.min(cur[3], lt); cur[4] = Math.max(cur[4], lb); }
+              else { flush(); cur = [r.link, px, px + w, lt, lb]; }
+            } else if (cur) { flush(); }
             adv += w;
           }
         }
+        flush();
       });
+      e._runLinkSpans = runLinkSpans;
+      // Whole-object clickable rect (top-origin), computed only when this edit carries/removes a link.
+      // Existing line → its captured bbox; added text → measured from the drawn block (mirrors
+      // text_runs.py _link_rect_for_edit) so the link tracks the TEXT, not the full-width container box.
+      if (e.link || e.linkRemoved) {
+        if (!isInsert) {
+          const top = +(e.top || 0), bottom = +(e.bottom || 0), right = +(e.right || x);
+          e._linkRect = [Math.max(0, x - 1), Math.max(0, top - 1), Math.max(right, x + 4) + 1, bottom + 1];
+        } else {
+          const nLines = Math.max(1, lineModel.filter(parts => parts.some(r => r.text)).length);
+          const lineH = boxSize * 1.2;
+          e._linkRect = [x, baseline - boxSize * 0.8, x + Math.max(widest, 4), baseline + (nLines - 1) * lineH + boxSize * 0.3];
+        }
+      }
     }
 
     // Register used fonts in the page Resources, then append the content stream.
@@ -538,16 +564,26 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       appendContents(doc, pageObj, stream);
     }
 
-    // Hyperlinks: place user-added links over their edited text, then restore any saved link that
-    // redaction dropped (overlapped a redacted rect, isn't a user-managed area, and isn't still present).
+    // Hyperlinks (port of edit_ops.py step 3): per-run partial links, then whole-object link/removal
+    // (dropping any stale link over the area first), then restore any saved link redaction dropped.
     const managedRects = [];
     for (const e of pageEdits) {
-      const link = e.link && typeof e.link === 'object' ? e.link : null;
-      if (link && link.uri && !e.linkRemoved) {
-        const lr = [+(e.x || 0), +(e.top || 0), +(e.right || e.x || 0), +(e.bottom || e.top || 0)];
-        managedRects.push(lr);
-        try { page.createLink(lr, link.uri); } catch (_) {}
+      // 3a) Per-run links — a hyperlink over PART of a box (the selected word).
+      for (const sp of (e._runLinkSpans || [])) {
+        managedRects.push(sp.rect);
+        try { page.createLink(sp.rect, sp.uri); } catch (_) {}
       }
+      // 3b) Whole-object link or removal (rect measured from the drawn text, not the container box).
+      const r = e._linkRect;
+      if (!r) continue;
+      managedRects.push(r);
+      const link = e.link && typeof e.link === 'object' ? e.link : null;
+      const uri = link && typeof link.uri === 'string' ? link.uri : null;
+      try {                                  // drop any stale link over this area first (URL change / removal)
+        const stale = page.getLinks().filter((l) => { try { return l.isExternal() && l.getURI() && rectsIntersect(l.getBounds(), r); } catch (_) { return false; } });
+        for (const l of stale) { try { page.deleteLink(l); } catch (_) {} }
+      } catch (_) {}
+      if (uri && !e.linkRemoved) { try { page.createLink(r, uri); } catch (_) {} }
     }
     if (savedLinks.length && redactRects.length) {
       let current = [];
