@@ -92,6 +92,27 @@ function parseColor(c, fallback) {
   return fallback;
 }
 
+// ToUnicode repair (port of text_runs.py _clean_tounicode): the engine writes inter-word spaces into a
+// freshly-embedded font's ToUnicode CMap as U+00A0 (nbsp), and a reused hyphen as U+00AD (soft hyphen) —
+// both render fine but make the edited text COPY/EXTRACT as "unreadable unicode". Rewrite those bfchar/
+// bfrange DESTINATIONS back to plain space / hyphen. Length-preserving (4 hex → 4 hex) so /Length stays
+// valid. Operates on a decompressed save so the CMap streams are plain bytes.
+function cleanToUnicodeBytes(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);   // latin1
+  // Length-preserving (<00a0>→<0020>, <00ad>→<002d>). CRITICAL: consume EVERY pair/triple (not just the
+  // 00a0 ones) so we never mis-align a SOURCE code as a destination — matching only the 00a0 ones shifts
+  // the regex onto a following source and corrupts unrelated mappings (the roboto-gibberish bug).
+  const fixDst = (dst) => { const d = dst.toLowerCase(); return d === '00a0' ? '0020' : d === '00ad' ? '002d' : dst; };
+  s = s.replace(/beginbfchar[\s\S]*?endbfchar/g, (blk) =>          // bfchar:  <src> <dst>  → fix dst
+    blk.replace(/(<[0-9a-fA-F]+>)(\s*)<([0-9a-fA-F]{4})>/g, (m, src, ws, dst) => `${src}${ws}<${fixDst(dst)}>`));
+  s = s.replace(/beginbfrange[\s\S]*?endbfrange/g, (blk) =>        // bfrange: <lo> <hi> <dst>  → fix dst
+    blk.replace(/(<[0-9a-fA-F]+>)(\s*)(<[0-9a-fA-F]+>)(\s*)<([0-9a-fA-F]{4})>/g, (m, lo, w1, hi, w2, dst) => `${lo}${w1}${hi}${w2}<${fixDst(dst)}>`));
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
+  return out;
+}
+
 const rectsIntersect = (a, b) => !(a[2] < b[0] || b[2] < a[0] || a[3] < b[1] || b[3] < a[1]);
 const sameRect = (a, b) => Math.abs(a[0] - b[0]) < 1.5 && Math.abs(a[1] - b[1]) < 1.5 && Math.abs(a[2] - b[2]) < 1.5 && Math.abs(a[3] - b[3]) < 1.5;
 
@@ -391,7 +412,9 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       for (const parts of lineModel) for (const r of parts) {
         const bundled = await bundledOption(bundleSpec, r.bold, r.italic);
         const opts = [];
-        if (reused && sp && r.bold === sp.bold && r.italic === sp.italic) opts.push(reused);
+        // Reuse the original embedded font only when the user did NOT pick a toolbar font — an explicit
+        // family choice (e.fontFamily set) must win, so it gets the chosen face, not the reused original.
+        if (reused && sp && e.fontFamily == null && r.bold === sp.bold && r.italic === sp.italic) opts.push(reused);
         else if (b14Family) opts.push(base14Option(b14Family, r.bold, r.italic));
         opts.push(bundled);
         r._opts = opts;
@@ -445,8 +468,10 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
             ops.op(' Tj ET Q\n');
             const w = measureSeg(seg, r.size);
             if (r.underline && !rot) {
-              const ut = Math.max(0.4, r.size * 0.06), uy = py - r.size * 0.12;
-              ops.op(`q ${f2(r.color[0])} ${f2(r.color[1])} ${f2(r.color[2])} rg ${f2(px)} ${f2(uy - ut)} ${f2(w)} ${f2(ut)} re f Q\n`);
+              // Stroke a LINE just below the baseline (matches the backend's draw_line: width size*0.055,
+              // offset size*0.12) so it's a "line" drawing item, not a filled rect.
+              const uw = Math.max(0.4, r.size * 0.055), uy = py - r.size * 0.12;
+              ops.op(`q ${f2(r.color[0])} ${f2(r.color[1])} ${f2(r.color[2])} RG ${f2(uw)} w ${f2(px)} ${f2(uy)} m ${f2(px + w)} ${f2(uy)} l S Q\n`);
             }
             adv += w;
           }
@@ -495,7 +520,16 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   // Subset every embedded font down to the glyphs actually used (we embed full TTFs for Unicode
   // coverage), so the output stays small. Best-effort — never fail the save over it.
   try { doc.subsetFonts(); } catch (_) {}
-  return doc.saveToBuffer('compress').asUint8Array().slice();
+  // Repair the new fonts' ToUnicode (nbsp/soft-hyphen → space/hyphen) so the edited text copies/extracts
+  // as clean ASCII: save decompressed (CMaps as plain bytes), byte-fix, reopen, save compressed.
+  if (typeof globalThis !== 'undefined' && globalThis.__SKIP_TOUNI) return doc.saveToBuffer('compress').asUint8Array().slice();
+  try {
+    const raw = doc.saveToBuffer('decompress').asUint8Array();
+    const cleaned = cleanToUnicodeBytes(raw);
+    return mupdf.Document.openDocument(cleaned, 'application/pdf').saveToBuffer('compress').asUint8Array().slice();
+  } catch (_) {
+    return doc.saveToBuffer('compress').asUint8Array().slice();   // fall back if the repair pass fails
+  }
 }
 
 function applyAnnotations(mupdf, doc, annotations) {
