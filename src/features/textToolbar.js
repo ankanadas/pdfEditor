@@ -72,6 +72,17 @@ export const TextToolbarMethods = {
       if (window.matchMedia && window.matchMedia('(max-width: 767px)').matches) return;   // mobile handled by the touch logic below
       if (isOutside(e.target)) dismiss();
     }, true);
+    // The click that EXITS an existing-text edit (mousedown on bare canvas while a line box is focused)
+    // must NOT also chain-open a fresh Add-text box on that same click. Flag it precisely here — only when
+    // a box is genuinely focused and the press lands on blank canvas — so a SEPARATE later add-click (box
+    // already blurred) is unaffected. modeManager.handlePageClick consumes the flag. (Capture, pre-blur.)
+    document.addEventListener('mousedown', (e) => {
+      const ab = this.activeEditBox;
+      // Set ONLY when a line box is genuinely focused and the press is on bare canvas; clear on any other
+      // mousedown so a stale flag (one whose click never reached handlePageClick) can't suppress a later add.
+      this._exitEditClick = !!(ab && ab.isConnected && document.activeElement === ab && !ab.contains(e.target) &&
+        !(e.target.closest && e.target.closest('#textToolbar, .tt-font-pop, .tt-color-pop, .tt-link-pop, .insert-editor, .insert-overlay, .editable-text-box')));
+    }, true);
     // Mobile: dismiss on a deliberate TAP outside, but NOT on a scroll/drag — the pinned toolbar must stay
     // while you scroll yet exit the edit when you tap blank space. Tracking the touch tells tap from scroll.
     let _ts = null;
@@ -389,7 +400,9 @@ export const TextToolbarMethods = {
     if (kind === 'link') { this._applyLink(t, value); this._reflectTextToolbar(); this._positionTextToolbar(); return; }
     if (t.kind === 'editor') {
       const ie = this._activeInsertEditor;
-      const partial = !!(ie && ie.hasSelection && ie.hasSelection());
+      // PARTIAL only when a PROPER sub-range is selected — a select-all (whole box) takes the box-level
+      // path so colour/underline/font land on the box itself (the div), matching "the whole text is red".
+      const partial = !!(ie && ie.hasSelection && ie.hasSelection() && !(ie.isWholeSelection && ie.isWholeSelection()));
       if (kind === 'bold' || kind === 'italic' || kind === 'size') {
         if (ie) ie.applyStyle(kind, value);
       } else if ((kind === 'underline' || kind === 'color' || kind === 'family') && partial) {
