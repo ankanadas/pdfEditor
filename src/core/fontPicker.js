@@ -125,8 +125,12 @@ export const FontPickerMethods = {
     list.innerHTML = '';
     const optHTML = (f) => {
       const sel = f.key === cur ? ' selected' : '';
+      // f.css contains double quotes (e.g. "pf-arimo", "Times New Roman"); they MUST be HTML-escaped or
+      // they close the style="" attribute early — which left every quoted font rendering in the default
+      // face instead of its own. &quot; decodes back to " so the CSS font-family is valid.
+      const cssAttr = f.css.replace(/"/g, '&quot;');
       return `<button type="button" class="tt-font-opt${sel}" role="option" data-key="${f.key}" ` +
-        `style="font-family:${f.css}"><span>${f.name}</span><span class="tt-font-tag">${f.tag}</span></button>`;
+        `style="font-family:${cssAttr}"><span>${f.name}</span><span class="tt-font-tag">${f.tag}</span></button>`;
     };
     const match = (f) => !q || f.name.toLowerCase().includes(q) || f.tag.toLowerCase().includes(q);
     let html = '';
