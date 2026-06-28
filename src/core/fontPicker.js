@@ -76,6 +76,9 @@ export const FontPickerMethods = {
 
     const close = () => { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
     const open = () => {
+      // Capture the existing-text selection NOW — the search input below steals focus on open, collapsing
+      // it, which would make a font change apply to the WHOLE line instead of the selected part.
+      this._pendingFontSel = this._captureLineSelection ? this._captureLineSelection() : null;
       const isMobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
       if (isMobile) {
         // Mobile: blur the editor so the keyboard CLOSES — the full-screen font sheet then shows the whole
@@ -98,6 +101,7 @@ export const FontPickerMethods = {
       const opt = e.target.closest('.tt-font-opt'); if (!opt) return;
       const key = opt.dataset.key;
       this.applyTextStyle('family', key);
+      this._pendingFontSel = null;            // consumed
       this._pushRecentFont(key);
       this._setFontPickerValue(key);
       close();
