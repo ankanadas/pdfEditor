@@ -44,8 +44,11 @@ export const FONT_CATALOG = [
   { key: 'jetbrainsmono', name: 'JetBrains Mono', tag: 'Mono', css: '"JetBrains Mono", "pf-jetbrains-mono", monospace' },
   { key: 'sourcecodepro', name: 'Source Code Pro', tag: 'Mono', css: '"Source Code Pro", "pf-source-code-pro", monospace' },
   { key: 'ibmplexmono', name: 'IBM Plex Mono', tag: 'Mono', css: '"IBM Plex Mono", "pf-ibm-plex-mono", monospace' },
-  { key: 'brushscript', name: 'Brush Script', tag: 'Script', css: '"Brush Script MT", "pf-pacifico", cursive' },
-  { key: 'pacifico', name: 'Pacifico', tag: 'Script', css: 'Pacifico, "pf-pacifico", cursive' },
+  // We can only EMBED the open Pacifico for this script slot (Brush Script MT is proprietary), so the
+  // preview leads with the bundled pf-pacifico — the editor preview and the saved file then MATCH instead
+  // of "picked Brush Script, got Pacifico".
+  { key: 'brushscript', name: 'Brush Script', tag: 'Script', css: '"pf-pacifico", "Brush Script MT", cursive' },
+  { key: 'pacifico', name: 'Pacifico', tag: 'Script', css: '"pf-pacifico", Pacifico, cursive' },
   { key: 'comicneue', name: 'Comic Neue', tag: 'Script', css: '"Comic Neue", "pf-comic-neue", cursive' },
 ];
 
