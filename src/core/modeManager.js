@@ -116,10 +116,6 @@ export const ModeManagerMethods = {
       this.showStatus('Editing is disabled on rotated pages. Un-rotate the page to edit it.', 'info');
       return;
     }
-    // Edit mode owns existing text via the per-line boxes; a click that reaches the bare
-    // canvas here is blank space, and Edit must NOT add new text there.
-    if (this.mode === 'edit') return;
-
     // Map the click to that page's intrinsic canvas pixels (handles CSS scaling), then
     // to PDF points (top-left origin) — the coordinate space used when saving.
     const rect = pv.canvas.getBoundingClientRect();
@@ -127,10 +123,11 @@ export const ModeManagerMethods = {
     const xPt = ((event.clientX - rect.left) * toIntrinsic) / this.scale;
     const clickYPt = ((event.clientY - rect.top) * toIntrinsic) / this.scale;
 
-    // 'text' = Add Text tool (click anywhere adds). 'auto' = smart mode: existing text is
-    // covered by editable line boxes, so a click landing on the canvas is genuinely blank
-    // space → add new text there (and reflect the Add button).
-    if (this.mode === 'text' || this.mode === 'auto') {
+    // Dynamic clicking model: in EVERY editing mode (Add, smart/auto, AND Edit) existing text is
+    // covered by editable line boxes, so a click that lands on the bare canvas is genuinely blank
+    // space → add new text there. Picking the Edit tool no longer "locks out" adding; picking Add no
+    // longer locks out editing (clicking a line still edits it via its box). 'view' stays read-only.
+    if (this.mode === 'text' || this.mode === 'auto' || this.mode === 'edit') {
       // The click that closes an open Add-text editor must NOT also open a fresh one — it only
       // commits. The next deliberate click then adds/edits based on where it lands. Compare the EVENT
       // timestamps (same physical click = mousedown→click a few ms apart, regardless of how long the

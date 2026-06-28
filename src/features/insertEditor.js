@@ -266,6 +266,7 @@ export const InsertEditorMethods = {
       if (done) return;
       done = true;
       document.removeEventListener('mousedown', onDocDown, true);
+      document.removeEventListener('pointerdown', onDocPointerDown, true);
       document.removeEventListener('touchstart', onTS, true);
       document.removeEventListener('touchmove', onTM, true);
       document.removeEventListener('touchend', onTE, true);
@@ -295,6 +296,20 @@ export const InsertEditorMethods = {
       }
       if (changed) this.commitHistory();
       this.renderCurrentPage();
+      // If this commit was triggered by clicking an existing-text line (switching Add -> Edit), the
+      // re-render above detached the box the click landed on, so the browser never focused it. Re-focus
+      // the line now at the click point and drop a collapsed caret (no selection bleed).
+      if (this._refocusLineAt) {
+        const pt = this._refocusLineAt; this._refocusLineAt = null;
+        let tries = 0;
+        const tryFocus = () => {
+          const box = document.elementFromPoint(pt.x, pt.y);
+          const lineBox = box && box.closest && box.closest('.editable-text-box');
+          if (lineBox) { lineBox.focus(); const r = document.createRange(); r.selectNodeContents(lineBox); r.collapse(true); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); return; }
+          if (++tries < 15) requestAnimationFrame(tryFocus);     // boxes may rebuild over a few frames
+        };
+        requestAnimationFrame(tryFocus);
+      }
     };
     // Let the toolbar's Delete remove the whole Add-text box: cancel (don't commit) -> the editor +
     // its (uncommitted) text are discarded and the box disappears.
@@ -307,13 +322,24 @@ export const InsertEditorMethods = {
       if (done || div.contains(e.target)) return;
       // Don't commit when the click is on a styling control (Add bar, floating toolbar, or a picker sheet).
       if (onStyleControl(e.target)) return;
+      // Remember if the commit is being driven by a click on an existing-text line, so finish() can
+      // re-focus that line after the re-render (switching Add -> Edit in one click).
+      const lineHit = e.target && e.target.closest && e.target.closest('.editable-text-box');
+      this._refocusLineAt = lineHit ? { x: e.clientX, y: e.clientY } : null;
       // Record the EVENT's timestamp (not Date.now()) so the page-click guard is immune to how long
       // finish()/renderCurrentPage() takes — else a slow re-render pushes Date.now() past the window and
       // the SAME click that committed also chain-opens a fresh Add-text box.
       this._lastInsertCommitAt = e.timeStamp;
       finish(true);
     };
+    // Also commit on an outside POINTERDOWN (mouse/pen) — an overlay's drag handler calls
+    // preventDefault() on its pointerdown, which suppresses the compatibility mousedown, so clicking
+    // ANOTHER text box (overlay) wouldn't otherwise close this editor and an empty box would linger.
+    // Capture phase fires before the overlay's own pointerdown (whose stopPropagation can't reach us).
+    // Touch is left to the tap handlers below so scroll-to-dismiss still works on mobile.
+    const onDocPointerDown = (e) => { if (e.pointerType === 'touch') return; onDocDown(e); };
     document.addEventListener('mousedown', onDocDown, true);
+    document.addEventListener('pointerdown', onDocPointerDown, true);
     // Mobile: also commit on a deliberate TAP outside — on iOS the keyboard-dismiss can eat the mousedown,
     // so one tap on blank space wouldn't close the box ("can't exit add mode"). Track touch to tell tap/scroll.
     const onTS = (e) => { const p = e.touches && e.touches[0]; this._etap = p ? { x: p.clientX, y: p.clientY, moved: false } : null; };

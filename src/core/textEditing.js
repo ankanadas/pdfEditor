@@ -143,7 +143,13 @@ export const TextEditingMethods = {
         if (pending.linkRange) line.linkRange = pending.linkRange;
         // A committed mixed-style edit re-renders from its own runs (so its per-run B/I/U persists);
         // a plain (non-rich) edit clears any original run model so it stays a single style.
-        line.styleRuns = (pending.runs && pending.runs.length && !pending.linkRange) ? pending.runs[0] : null;
+        // lineToEdit serialises a per-run font as `fontFamily`; the run renderer (_lineRunSpanHTML) reads
+        // `family`, so map it back — else a partial FONT change is dropped on re-render (the box reverts to
+        // the line's face) while colour (same key both ways) survives. That mismatch is the "font reverts
+        // to the original when I click back into the line" bug.
+        line.styleRuns = (pending.runs && pending.runs.length && !pending.linkRange)
+          ? pending.runs[0].map(r => ({ ...r, family: r.family || r.fontFamily || null }))
+          : null;
       }
       // Editor-only "linked" affordance (a detected-on-load OR toolbar-applied link); never exported.
       if (line.link) div.classList.add('tt-has-link');
@@ -262,6 +268,10 @@ export const TextEditingMethods = {
           this.trackEdit(this.lineToEdit(line, newText, this._readLineRuns(div)));
           div.dataset.originalText = newText;
         }
+        // Drop any lingering text selection so it can't leak into the next mode (Add-text or another
+        // line). Partial styling restores the selection WHILE editing; once the box blurs we clear it.
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount && div.contains(sel.getRangeAt(0).commonAncestorContainer)) sel.removeAllRanges();
       });
 
       // Keep each box a single line: Enter commits the edit instead of adding a line. Escape exits the

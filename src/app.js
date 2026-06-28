@@ -365,7 +365,10 @@ class PDFEditorApp {
     this.insertOverlays = this.insertOverlays.filter(el => !pv.wrapper.contains(el));
     this.clearPageOverlays(pv);
     this.createInsertOverlays(pv);
-    if (this.mode === 'edit' || this.mode === 'auto') this.createEditableTextBoxes(pv);
+    // Dynamic clicking model: existing text is editable in EVERY editing mode (Edit, Add, and smart/auto)
+    // so a click on a line always edits it, regardless of which tool button is "locked". Only the
+    // read-only large-file 'view' mode (and non-text tools) omit the per-line boxes.
+    if (this.mode === 'edit' || this.mode === 'auto' || this.mode === 'text') this.createEditableTextBoxes(pv);
   }
 
 

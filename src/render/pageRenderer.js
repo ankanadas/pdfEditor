@@ -74,9 +74,10 @@ export const PageRendererMethods = {
         // removed element and _positionTextToolbar would hide the toolbar (e.g. after styling/linking a
         // committed overlay, which re-renders it).
         this.insertOverlays = [];
-        // Edit and smart (auto) modes both expose existing text as per-line editable boxes;
-        // every other mode paints committed line edits straight onto the canvas instead.
-        const textEditing = this.mode === 'edit' || this.mode === 'auto';
+        // Every editing mode (Edit, Add, and smart/auto) exposes existing text as per-line editable
+        // boxes — the dynamic clicking model means a click on a line edits it in any of them. Only the
+        // read-only 'view' mode (and non-text tools) paint committed line edits straight onto the canvas.
+        const textEditing = this.mode === 'edit' || this.mode === 'auto' || this.mode === 'text';
         for (const pv of this.pageViews) {
           this.clearPageOverlays(pv);
           await pv.page.render({ canvasContext: pv.ctx, viewport: pv.viewport }).promise;
