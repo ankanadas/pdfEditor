@@ -53,21 +53,25 @@ export function analyzePage(page) {
       });
     }
   }
-  // Per-char colours (the JSON line carries no colour) — used to recover white-on-dark text.
+  // Per-char colours (the JSON line carries no colour) — used so an edit keeps the original text colour.
   const colors = [];
   try {
     page.toStructuredText('preserve-whitespace').walk({
-      onChar(_c, origin, _font, _size, _quad, argb) {
-        if (origin) colors.push({ x: origin[0], y: origin[1], rgb: argbToRgb(argb) });
+      onChar(_c, origin, _font, _size, _quad, color) {
+        if (origin) colors.push({ x: origin[0], y: origin[1], rgb: normColor(color) });
       },
     });
   } catch (_) {}
   return { spans, colors };
 }
 
-function argbToRgb(argb) {
-  const v = (argb || 0) >>> 0;                    // 0 → black (default)
-  return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
+// mupdf's StructuredText walk reports a Color as an array of components in 0..1 (NOT a packed int):
+// 1 = gray, 3 = RGB, 4 = CMYK. Normalise to an [r,g,b] triple.
+function normColor(c) {
+  if (!Array.isArray(c) || !c.length) return [0, 0, 0];
+  if (c.length === 1) return [c[0], c[0], c[0]];
+  if (c.length === 4) { const [cy, m, y, k] = c; return [(1 - cy) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k)]; }
+  return [c[0], c[1], c[2]];
 }
 
 /**
