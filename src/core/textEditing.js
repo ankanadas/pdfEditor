@@ -323,7 +323,10 @@ export const TextEditingMethods = {
     // partial underline) so each run keeps its style on save. Sent only when there's real text and
     // >1 run; the linkRange path below (a partial hyperlink) builds its own runs and takes priority.
     if (runs && runs.length > 1 && !line.linkRange) {
-      edit.runs = [runs.map(r => ({ text: r.text, bold: !!r.bold, italic: !!r.italic, ...(r.underline ? { underline: true } : {}) }))];
+      edit.runs = [runs.map(r => ({ text: r.text, bold: !!r.bold, italic: !!r.italic,
+        ...(r.underline ? { underline: true } : {}),
+        ...(r.color ? { color: r.color } : {}),                 // partial colour change (per-run)
+        ...(r.family ? { fontFamily: r.family } : {}) }))];      // partial font change (per-run, catalogue key)
     }
     // PARTIAL hyperlink: split the line into runs so only the selected range is linked + blue/underlined.
     if (line.linkRange) {

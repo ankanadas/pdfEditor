@@ -437,6 +437,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
             text: prep(r.text), size: r.size || boxSize,
             bold: !!r.bold, italic: !!r.italic, underline: !!r.underline || boxUnderline,
             link: (typeof r.link === 'string' && r.link) ? r.link : null,
+            fontFamily: (typeof r.fontFamily === 'string' && r.fontFamily) ? r.fontFamily : null,   // partial font change
             color: parseColor(r.color, null) || defColor })))
         : (isInsert
             ? prep(e.newText).split(/\r\n?|\n/).map(l => [{ text: l, size: boxSize, bold: wantBold, italic: wantItalic, underline: boxUnderline, color: defColor }])
@@ -466,12 +467,16 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         b14Family = (fam && (!info || !info.ff)) ? fam : null;        // editing a non-embedded standard font
       }
       for (const parts of lineModel) for (const r of parts) {
-        const bundled = await bundledOption(bundleSpec, r.bold, r.italic);
+        // A per-run font (partial font change on PART of a line) overrides the box font for THIS run only:
+        // derive its own spec/Base-14/reuse exactly like the box-level explicit-family path.
+        let rSpec = bundleSpec, rB14 = b14Family, rReused = reused, rExplicit = e.fontFamily != null;
+        if (r.fontFamily) { rSpec = { key: String(r.fontFamily).toLowerCase() }; rB14 = ADD_B14[String(r.fontFamily).toLowerCase()] || null; rReused = null; rExplicit = true; }
+        const bundled = await bundledOption(rSpec, r.bold, r.italic);
         const opts = [];
         // Reuse the original embedded font only when the user did NOT pick a toolbar font — an explicit
-        // family choice (e.fontFamily set) must win, so it gets the chosen face, not the reused original.
-        if (reused && sp && e.fontFamily == null && r.bold === sp.bold && r.italic === sp.italic) opts.push(reused);
-        else if (b14Family) opts.push(base14Option(b14Family, r.bold, r.italic));
+        // family choice (box- or run-level) must win, so it gets the chosen face, not the reused original.
+        if (rReused && sp && !rExplicit && r.bold === sp.bold && r.italic === sp.italic) opts.push(rReused);
+        else if (rB14) opts.push(base14Option(rB14, r.bold, r.italic));
         opts.push(bundled);
         r._opts = opts;
       }

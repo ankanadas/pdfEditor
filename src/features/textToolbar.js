@@ -443,17 +443,17 @@ export const TextToolbarMethods = {
     }
     this.commitHistory();
   },
-  /** Bold/italic/underline applied to ONLY the selected character range of an existing line (partial
-   *  styling). Builds a per-character style model from the current box, toggles `kind` over the selection,
-   *  coalesces back into runs (each keeping its own face), re-renders + tracks. Returns false when there's
-   *  no usable selection so the caller falls back to whole-line. (Font/colour are NOT partial yet — the
-   *  save's per-run model carries bold/italic/underline only.) */
+  /** Bold/italic/underline/colour/font-family applied to ONLY the selected character range of an existing
+   *  line (partial styling). Builds a per-character style model from the current box, applies `kind` over
+   *  the selection, coalesces back into runs (each keeping its own face/colour/family), re-renders +
+   *  tracks. Returns false when there's no usable selection so the caller falls back to whole-line.
+   *  `value`: bold/italic/underline → boolean; color → [r,g,b]; family → catalogue key. */
   _applyPartialLineStyle(t, kind, value) {
-    if (!(kind === 'bold' || kind === 'italic' || kind === 'underline')) return false;
+    if (!['bold', 'italic', 'underline', 'color', 'family'].includes(kind)) return false;
     const div = t.el, l = t.line;
     const sel = this._captureLineSelection();              // { el, start, end } char offsets, or null
     if (!sel || sel.el !== div || !(sel.end > sel.start)) return false;
-    // Per-character style from the current DOM (inherits each ancestor span's data-*/face).
+    // Per-character style from the current DOM (inherits each ancestor span's data-*/face/colour/family).
     const chars = [];
     const walk = (node, inh) => node.childNodes.forEach((ch) => {
       if (ch.nodeType === Node.TEXT_NODE) { for (const c of ch.nodeValue) chars.push({ c, ...inh }); return; }
@@ -466,16 +466,24 @@ export const TextToolbarMethods = {
       if (ch.hasAttribute('data-underline')) st.underline = ch.getAttribute('data-underline') === '1';
       else if (ch.style && /underline/.test(ch.style.textDecoration || '')) st.underline = true;
       const ff = ch.style && ch.style.fontFamily; if (ff) { const tok = ff.split(',')[0].replace(/["']/g, '').trim(); if (tok) st.font = tok; }
+      if (ch.hasAttribute('data-family')) st.family = ch.getAttribute('data-family') || null;
+      if (ch.hasAttribute('data-color')) { try { st.color = hexToRgb(ch.getAttribute('data-color')); } catch (_) {} }
       walk(ch, st);
     });
-    walk(div, { bold: !!l.bold, italic: !!l.italic, underline: !!l.underline, font: l.fontName || null });
+    walk(div, { bold: !!l.bold, italic: !!l.italic, underline: !!l.underline, font: l.fontName || null, family: null, color: null });
     if (!chars.length) return false;
-    for (let i = sel.start; i < sel.end && i < chars.length; i++) chars[i][kind] = !!value;   // toggle the selection only
+    for (let i = sel.start; i < sel.end && i < chars.length; i++) {                              // the selection only
+      if (kind === 'color') chars[i].color = value;
+      else if (kind === 'family') { chars[i].family = value; chars[i].font = null; }             // a chosen family overrides the page face
+      else chars[i][kind] = !!value;
+    }
+    const eq = (a, b) => a.bold === b.bold && a.italic === b.italic && a.underline === b.underline &&
+      a.font === b.font && (a.family || null) === (b.family || null) && JSON.stringify(a.color || null) === JSON.stringify(b.color || null);
     const runs = [];
     for (const ch of chars) {
       const last = runs[runs.length - 1];
-      if (last && last.bold === ch.bold && last.italic === ch.italic && last.underline === ch.underline && last.font === ch.font) last.text += ch.c;
-      else runs.push({ text: ch.c, bold: ch.bold, italic: ch.italic, underline: ch.underline, font: ch.font || null });
+      if (last && eq(last, ch)) last.text += ch.c;
+      else runs.push({ text: ch.c, bold: ch.bold, italic: ch.italic, underline: ch.underline, font: ch.font || null, family: ch.family || null, color: ch.color || null });
     }
     l.styleRuns = runs;
     l.bold = runs.every(r => r.bold); l.italic = runs.every(r => r.italic); l.underline = runs.every(r => r.underline);
@@ -488,8 +496,8 @@ export const TextToolbarMethods = {
    *  immediately; trackEdit does not re-render, so the box keeps focus). */
   _applyLineStyle(t, kind, value) {
     const l = t.line, div = t.el;
-    // A TEXT SELECTION inside the line + a B/I/U toggle → style ONLY the selected range (partial).
-    if ((kind === 'bold' || kind === 'italic' || kind === 'underline') && this._applyPartialLineStyle(t, kind, value)) return;
+    // A TEXT SELECTION inside the line + a B/I/U/colour/font toggle → style ONLY the selected range.
+    if (['bold', 'italic', 'underline', 'color', 'family'].includes(kind) && this._applyPartialLineStyle(t, kind, value)) return;
     const wasUnderlined = !!l.underline;   // capture BEFORE the toggle, to know if an old rule needs covering
     // Mark bold/italic as EXPLICITLY set by the user so the save honours it verbatim (incl. turning a
     // bold/italic line OFF). Otherwise the engine's "recover a missed bold" union would re-bold it.
