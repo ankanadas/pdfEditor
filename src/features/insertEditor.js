@@ -222,7 +222,10 @@ export const InsertEditorMethods = {
     // Expose the editor to the top toolbar (size box / B / I act on it while it's open) and reveal
     // the Add-text toolbar group regardless of the current tool.
     this._activeInsertEditor = { applyStyle, style: () => caretStyle(workingRange()),
-      hasSelection: () => { const r = workingRange(); return !!(r && !r.collapsed); } };
+      hasSelection: () => { const r = workingRange(); return !!(r && !r.collapsed); },
+      // True when the selection covers the WHOLE box — then colour/underline/font apply box-level (the
+      // intuitive "the whole text is red"), not per-run, so the overlay div itself carries the style.
+      isWholeSelection: () => { const r = workingRange(); if (!r || r.collapsed) return false; const full = (div.textContent || '').replace(/​/g, ''); return r.toString().length >= full.length - 1; } };
     document.body.classList.add('editing-insert');
 
     pv.wrapper.appendChild(div);

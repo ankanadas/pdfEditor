@@ -252,11 +252,7 @@ export const TextEditingMethods = {
         this._showTextToolbar({ kind: 'line', el: div, line });
       });
 
-      div.addEventListener('blur', (e) => {
-        // The click that BLURS (exits) an existing-text edit must NOT also chain-open a fresh Add-text box
-        // on that same click — same guard the insert editor uses, keyed on the event timestamp so a slow
-        // re-render can't slip it past the window. A later deliberate click still adds text.
-        this._lastInsertCommitAt = e.timeStamp;
+      div.addEventListener('blur', () => {
         div.style.border = '1px solid transparent';
         div.style.boxShadow = 'none';
         div.style.background = 'transparent';
@@ -268,9 +264,11 @@ export const TextEditingMethods = {
         }
       });
 
-      // Keep each box a single line: Enter commits the edit instead of adding a line.
+      // Keep each box a single line: Enter commits the edit instead of adding a line. Escape exits the
+      // edit (blurs) too — so "press Escape, then add text elsewhere" works and the box isn't left focused.
       div.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); div.blur(); }
+        else if (e.key === 'Escape') { e.preventDefault(); div.blur(); }
       });
 
       canvasWrapper.appendChild(div);

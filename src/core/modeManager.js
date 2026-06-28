@@ -135,7 +135,10 @@ export const ModeManagerMethods = {
       // commits. The next deliberate click then adds/edits based on where it lands. Compare the EVENT
       // timestamps (same physical click = mousedown→click a few ms apart, regardless of how long the
       // commit's re-render took); a later deliberate click has a far larger timeStamp → not suppressed.
-      if (event && event.timeStamp - (this._lastInsertCommitAt || -1e9) < 700) { this._lastInsertCommitAt = -1e9; return; }
+      if (event && event.timeStamp - (this._lastInsertCommitAt || -1e9) < 350) { this._lastInsertCommitAt = -1e9; return; }
+      // This click is exiting an existing-text edit (flagged on its mousedown while the box was focused) —
+      // commit only, don't chain-open a fresh Add-text box. A later deliberate click still adds text.
+      if (this._exitEditClick) { this._exitEditClick = false; return; }
       // Seed the new box from the toolbar's size / B / I (its current "defaults").
       const fontSize = parseInt(document.getElementById('addSize')?.value, 10) || this._lastInsertSize || 14;
       // Drop an empty, editable text box where the user clicked and let them type in place.
