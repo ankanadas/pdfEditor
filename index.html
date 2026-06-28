@@ -1033,8 +1033,21 @@
     .merge-confirm-close:hover { background: #c81e1e; border-color: #c81e1e; }
 
     @media (max-width: 560px) {
-      .merge-drawer { width: 96vw; height: 94vh; }
+      /* Full-bleed sheet so nothing is cut off. height:100dvh tracks the VISIBLE area (100vh includes the
+         mobile browser chrome, which was hiding the footer/Merge buttons off the bottom). The old
+         96vw/94vh was also larger than the backdrop's padded box, so it spilled past its margins. */
+      .merge-backdrop, .pages-backdrop { padding: 0; }
+      .merge-drawer, .pages-drawer {
+        width: 100vw; max-width: 100vw; height: 100vh; height: 100dvh; max-height: 100dvh; border-radius: 0;
+      }
       .merge-list { grid-template-columns: 1fr; }
+      .merge-body, .pages-grid { overflow-x: hidden; }
+      .merge-head, .merge-body, .merge-foot { padding-left: 14px; padding-right: 14px; }
+      /* Stack the actions full-width: two 150px-min buttons can't fit a narrow row, so they overflowed
+         the right edge (the "cut off from the side"). Column + full width keeps them on-screen. */
+      .merge-actions { flex-direction: column; align-items: stretch; }
+      .merge-actions .spacer { display: none; }
+      .merge-actions .btn, .merge-actions #mergeGo { width: 100%; min-width: 0; }
     }
 
     /* ===================== Password prompt (open an encrypted PDF) ===================== */
