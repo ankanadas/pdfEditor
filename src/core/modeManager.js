@@ -132,9 +132,10 @@ export const ModeManagerMethods = {
     // space → add new text there (and reflect the Add button).
     if (this.mode === 'text' || this.mode === 'auto') {
       // The click that closes an open Add-text editor must NOT also open a fresh one — it only
-      // commits. The next deliberate click then adds/edits based on where it lands. (onDocDown stamps
-      // the time it committed on this same mousedown.)
-      if (Date.now() - (this._lastInsertCommitAt || 0) < 350) { this._lastInsertCommitAt = 0; return; }
+      // commits. The next deliberate click then adds/edits based on where it lands. Compare the EVENT
+      // timestamps (same physical click = mousedown→click a few ms apart, regardless of how long the
+      // commit's re-render took); a later deliberate click has a far larger timeStamp → not suppressed.
+      if (event && event.timeStamp - (this._lastInsertCommitAt || -1e9) < 700) { this._lastInsertCommitAt = -1e9; return; }
       // Seed the new box from the toolbar's size / B / I (its current "defaults").
       const fontSize = parseInt(document.getElementById('addSize')?.value, 10) || this._lastInsertSize || 14;
       // Drop an empty, editable text box where the user clicked and let them type in place.

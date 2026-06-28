@@ -392,9 +392,11 @@ export const TextToolbarMethods = {
       const partial = !!(ie && ie.hasSelection && ie.hasSelection());
       if (kind === 'bold' || kind === 'italic' || kind === 'size') {
         if (ie) ie.applyStyle(kind, value);
-      } else if ((kind === 'underline' || kind === 'color') && partial) {
-        // Add-text PARTIAL underline/colour: a real selection styles just that run (the insert editor's
-        // run model). With no selection these fall through to the whole-box path below.
+      } else if ((kind === 'underline' || kind === 'color' || kind === 'family') && partial) {
+        // Add-text PARTIAL underline/colour/font: a real selection styles just that run (the insert
+        // editor's run model — same per-run behaviour as editing existing text). The insert editor keeps
+        // the selection in _insertSavedRange (saved on mouseup/keyup), so the font picker stealing focus
+        // doesn't lose it. With no selection these fall through to the whole-box path below.
         ie.applyStyle(kind, value);
       } else {
         this._setBoxField(t.edit, kind, value);

@@ -28,6 +28,7 @@ export const InsertEditorMethods = {
       else if (kind === 'italic') { span.setAttribute('data-italic', value ? '1' : '0'); span.style.fontStyle = value ? 'italic' : 'normal'; }
       else if (kind === 'underline') { if (value) { span.setAttribute('data-underline', '1'); span.style.textDecoration = 'underline'; } else { span.removeAttribute('data-underline'); span.style.textDecoration = 'none'; } }
       else if (kind === 'color') { const hex = rgbToHex(value); span.setAttribute('data-color', hex); span.style.color = rgbCss(value); }
+      else if (kind === 'family') { span.setAttribute('data-family', value); span.style.fontFamily = this._familyCss(value); }
       else if (kind === 'link') { if (value) { span.setAttribute('data-link', value); span.classList.add('tt-has-link'); } else { span.removeAttribute('data-link'); span.classList.remove('tt-has-link'); } }
     };
     const styledSpan = (st) => {
@@ -179,7 +180,7 @@ export const InsertEditorMethods = {
       // A real selection: restyle just that text and drop the pen. Wrap it in a span carrying the new
       // style (size/bold/italic/underline/color/link) and propagate to any nested same-kind spans.
       pendingStyle = null;
-      const attr = { size: 'data-sz', bold: 'data-bold', italic: 'data-italic', underline: 'data-underline', color: 'data-color', link: 'data-link' }[kind];
+      const attr = { size: 'data-sz', bold: 'data-bold', italic: 'data-italic', underline: 'data-underline', color: 'data-color', family: 'data-family', link: 'data-link' }[kind];
       const frag = range.extractContents();
       const span = document.createElement('span');
       applyRunStyle(span, kind, value);
@@ -300,7 +301,10 @@ export const InsertEditorMethods = {
       if (done || div.contains(e.target)) return;
       // Don't commit when the click is on a styling control (Add bar, floating toolbar, or a picker sheet).
       if (onStyleControl(e.target)) return;
-      this._lastInsertCommitAt = Date.now();   // suppress the chain-open on this same canvas click
+      // Record the EVENT's timestamp (not Date.now()) so the page-click guard is immune to how long
+      // finish()/renderCurrentPage() takes — else a slow re-render pushes Date.now() past the window and
+      // the SAME click that committed also chain-opens a fresh Add-text box.
+      this._lastInsertCommitAt = e.timeStamp;
       finish(true);
     };
     document.addEventListener('mousedown', onDocDown, true);
@@ -311,7 +315,7 @@ export const InsertEditorMethods = {
     const onTE = (e) => {
       const ts = this._etap; this._etap = null;
       if (done || !ts || ts.moved || div.contains(e.target) || onStyleControl(e.target)) return;
-      this._lastInsertCommitAt = Date.now();
+      this._lastInsertCommitAt = e.timeStamp;
       finish(true);
     };
     document.addEventListener('touchstart', onTS, true);
@@ -362,12 +366,14 @@ export const InsertEditorMethods = {
       const line = lines[lines.length - 1];
       const last = line[line.length - 1];
       if (last && last.size === st.size && last.bold === st.bold && last.italic === st.italic
-          && !!last.underline === !!st.underline && sameColor(last.color, st.color) && (last.link || '') === (st.link || '')) {
+          && !!last.underline === !!st.underline && sameColor(last.color, st.color) && (last.link || '') === (st.link || '')
+          && (last.fontFamily || '') === (st.family || '')) {
         last.text += t;
       } else {
         const r = { text: t, size: st.size, bold: st.bold, italic: st.italic };
         if (st.underline) r.underline = true;
         if (st.color) r.color = st.color;
+        if (st.family) r.fontFamily = st.family;          // partial font change (per-run)
         if (st.link) r.link = st.link;
         line.push(r);
       }
@@ -380,6 +386,7 @@ export const InsertEditorMethods = {
         const i = child.getAttribute('data-italic'); if (i !== null) st.italic = i === '1';
         if (child.hasAttribute('data-underline')) st.underline = child.getAttribute('data-underline') === '1';
         const c = child.getAttribute('data-color'); if (c) st.color = hexToRgb(c);
+        const fam = child.getAttribute('data-family'); if (fam) st.family = fam;
         const lk = child.getAttribute('data-link'); if (lk !== null) st.link = lk;
       }
       return st;
