@@ -36,6 +36,7 @@ export const InsertEditorMethods = {
       ['size', 'bold', 'italic'].forEach(k => applyRunStyle(span, k, st[k]));
       if (st.underline) applyRunStyle(span, 'underline', true);
       if (st.color) applyRunStyle(span, 'color', st.color);
+      if (st.family) applyRunStyle(span, 'family', st.family);
       if (st.link) applyRunStyle(span, 'link', st.link);
       return span;
     };
@@ -67,8 +68,10 @@ export const InsertEditorMethods = {
     const boxDefaults = { size: Math.round(edit.fontSize) || 12, bold: !!edit.bold, italic: !!edit.italic };
     // Seed content: from saved runs if present, else one span per line at the box defaults.
     if (edit.runs && edit.runs.length) {
+      // Re-seed EVERY per-run style (not just size/bold/italic) so re-opening a committed box keeps the
+      // partial underline / colour / font / link the user applied — the earlier code dropped all but B/I.
       div.innerHTML = edit.runs
-        .map(line => line.map(r => spanHTML(r.text, { size: r.size, bold: !!r.bold, italic: !!r.italic })).join(''))
+        .map(line => line.map(r => spanHTML(r.text, { size: r.size, bold: !!r.bold, italic: !!r.italic, underline: !!r.underline, color: r.color || null, family: r.fontFamily || null, link: r.link || null })).join(''))
         .join('<br>');
     } else if (edit.newText) {
       div.innerHTML = String(edit.newText).split('\n')
@@ -579,7 +582,8 @@ export const InsertEditorMethods = {
         div.innerHTML = edit.runs.map(line =>
           line.map(r => {
             const css = `font-size:${r.size * unit}px;font-weight:${r.bold ? 'bold' : 'normal'};font-style:${r.italic ? 'italic' : 'normal'}`
-              + (r.underline || r.link ? ';text-decoration:underline' : '') + (r.color ? `;color:${rgbCss(r.color)}` : '');
+              + (r.underline || r.link ? ';text-decoration:underline' : '') + (r.color ? `;color:${rgbCss(r.color)}` : '')
+              + (r.fontFamily ? `;font-family:${this._familyCss(r.fontFamily).replace(/"/g, "'")}` : '');   // single quotes: inside style="…"
             return `<span style="${css}">${esc(r.text)}</span>`;
           }).join('')
         ).join('<br>');
