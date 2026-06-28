@@ -443,10 +443,53 @@ export const TextToolbarMethods = {
     }
     this.commitHistory();
   },
+  /** Bold/italic/underline applied to ONLY the selected character range of an existing line (partial
+   *  styling). Builds a per-character style model from the current box, toggles `kind` over the selection,
+   *  coalesces back into runs (each keeping its own face), re-renders + tracks. Returns false when there's
+   *  no usable selection so the caller falls back to whole-line. (Font/colour are NOT partial yet — the
+   *  save's per-run model carries bold/italic/underline only.) */
+  _applyPartialLineStyle(t, kind, value) {
+    if (!(kind === 'bold' || kind === 'italic' || kind === 'underline')) return false;
+    const div = t.el, l = t.line;
+    const sel = this._captureLineSelection();              // { el, start, end } char offsets, or null
+    if (!sel || sel.el !== div || !(sel.end > sel.start)) return false;
+    // Per-character style from the current DOM (inherits each ancestor span's data-*/face).
+    const chars = [];
+    const walk = (node, inh) => node.childNodes.forEach((ch) => {
+      if (ch.nodeType === Node.TEXT_NODE) { for (const c of ch.nodeValue) chars.push({ c, ...inh }); return; }
+      if (ch.nodeType !== Node.ELEMENT_NODE || ch.tagName === 'BR') return;
+      const st = { ...inh };
+      if (ch.hasAttribute('data-bold')) st.bold = ch.getAttribute('data-bold') === '1';
+      else if (ch.style && (ch.style.fontWeight === 'bold' || parseInt(ch.style.fontWeight, 10) >= 600)) st.bold = true;
+      if (ch.hasAttribute('data-italic')) st.italic = ch.getAttribute('data-italic') === '1';
+      else if (ch.style && ch.style.fontStyle === 'italic') st.italic = true;
+      if (ch.hasAttribute('data-underline')) st.underline = ch.getAttribute('data-underline') === '1';
+      else if (ch.style && /underline/.test(ch.style.textDecoration || '')) st.underline = true;
+      const ff = ch.style && ch.style.fontFamily; if (ff) { const tok = ff.split(',')[0].replace(/["']/g, '').trim(); if (tok) st.font = tok; }
+      walk(ch, st);
+    });
+    walk(div, { bold: !!l.bold, italic: !!l.italic, underline: !!l.underline, font: l.fontName || null });
+    if (!chars.length) return false;
+    for (let i = sel.start; i < sel.end && i < chars.length; i++) chars[i][kind] = !!value;   // toggle the selection only
+    const runs = [];
+    for (const ch of chars) {
+      const last = runs[runs.length - 1];
+      if (last && last.bold === ch.bold && last.italic === ch.italic && last.underline === ch.underline && last.font === ch.font) last.text += ch.c;
+      else runs.push({ text: ch.c, bold: ch.bold, italic: ch.italic, underline: ch.underline, font: ch.font || null });
+    }
+    l.styleRuns = runs;
+    l.bold = runs.every(r => r.bold); l.italic = runs.every(r => r.italic); l.underline = runs.every(r => r.underline);
+    l.boldSet = true; l.italicSet = true;
+    div.innerHTML = runs.map(r => this._lineRunSpanHTML(r, l.serif)).join('');
+    this.trackEdit(this.lineToEdit(l, this.cleanEditableText(div.textContent), runs));
+    return true;
+  },
   /** Whole-line styling for a focused existing-text line box (updates CSS in place + tracks the edit
    *  immediately; trackEdit does not re-render, so the box keeps focus). */
   _applyLineStyle(t, kind, value) {
     const l = t.line, div = t.el;
+    // A TEXT SELECTION inside the line + a B/I/U toggle → style ONLY the selected range (partial).
+    if ((kind === 'bold' || kind === 'italic' || kind === 'underline') && this._applyPartialLineStyle(t, kind, value)) return;
     const wasUnderlined = !!l.underline;   // capture BEFORE the toggle, to know if an old rule needs covering
     // Mark bold/italic as EXPLICITLY set by the user so the save honours it verbatim (incl. turning a
     // bold/italic line OFF). Otherwise the engine's "recover a missed bold" union would re-bold it.
