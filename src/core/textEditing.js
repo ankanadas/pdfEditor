@@ -289,6 +289,10 @@ export const TextEditingMethods = {
       fontSize: line.fontSizePx / s,
       bold: !!line.bold,
       italic: !!line.italic,
+      // The user EXPLICITLY toggled bold/italic in the toolbar → honour it verbatim on save (so a
+      // bold/italic line can be turned OFF); without this the engine's missed-bold recovery re-adds it.
+      ...(line.boldSet ? { boldSet: true } : {}),
+      ...(line.italicSet ? { italicSet: true } : {}),
       serif: !!line.serif,
       bgColor: line.bgColor || null,   // [r,g,b] cell background (so a cover box matches, not white)
       newText: newText,
