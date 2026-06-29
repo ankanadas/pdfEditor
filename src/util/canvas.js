@@ -63,7 +63,38 @@ export function sampleLineColors(pv, line) {
       if (far(c) && n >= 0.2 * maxFar && fromBg(c) > bestDist) { bestDist = fromBg(c); text = c; }
     }
 
-    return { bg, text };
+    // PER-ITEM ink colour (reuses the region `data` already read — no extra getImageData). Lets a reopened
+    // line whose WORDS have different colours (a partial-colour edit) rebuild into per-run styleRuns, so the
+    // editor shows the colour again — not just the renderer / macOS / Chrome. Each item's ink = the
+    // far-from-background colour with the most pixels in that item's box.
+    const items = line.items || [];
+    const itemColors = items.map((it) => {
+      if (!it || !it.text || !it.text.trim()) return null;
+      const jx0 = Math.max(ix0, Math.floor(it.left) - ex0), jx1 = Math.min(ix1, Math.ceil(it.right) - ex0);
+      const jy0 = Math.max(iy0, Math.floor(it.top) - ey0), jy1 = Math.min(iy1, Math.ceil(it.bottom) - ey0);
+      if (jx1 <= jx0 || jy1 <= jy0) return null;
+      const cc = new Map(), crep = new Map();
+      for (let py = jy0; py < jy1; py++) {
+        for (let px = jx0; px < jx1; px++) {
+          const i = (py * w + px) * 4;
+          if (data[i + 3] < 128) continue;
+          const c = [data[i], data[i + 1], data[i + 2]];
+          if (!far(c)) continue;                         // ignore background-ish pixels
+          const k = key(i);
+          cc.set(k, (cc.get(k) || 0) + 1);
+          if (!crep.has(k)) crep.set(k, c);
+        }
+      }
+      // The item's ink = the colour FARTHEST from the background (its solid core), among colours with a
+      // few pixels. Using "farthest" (not "most frequent") keeps thin glyphs (a "|" or "-", mostly
+      // anti-aliased edge pixels) consistent with thick text of the SAME colour — otherwise the thin ones
+      // picked a lighter edge grey and falsely looked like a different colour, splitting a uniform line.
+      let col = null, best = -1;
+      for (const [k, n] of cc) { const c = crep.get(k); if (n >= 2 && fromBg(c) > best) { best = fromBg(c); col = c; } }
+      return col;
+    });
+
+    return { bg, text, itemColors };
   } catch (e) {
     console.warn('[QPE] sampleLineColors getImageData failed (canvas tainted?) — falling back', e);
     return { bg: null, text: null };   // e.g. a tainted canvas — caller falls back

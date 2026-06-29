@@ -43,6 +43,31 @@ export const TextEditingMethods = {
       const c = sampleLineColors(pv, line);
       line.bgColor = c.bg;          // real background colour (used for the editable text contrast)
       line.textColor = c.text;      // real text colour (e.g. white) for the editable box
+      // Per-item colour: tag an item only when its ink is DISTINCTLY different from the line's DOMINANT
+      // item colour (the colour most items cluster around) — so a reopened line with a genuinely coloured
+      // word (e.g. a red edit) rebuilds a per-run model, while a uniform line never splits on sampling
+      // noise. Compared item-to-item (NOT to the line-level textColor, whose darkest-pixel heuristic can
+      // differ from the per-item sampler and falsely flag a uniform grey line as multi-coloured).
+      if (c.itemColors) {
+        const cols = c.itemColors.filter(Boolean);
+        if (cols.length) {
+          const ckey = (x) => `${x[0] >> 5},${x[1] >> 5},${x[2] >> 5}`;
+          const counts = new Map();
+          cols.forEach((x) => counts.set(ckey(x), (counts.get(ckey(x)) || 0) + 1));
+          let domKey = null, domN = -1;
+          for (const [k, n] of counts) if (n > domN) { domN = n; domKey = k; }
+          const dom = cols.find((x) => ckey(x) === domKey);
+          const dist = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+          const sat = (x) => Math.max(x[0], x[1], x[2]) - Math.min(x[0], x[1], x[2]);   // 0 = grey/black/white
+          (line.items || []).forEach((it, k) => {
+            const ic = c.itemColors[k];
+            // Tag only a CHROMATIC ink (a real red/blue/green edit) that's distinct from the line's
+            // dominant colour. A pure lightness difference (black vs the light grey a thin "|"/"-" samples
+            // to, all sat≈0) is anti-aliasing noise, NOT a colour change — never split a uniform grey line.
+            if (ic && dom && sat(ic) >= 45 && dist(ic, dom) >= 90) it.color = ic;
+          });
+        }
+      }
       // Detect drawn underlines (per item) on the still-clean canvas, then build the per-run style
       // model so a mixed line (bold label + regular tail, partial underline) survives an edit.
       const anyUnderline = this._detectLineUnderlines(pv, line, c.bg);

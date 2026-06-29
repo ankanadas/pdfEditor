@@ -108,15 +108,19 @@ export const LineStyleMethods = {
     if (items.length < 1) return;
     const runs = [];
     let prevRight = null, endsSpace = true;          // start "true" so no leading synth space
+    const colEq = (a, b) => (!a && !b) || !!(a && b && Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) < 24);
     const append = (text, st) => {
       const last = runs[runs.length - 1];
       if (!st && last) { last.text += text; }        // a blank item joins the current run
-      else if (last && last.bold === st.b && last.italic === st.i && last.underline === st.u) { last.text += text; if (!last.font && st.f) last.font = st.f; }
+      // Split a new run when ANY of weight/slant/underline, the PDF.js face, OR the ink COLOUR changes —
+      // so a reopened line keeps its per-word font AND colour (a partial edit), not one flattened style.
+      else if (last && last.bold === st.b && last.italic === st.i && last.underline === st.u &&
+               (last.font || null) === (st.f || null) && colEq(last.color, st.col)) { last.text += text; if (!last.font && st.f) last.font = st.f; }
       // Carry each run's OWN PDF.js font face (e.g. the line's Calibri-Bold for the bold run, Calibri for
       // the regular run) so the editor paints each run with its real weight — NOT one baked face for the
       // whole box (which made the regular runs look bold) NOR a single faux-bold clone (too light for the
       // bold runs). See _lineRunSpanHTML.
-      else runs.push({ text, bold: st ? st.b : false, italic: st ? st.i : false, underline: st ? st.u : false, font: st ? st.f : null });
+      else runs.push({ text, bold: st ? st.b : false, italic: st ? st.i : false, underline: st ? st.u : false, font: st ? st.f : null, color: st ? st.col || null : null });
       if (text) endsSpace = /\s$/.test(text);
     };
     for (const it of items) {
@@ -129,12 +133,22 @@ export const LineStyleMethods = {
           (it.left - prevRight) > (it.height || 0) * 0.18) {
         runs[runs.length - 1].text += ' '; endsSpace = true;
       }
-      append(t, { b: !!it.bold, i: !!it.italic, u: !!it.underline, f: it.fontName });
+      append(t, { b: !!it.bold, i: !!it.italic, u: !!it.underline, f: it.fontName, col: it.color || null });
       prevRight = it.right;
     }
-    // Need ≥2 distinct styles to be worth a per-run model.
-    const distinct = new Set(runs.map(r => `${r.bold}|${r.italic}|${r.underline}`));
+    // Need ≥2 distinct styles to be worth a per-run model (weight/slant/underline, face, OR colour).
+    const ckey = (c) => c ? `${c[0] >> 3},${c[1] >> 3},${c[2] >> 3}` : '';   // quantise to ignore AA noise
+    const distinct = new Set(runs.map(r => `${r.bold}|${r.italic}|${r.underline}|${r.font || ''}|${ckey(r.color)}`));
     if (runs.length < 2 || distinct.size < 2) return;
+    // Drop a per-run face PDF.js did NOT register as a usable @font-face. A NON-EMBEDDED standard font
+    // extracts a loadedName like "g_d0_f5" but actually RENDERS through a substitute ("g_d0_sf4"), so
+    // putting g_d0_f5 in the editor's font stack falls back to Arial — the untouched words "change font".
+    // Such runs drop the override and inherit the box's (correct) family, exactly like a non-split line;
+    // EMBEDDED faces (which ARE registered) keep their own face for per-run weight/family fidelity.
+    try {
+      const loaded = new Set([...document.fonts].map((f) => (f.family || '').replace(/["']/g, '')));
+      for (const r of runs) if (r.font && !loaded.has(r.font)) r.font = null;
+    } catch (_) { /* document.fonts unavailable — keep faces as-is */ }
     // Safety: the runs must reproduce the line's (normalised) text exactly, else fall back to the
     // simple path rather than risk corrupting the line.
     const norm = (s) => s.replace(/\s+/g, ' ').trim();
