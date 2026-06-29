@@ -103,6 +103,20 @@ export const LineStyleMethods = {
    * runs reconstruct line.text exactly — otherwise left unset so the simple whole-line path (which
    * already preserves a uniform style) runs unchanged. No behaviour change for single-style lines.
    */
+  /** Null any per-run face PDF.js did NOT register as a usable @font-face. A NON-EMBEDDED standard font
+   *  extracts a loadedName like "g_d0_f5" but actually RENDERS through a substitute ("g_d0_sf4"); putting
+   *  g_d0_f5 in the editor's font stack falls back to Arial, so the UNTOUCHED words "change font". Such
+   *  runs drop the override and inherit the box's (correct) family — exactly like a non-split line.
+   *  EMBEDDED faces (which ARE registered) keep their own face for per-run weight/family fidelity. Shared
+   *  by the on-load run builder AND the live partial-style path so both behave identically. */
+  _dropUnregisteredRunFaces(runs) {
+    try {
+      const loaded = new Set();
+      document.fonts.forEach((f) => loaded.add((f.family || '').replace(/["']/g, '')));
+      for (const r of (runs || [])) if (r.font && !loaded.has(r.font)) r.font = null;
+    } catch (_) { /* document.fonts unavailable — keep faces as-is */ }
+    return runs;
+  },
   _buildLineStyleRuns(line) {
     const items = (line.items || []);
     if (items.length < 1) return;
@@ -140,15 +154,7 @@ export const LineStyleMethods = {
     const ckey = (c) => c ? `${c[0] >> 3},${c[1] >> 3},${c[2] >> 3}` : '';   // quantise to ignore AA noise
     const distinct = new Set(runs.map(r => `${r.bold}|${r.italic}|${r.underline}|${r.font || ''}|${ckey(r.color)}`));
     if (runs.length < 2 || distinct.size < 2) return;
-    // Drop a per-run face PDF.js did NOT register as a usable @font-face. A NON-EMBEDDED standard font
-    // extracts a loadedName like "g_d0_f5" but actually RENDERS through a substitute ("g_d0_sf4"), so
-    // putting g_d0_f5 in the editor's font stack falls back to Arial — the untouched words "change font".
-    // Such runs drop the override and inherit the box's (correct) family, exactly like a non-split line;
-    // EMBEDDED faces (which ARE registered) keep their own face for per-run weight/family fidelity.
-    try {
-      const loaded = new Set([...document.fonts].map((f) => (f.family || '').replace(/["']/g, '')));
-      for (const r of runs) if (r.font && !loaded.has(r.font)) r.font = null;
-    } catch (_) { /* document.fonts unavailable — keep faces as-is */ }
+    this._dropUnregisteredRunFaces(runs);
     // Safety: the runs must reproduce the line's (normalised) text exactly, else fall back to the
     // simple path rather than risk corrupting the line.
     const norm = (s) => s.replace(/\s+/g, ' ').trim();
