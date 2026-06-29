@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing = grade the tests themselves. Stryker injects bugs into source and reports the % the jest suite KILLS (the trust score). Scoped to the modules the fast jest suite actually covers; the WASM/DOM migration modules (mupdfEdit/mupdfSpans/insertEditor) have ~0% jest coverage and are guarded by the selfcheck + agentic harness instead (too slow for per-mutant runs). Run: npx stryker run",
+  "packageManager": "npm",
+  "testRunner": "jest",
+  "jest": { "configFile": "jest.config.js", "projectType": "custom" },
+  "reporters": ["clear-text", "progress"],
+  "coverageAnalysis": "perTest",
+  "concurrency": 4,
+  "timeoutMS": 30000,
+  "mutate": [
+    "src/core/TextEditor.js",
+    "src/core/SignatureEditor.js",
+    "src/mergeCore.js",
+    "src/util/fontCatalog.js",
+    "src/core/limits.js"
+  ]
+}
