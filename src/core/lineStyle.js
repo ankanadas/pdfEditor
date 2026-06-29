@@ -2,6 +2,7 @@
 // Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js (this = the app).
 import { readRegion } from '../util/canvas.js';
 import { rgbCss, rgbToHex, hexToRgb } from '../util/color.js';
+import { familyKeyFromFont } from '../util/fonts.js';
 
 export const LineStyleMethods = {
   /**
@@ -113,7 +114,15 @@ export const LineStyleMethods = {
     try {
       const loaded = new Set();
       document.fonts.forEach((f) => loaded.add((f.family || '').replace(/["']/g, '')));
-      for (const r of (runs || [])) if (r.font && !loaded.has(r.font)) r.font = null;
+      for (const r of (runs || [])) {
+        if (!r.font || loaded.has(r.font)) continue;
+        // The face isn't a usable @font-face (non-embedded standard font). If we can identify its FAMILY
+        // (Times/Helvetica/Courier/…), record it so the run renders its OWN generic family — otherwise it
+        // would inherit the line's DOMINANT face and e.g. a Times word would draw in the heading's
+        // Montserrat. Falls back to inheriting the box when the family can't be resolved.
+        if (!r.family) { const fam = familyKeyFromFont(this._realFontName({ fontName: r.font })); if (fam) r.family = fam; }
+        r.font = null;
+      }
     } catch (_) { /* document.fonts unavailable — keep faces as-is */ }
     return runs;
   },
