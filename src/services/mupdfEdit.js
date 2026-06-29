@@ -526,7 +526,11 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
           // right encoding: a hex glyph-id string for a reused Type0 font, a WinAnsi literal otherwise.
           for (const seg of segmentByFont(r.text, r._opts)) {
             usedFonts.add(embed(seg.opt));   // embed the font into the doc only now that a glyph uses it
-            const px = lx + adv * cos, pyTop = lyTop + adv * sin;
+            // Advance each run along the rotated baseline. The text matrix advances glyphs by
+            // (adv·cos, adv·sin) in PDF (y-up) space, so in this TOP-origin (y-down) space the run's y
+            // moves by -adv·sin. Using +adv·sin scattered the runs ~2·adv·sin apart — a partial-styled
+            // ROTATED line (multiple Tj runs) broke into separated words; a single Tj was unaffected.
+            const px = lx + adv * cos, pyTop = lyTop - adv * sin;
             const py = ph - pyTop;
             const egs = boxOpacity < 1 ? egsFor(boxOpacity) : null;
             ops.op('q ' + (egs ? '/' + egs.name + ' gs ' : '') + 'BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf ' + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
