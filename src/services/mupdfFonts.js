@@ -94,12 +94,32 @@ function fetchFont(mupdf, file, baseUrl) {
   return _cache.get(file);
 }
 
-/** Load the first candidate filename that fetches successfully, cached. */
+// OFFLINE fallback: the bundled faces are fetched from /assets/edit-fonts/ on demand, so with no network
+// (and nothing yet cached) every candidate fetch fails. Rather than let that ABORT the whole WASM save —
+// which drops it to the pdf-lib tier that loses the original colour (white→black) and partial styling — we
+// degrade to mupdf's BUILT-IN Base-14 face (no network). The save then still succeeds with colour + layout
+// + partial styling intact; only the bundled font FAMILY falls back to a standard (Helvetica/Times/Courier).
+function builtinFor(candidates) {
+  const last = candidates[candidates.length - 1] || '';      // bundledCandidates always ends with the generic trio
+  const fam = /Tinos/i.test(last) ? 'serif' : /Cousine/i.test(last) ? 'mono' : 'sans';
+  const v = candidates[0] || '';
+  const bold = /Bold/i.test(v), ital = /Italic|Oblique/i.test(v);
+  const B14 = {
+    sans: ['Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique'],
+    serif: ['Times-Roman', 'Times-Bold', 'Times-Italic', 'Times-BoldItalic'],
+    mono: ['Courier', 'Courier-Bold', 'Courier-Oblique', 'Courier-BoldOblique'],
+  };
+  return B14[fam][(bold ? 1 : 0) + (ital ? 2 : 0)];
+}
+
+/** Load the first candidate filename that fetches successfully (cached); offline, degrade to a built-in. */
 export async function loadBundledFont(mupdf, candidates, baseUrl) {
   let lastErr;
   for (const file of candidates) {
     try { return await fetchFont(mupdf, file, baseUrl); }
     catch (e) { lastErr = e; _cache.delete(file); }
   }
-  throw lastErr || new Error('no bundled font candidate loaded');
+  // Every fetch failed (offline / asset missing) → use a built-in standard so the save doesn't abort.
+  try { return new mupdf.Font(builtinFor(candidates)); }
+  catch (_) { throw lastErr || new Error('no bundled font candidate loaded'); }
 }
