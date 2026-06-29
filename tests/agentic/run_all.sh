@@ -14,7 +14,7 @@ mkdir -p "$OUT"
 SUITES="agent:core latex reflow styles annotation richtext toolbar resume_textlayer divider \
 fontlib hyperlink password protected regression reorder restriction shadow layout \
 highlight_ui annotation_incremental signature mobile editor roundtrip combo pickers mobilefix mobilefixvx largefiles allpdf \
-styleround styleadd mixedbold mixededit partialstyle addpartial partialstrict clickaway addroundtrip editflow addlink dynmode addempty partialbug partialbleed partialroundtrip mobilereorder colorbug colorreopen rotpartial stylematrix multistyle editfidelity addflip latexsize multiline"
+styleround styleadd mixedbold mixededit partialstyle addpartial partialstrict clickaway addroundtrip editflow addlink dynmode addempty partialbug partialbleed partialroundtrip mobilereorder colorbug colorreopen rotpartial stylematrix multistyle editfidelity addflip latexsize multiline wholeline"
 
 # Map a suite to its agent file + verify file (core is special).
 agent_file(){ [ "$1" = core ] && echo tests/agentic/agent.cjs || echo "tests/agentic/${1}_agent.cjs"; }

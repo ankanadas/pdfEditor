@@ -20,8 +20,8 @@ export async function mergePdfBytes(byteArrays, { onProgress } = {}) {
   }
 
   carryMetadata(out, firstDoc);
-  out.setProducer('QuickPDFEditor');
-  out.setModificationDate(new Date());
+  // NOTE: no setProducer/setModificationDate here — pdf-lib's save() overwrites both with its
+  // own values (verified), so setting them is dead code.
 
   return out.save(); // object streams on by default → compact, lossless
 }

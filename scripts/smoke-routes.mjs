@@ -24,11 +24,11 @@ const BOOT_TIMEOUT_MS = 90_000;
 // path, expected status, and an optional substring the body must contain.
 const CHECKS = [
   { path: '/', needs: 'id="stage"', label: 'editor home loads (existing functionality)' },
-  { path: '/about', needs: '<title>About — Quick PDF Editor' },
-  { path: '/privacy', needs: '<title>Privacy Policy — Quick PDF Editor' },
-  { path: '/terms', needs: '<title>Terms of Service — Quick PDF Editor' },
+  { path: '/about', needs: '<title>About Quick PDF Editor | Free Online PDF Editor' },
+  { path: '/privacy', needs: '<title>Privacy Policy | Quick PDF Editor' },
+  { path: '/terms', needs: '<title>Terms of Service | Quick PDF Editor' },
   { path: '/contact', needs: 'mailto:support@quickpdfeditor.com' },
-  { path: '/about.html', needs: '<title>About — Quick PDF Editor' },
+  { path: '/about.html', needs: '<title>About Quick PDF Editor | Free Online PDF Editor' },
   { path: '/pages.css', needs: '.site-footer' },
   { path: '/favicon.svg', needs: '<svg' },
   { path: '/og-image.png' },

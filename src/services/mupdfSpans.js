@@ -70,7 +70,7 @@ export function analyzePage(page) {
 
 // mupdf's StructuredText walk reports a Color as an array of components in 0..1 (NOT a packed int):
 // 1 = gray, 3 = RGB, 4 = CMYK. Normalise to an [r,g,b] triple.
-function normColor(c) {
+export function normColor(c) {
   if (!Array.isArray(c) || !c.length) return [0, 0, 0];
   if (c.length === 1) return [c[0], c[0], c[0]];
   if (c.length === 4) { const [cy, m, y, k] = c; return [(1 - cy) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k)]; }
