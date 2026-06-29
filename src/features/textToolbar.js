@@ -551,6 +551,11 @@ export const TextToolbarMethods = {
       if (last && eq(last, ch)) last.text += ch.c;
       else runs.push({ text: ch.c, bold: ch.bold, italic: ch.italic, underline: ch.underline, font: ch.font || null, family: ch.family || null, color: ch.color || null, link: ch.link || null });
     }
+    // Same as the on-load builder: a per-run face PDF.js didn't register (a non-embedded standard font's
+    // g_d0_fN, which renders via a g_d0_sfN substitute) would fall back to Arial here too — so the words
+    // the user did NOT select would "change font" the instant a partial style is applied. Drop those so
+    // they keep inheriting the box's correct family; the styled run keeps its chosen family.
+    this._dropUnregisteredRunFaces(runs);
     l.styleRuns = runs;
     l.bold = runs.every(r => r.bold); l.italic = runs.every(r => r.italic); l.underline = runs.every(r => r.underline);
     l.boldSet = true; l.italicSet = true;
