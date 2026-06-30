@@ -268,6 +268,12 @@ export const FileIOMethods = {
       await this.buildPages();
       document.getElementById('stage')?.scrollTo({ top: 0 });
 
+      // Pre-warm the mupdf-wasm worker NOW (while the doc just loaded — almost certainly still online) so
+      // the ~MB WASM binary is fetched + initialised before the user edits. Otherwise mupdf loads lazily on
+      // the FIRST save, and if the user has gone offline by then the WASM fetch fails, the tier declines,
+      // and the save falls to the degraded pdf-lib path (lost colour / partial styling). Fire-and-forget.
+      try { if (MupdfService.isSupported()) MupdfService.ready().catch(() => {}); } catch (_) {}
+
     } catch (error) {
       console.error('Error loading PDF:', error);
       
