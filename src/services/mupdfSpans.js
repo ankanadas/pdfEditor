@@ -53,12 +53,15 @@ export function analyzePage(page) {
       });
     }
   }
-  // Per-char colours (the JSON line carries no colour) — used so an edit keeps the original text colour.
+  // Per-char colours + EFFECTIVE size (the JSON line carries neither reliably). The structured-text
+  // `line.font.size` is truncated for LaTeX/Type1 fonts (reports 10 for a real 10.909 Tf → re-inserted
+  // text comes out ~9% too small next to the unchanged lines); the walk's per-char size is the true
+  // rendered size (matches fitz / the Tf), so detectSpan prefers it.
   const colors = [];
   try {
     page.toStructuredText('preserve-whitespace').walk({
       onChar(_c, origin, _font, _size, _quad, color) {
-        if (origin) colors.push({ x: origin[0], y: origin[1], rgb: normColor(color) });
+        if (origin) colors.push({ x: origin[0], y: origin[1], rgb: normColor(color), size: +_size || 0 });
       },
     });
   } catch (_) {}
@@ -121,11 +124,15 @@ export function detectSpan(analysis, x, baseline) {
     if (d < bestD) { bestD = d; best = s; }
   }
   if (!best || bestD >= 25) return null;
-  // Nearest char origin → colour.
-  let color = [0, 0, 0], cD = 1e9;
+  // Nearest char origin → colour AND effective size (the walk size is the true rendered size; the JSON
+  // line size is truncated for some Type1/LaTeX fonts — see analyzePage).
+  let color = [0, 0, 0], cD = 1e9, charSize = 0;
   for (const c of analysis.colors) {
     const d = Math.abs(c.x - best.ox) + Math.abs(c.y - best.oy);
-    if (d < cD) { cD = d; color = c.rgb; }
+    if (d < cD) { cD = d; color = c.rgb; charSize = c.size || 0; }
   }
-  return { size: best.size, family: best.family, bold: best.bold, italic: best.italic, color, fontName: best.fontName };
+  // Use the walk size only when it's meaningfully LARGER than the JSON size (the truncation case); never
+  // let a stray mis-matched char shrink a correctly-detected size.
+  const size = (charSize > best.size + 0.2) ? charSize : best.size;
+  return { size, family: best.family, bold: best.bold, italic: best.italic, color, fontName: best.fontName };
 }

@@ -25,8 +25,9 @@ function normalizeText(s) {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');  // control chars (keep \t,\n)
 }
 
-// ── WinAnsi encoding — used ONLY by the Base-14 re-emit path (a non-embedded standard font is kept as
-// name-only Helvetica/Times/Courier, which is a simple WinAnsi font). Reused + bundled fonts are Type0. ──
+// ── WinAnsi encoding — used by every SIMPLE font path: Base-14 re-emit (non-embedded standard kept
+// name-only), reused embedded TrueType, and the bundled clone — all draw a WinAnsi-encodable line as a
+// simple font so Chrome rasterises it identically; only genuinely non-WinAnsi glyphs fall to Type0. ──
 const CP1252_HIGH = {
   0x20AC: 0x80, 0x201A: 0x82, 0x0192: 0x83, 0x201E: 0x84, 0x2026: 0x85, 0x2020: 0x86, 0x2021: 0x87,
   0x02C6: 0x88, 0x2030: 0x89, 0x0160: 0x8A, 0x2039: 0x8B, 0x0152: 0x8C, 0x017D: 0x8E, 0x2018: 0x91,
@@ -141,10 +142,29 @@ function repairToUnicode(doc) {
 const rectsIntersect = (a, b) => !(a[2] < b[0] || b[2] < a[0] || a[3] < b[1] || b[3] < a[1]);
 const sameRect = (a, b) => Math.abs(a[0] - b[0]) < 1.5 && Math.abs(a[1] - b[1]) < 1.5 && Math.abs(a[2] - b[2]) < 1.5 && Math.abs(a[3] - b[3]) < 1.5;
 
-/** Append `stream` to a page's /Contents (normalise single-stream → array, then push). */
-function appendContents(doc, pageObj, stream) {
+const strBytes = (s) => { const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 0xff; return a; };
+
+/** Append `stream` to a page's /Contents (normalise single-stream → array, then push).
+ *  CRITICAL: the FIRST time we touch a page we wrap its ORIGINAL content in a balanced `q … Q`. A page
+ *  may leave a residual CTM set — e.g. content that opens with `0.75 0 0 -0.75 0 792 cm` (scale + vertical
+ *  FLIP) and never `q`/`Q`s it — and because /Contents streams are concatenated, our appended text would
+ *  inherit that transform and render upside-down / shrunk (the Notice-LCA regression). The leading `q`
+ *  saves the page's default (identity) space and the trailing `Q` restores it before our stream draws, so
+ *  our text is always placed in page space — exactly what the PyMuPDF backend did. `guarded` dedupes the
+ *  wrap to once per page (text edit + table annotation may both append). */
+function appendContents(doc, pageObj, stream, key, guarded) {
   let contents = pageObj.get('Contents');
   if (!contents || contents.isNull()) { pageObj.put('Contents', stream); return; }
+  if (guarded && key != null && !guarded.has(key)) {
+    guarded.add(key);
+    const arr = doc.newArray();
+    arr.push(doc.addStream(strBytes('q\n'), doc.newDictionary()));
+    if (contents.isArray()) contents.forEach((v) => arr.push(v)); else arr.push(contents);
+    arr.push(doc.addStream(strBytes('\nQ\n'), doc.newDictionary()));
+    arr.push(stream);
+    pageObj.put('Contents', arr);
+    return;
+  }
   if (contents.isArray()) { contents.push(stream); return; }
   const arr = doc.newArray();
   arr.push(contents);
@@ -199,6 +219,20 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     return simpleCache.get(key);
   }
 
+  /** A SIMPLE WinAnsi sibling of a bundled option (shares its loaded face). Drawn for the WinAnsi-encodable
+   *  glyphs of re-inserted text so Chrome/PDFium rasterises them like a simple font — NOT the faint
+   *  Type0/CIDFontType2 the bundled catch-all produces (the "edited line looks lighter" bug, present on any
+   *  doc whose font isn't reusable: LaTeX/Computer-Modern, Type1 subsets, embedded non-reusable, password
+   *  docs). The bundled Type0 option stays behind it as the full-Unicode catch-all for genuinely non-WinAnsi
+   *  glyphs (CJK/exotic). Lazily attached so it only embeds when a glyph actually uses it. */
+  function bundledSimpleOption(bundled) {
+    if (!bundled._simple) {
+      bundled._simple = { kind: 'simple', simple: true, winAnsi: true, simpleCmap: true,
+        name: 'WS' + (seq++), ref: null, mfont: bundled.mfont, charset: null };
+    }
+    return bundled._simple;
+  }
+
   /** Reuse the original line's OWN embedded TrueType (real outlines) — Type0/Identity, drawn by GID. */
   function reusedOption(span, pageFonts) {
     if (!span || !span.fontName) return null;
@@ -211,7 +245,16 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       if (bytes) {
         try {
           const mfont = new mupdf.Font(key, bytes);
-          opt = { kind: 'cid', name: 'RF' + (seq++), ref: null, simple: false, mfont, charset: charsets().get(key) || new Set() };
+          const cs = charsets().get(key) || new Set();
+          // If EVERY glyph the original drew is WinAnsi-encodable, re-embed the reuse as a SIMPLE WinAnsi
+          // TrueType (same outlines). Chrome/PDFium then rasterises the edited line IDENTICALLY to the
+          // original simple font — no faint "lighter" shift that a Type0/CIDFontType2 re-embed produces.
+          // A single non-WinAnsi glyph (CJK / exotic symbol) keeps the Type0/Identity path so it can still
+          // be addressed by glyph id. (Advance for CP1252-high chars uses the real codepoint — see unitFor.)
+          const winAnsiOnly = cs.size > 0 && [...cs].every((c) => { const cp = c.codePointAt(0); return cp === 0x3F || winAnsiByte(cp) !== 0x3F; });
+          opt = winAnsiOnly
+            ? { kind: 'simple', name: 'RS' + (seq++), ref: null, simple: true, winAnsi: true, simpleCmap: true, mfont, charset: cs }
+            : { kind: 'cid', name: 'RF' + (seq++), ref: null, simple: false, mfont, charset: cs };
         } catch (_) { opt = null; }
       }
     }
@@ -259,7 +302,12 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   function unitFor(opt, cp) {
     if (opt.winAnsi) {
       const b = winAnsiByte(cp);
-      let adv = 0; try { adv = opt.mfont.advanceGlyph(opt.mfont.encodeCharacter(b)); } catch (_) {}
+      // A simple font backed by a REAL loaded face (reused original OR bundled clone) resolves its advance
+      // from the real CODEPOINT via the face's own cmap (`simpleCmap`); the drawn byte stays WinAnsi (the
+      // font dict's WinAnsiEncoding maps it back to the glyph). A Base-14 built-in font is keyed by the byte
+      // itself. They differ only for CP1252-high (0x80–0x9F) bytes.
+      const enc = opt.simpleCmap ? cp : b;
+      let adv = 0; try { adv = opt.mfont.advanceGlyph(opt.mfont.encodeCharacter(enc)); } catch (_) {}
       return { byte: b, adv };
     }
     let g = 0; try { g = opt.mfont.encodeCharacter(cp) & 0xffff; } catch (_) {}
@@ -288,6 +336,10 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     return segs;
   }
   const measureSeg = (seg, size) => seg.units.reduce((w, u) => w + u.adv, 0) * size;
+
+  // Pages whose original /Contents we've wrapped in a balanced q/Q (so our appended text isn't flipped/
+  // scaled by a residual page CTM). Shared with applyAnnotations so a table-only page is guarded too.
+  const guardedPages = new Set();
 
   // Group edits by page.
   const byPage = new Map();
@@ -477,7 +529,8 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         // family choice (box- or run-level) must win, so it gets the chosen face, not the reused original.
         if (rReused && sp && !rExplicit && r.bold === sp.bold && r.italic === sp.italic) opts.push(rReused);
         else if (rB14) opts.push(base14Option(rB14, r.bold, r.italic));
-        opts.push(bundled);
+        opts.push(bundledSimpleOption(bundled));   // WinAnsi-encodable glyphs → simple WinAnsi (Chrome-identical)
+        opts.push(bundled);                         // genuinely non-WinAnsi → Type0 full-Unicode catch-all
         r._opts = opts;
       }
 
@@ -586,7 +639,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         for (const eg of usedEgs.values()) egd.put(eg.name, doc.addObject(eg.dict));
       }
       const stream = doc.addStream(ops.build(), doc.newDictionary());
-      appendContents(doc, pageObj, stream);
+      appendContents(doc, pageObj, stream, pageNum, guardedPages);
     }
 
     // Hyperlinks (port of edit_ops.py step 3): per-run partial links, then whole-object link/removal
@@ -623,7 +676,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   }
 
   // ── Native annotations (highlights, shapes, freehand, tables) ──
-  applyAnnotations(mupdf, doc, annotations);
+  applyAnnotations(mupdf, doc, annotations, guardedPages);
 
   // Subset every embedded font down to the glyphs actually used (we embed full TTFs for Unicode
   // coverage), so the output stays small. Best-effort — never fail the save over it.
@@ -634,7 +687,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
   return doc.saveToBuffer('compress').asUint8Array().slice();
 }
 
-function applyAnnotations(mupdf, doc, annotations) {
+function applyAnnotations(mupdf, doc, annotations, guardedPages) {
   for (const ann of annotations) {
     try {
       const pageNum = ann.pageIndex | 0;
@@ -703,7 +756,7 @@ function applyAnnotations(mupdf, doc, annotations) {
         for (let c = 0; c <= cols; c++) { const xx = x + w * c / cols; ops.op(`${f2(xx)} ${f2(ph - top)} m ${f2(xx)} ${f2(ph - top - h)} l S\n`); }
         ops.op('Q\n');
         const pageObj = page.getObject();
-        appendContents(doc, pageObj, doc.addStream(ops.build(), doc.newDictionary()));
+        appendContents(doc, pageObj, doc.addStream(ops.build(), doc.newDictionary()), pageNum, guardedPages);
       }
     } catch (err) {
       // A single bad annotation must not abort the whole save (matches the backend's per-annot guard).

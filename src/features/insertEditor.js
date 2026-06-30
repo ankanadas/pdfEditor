@@ -210,7 +210,14 @@ export const InsertEditorMethods = {
       const br = document.createElement('br');
       range.insertNode(br);
       range.setStartAfter(br); range.collapse(true);
-      if (!br.nextSibling) {
+      // insertNode at the END of a text node leaves an EMPTY text-node remainder after the br, so
+      // br.nextSibling isn't null and the anchor branch below was skipped \u2014 leaving a bogus TRAILING
+      // <br> with no focusable node on the new line. The browser then collapses the next typed char back
+      // into the previous line (the "first Enter is swallowed, lines merge" bug). Drop that empty
+      // remainder so we correctly detect "nothing meaningful follows the break".
+      let after = br.nextSibling;
+      if (after && after.nodeType === Node.TEXT_NODE && after.nodeValue === '') { const empty = after; after = after.nextSibling; empty.remove(); }
+      if (!after) {
         const span = styledSpan(st);
         span.appendChild(document.createTextNode('\u200b'));
         br.parentNode.appendChild(span);
