@@ -1130,7 +1130,11 @@
       .sidebar, .rightbar { display: contents; }            /* tools flow into the single dock row */
       .sidebar .sep { display: none; }
       .tool-dock .tool {
-        flex: 0 0 auto; width: auto; min-width: 60px; min-height: 48px;   /* ≥44px touch targets */
+        /* 5.5-tools-per-viewport sizing: the LAST visible tool always straddles the right edge, so
+           the partially cut-off icon is the cue that more tools exist off-screen. A flush row (e.g.
+           exactly 6 buttons at 430px) read as "that's all the tools" and nobody scrolled. */
+        flex: 0 0 calc(100% / 5.5 - 8px); width: auto; min-width: 44px; max-width: 96px;
+        min-height: 48px;                                                 /* ≥44px touch targets */
         padding: 6px 10px; gap: 3px; font-size: 11px;
       }
       .tool-dock .tool .tool-ico { width: 26px; height: 26px; }
@@ -1138,17 +1142,20 @@
       /* Keep the landing clean: only show the (disabled) dock once a PDF is open. */
       body:not(.has-pdf) .tool-dock { display: none; }
 
-      /* Mobile dock ORDER: bring the document tools (Merge, Rotate/Reorder) up BEFORE Erase so they're
-         not buried at the far end of the scroll row. Mobile-only — desktop keeps its side-rail layout. */
+      /* Mobile dock ORDER: bring the document tools (Merge, Rotate/Reorder) up front so they're
+         not buried at the far end of the scroll row, and surface Discard in the slot Erase used to
+         occupy. Erase is hidden on mobile (its box-drag gesture fights touch scrolling); the button
+         stays in the DOM so desktop code and the tour's visible-target filter are untouched.
+         Mobile-only — desktop keeps its side-rail layout. */
       #editModeBtn { order: 1; }
       #textModeBtn { order: 2; }
       #annotateModeBtn { order: 3; }
       #signatureModeBtn { order: 4; }
       #mergeBtn { order: 5; }
       #pagesPanelBtn { order: 6; }
-      #eraseModeBtn { order: 7; }
+      #eraseModeBtn { display: none; }
+      #clearSignatureBtn { order: 7; }
       #stampModeBtn { order: 8; }
-      #clearSignatureBtn { order: 9; }
 
       /* Touch reorder affordances: show the page grip + keep the delete button always reachable (no
          hover on touch), and make both reorder handles a no-scroll grab zone. */
