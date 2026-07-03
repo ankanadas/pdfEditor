@@ -11,6 +11,7 @@
 import wasmUrl from 'mupdf-wasm-binary';
 import { applyEdits } from './mupdfEdit.js';
 import { loadBundledFont } from './mupdfFonts.js';
+import { normColor } from './mupdfSpans.js';
 
 let _mupdfPromise = null;
 async function getMupdf() {
@@ -69,12 +70,63 @@ async function decrypt(bytes, password) {
   }
 }
 
+// Exact per-char ink colours for the editor's line styling (engine-independent, unlike canvas
+// pixel sampling, which reads anti-aliased pixels and drifts on WebKit's lighter rasteriser).
+// The document stays OPEN in the worker across per-page calls so the bytes cross the worker
+// boundary once; `inkclose` (or a new load replacing it) frees it.
+const _inkDocs = new Map();
+let _inkSeq = 0;
+
+async function inkOpen(bytes) {
+  const mupdf = await getMupdf();
+  const doc = mupdf.Document.openDocument(new Uint8Array(bytes), 'application/pdf');
+  const docId = ++_inkSeq;
+  _inkDocs.set(docId, doc);
+  return { docId, pages: doc.countPages() };
+}
+
+function inkPage(docId, pageIndex) {
+  const doc = _inkDocs.get(docId);
+  if (!doc) throw new Error('ink doc not open');
+  const page = doc.loadPage(pageIndex);
+  try {
+    const colors = [];
+    page.toStructuredText('preserve-whitespace').walk({
+      onChar(_c, origin, _font, size, _quad, color) {
+        if (origin) colors.push({ x: origin[0], y: origin[1], rgb: normColor(color), size: +size || 0 });
+      },
+    });
+    return colors;
+  } finally {
+    try { page.destroy(); } catch (_) {}
+  }
+}
+
+function inkClose(docId) {
+  const doc = _inkDocs.get(docId);
+  _inkDocs.delete(docId);
+  if (doc) { try { doc.destroy(); } catch (_) {} }
+  return true;
+}
+
 self.onmessage = async (e) => {
-  const { id, type, bytes, password, edits, annotations } = e.data || {};
+  const { id, type, bytes, password, edits, annotations, docId, page } = e.data || {};
   try {
     if (type === 'ping') {
       await getMupdf();
       self.postMessage({ id, ok: true, result: 'ready' });
+      return;
+    }
+    if (type === 'inkopen') {
+      self.postMessage({ id, ok: true, result: await inkOpen(bytes) });
+      return;
+    }
+    if (type === 'inkpage') {
+      self.postMessage({ id, ok: true, result: inkPage(docId, page) });
+      return;
+    }
+    if (type === 'inkclose') {
+      self.postMessage({ id, ok: true, result: inkClose(docId) });
       return;
     }
     if (type === 'decrypt') {

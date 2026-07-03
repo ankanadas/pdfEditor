@@ -4,7 +4,7 @@
   "packageManager": "npm",
   "testRunner": "jest",
   "jest": { "configFile": "jest.config.js", "projectType": "custom" },
-  "reporters": ["clear-text", "progress"],
+  "reporters": ["clear-text", "progress", "json"],
   "coverageAnalysis": "perTest",
   "concurrency": 4,
   "timeoutMS": 30000,

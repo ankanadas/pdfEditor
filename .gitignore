@@ -31,3 +31,6 @@ backend/tests/fixtures/*.pdf
 # the repo root with a leading slash so it does NOT also shadow backend/tests/ (the committed
 # Python suite that runs as the build gate).
 /tests/
+
+# Generated test reports (Stryker mutation json) — regenerable, never committed.
+reports/

@@ -73,7 +73,7 @@ export function sampleLineColors(pv, line) {
       const jx0 = Math.max(ix0, Math.floor(it.left) - ex0), jx1 = Math.min(ix1, Math.ceil(it.right) - ex0);
       const jy0 = Math.max(iy0, Math.floor(it.top) - ey0), jy1 = Math.min(iy1, Math.ceil(it.bottom) - ey0);
       if (jx1 <= jx0 || jy1 <= jy0) return null;
-      const cc = new Map(), crep = new Map();
+      const cc = new Map(), pix = [];
       for (let py = jy0; py < jy1; py++) {
         for (let px = jx0; px < jx1; px++) {
           const i = (py * w + px) * 4;
@@ -82,15 +82,23 @@ export function sampleLineColors(pv, line) {
           if (!far(c)) continue;                         // ignore background-ish pixels
           const k = key(i);
           cc.set(k, (cc.get(k) || 0) + 1);
-          if (!crep.has(k)) crep.set(k, c);
+          pix.push([c, k, fromBg(c)]);
         }
       }
-      // The item's ink = the colour FARTHEST from the background (its solid core), among colours with a
-      // few pixels. Using "farthest" (not "most frequent") keeps thin glyphs (a "|" or "-", mostly
-      // anti-aliased edge pixels) consistent with thick text of the SAME colour — otherwise the thin ones
-      // picked a lighter edge grey and falsely looked like a different colour, splitting a uniform line.
-      let col = null, best = -1;
-      for (const [k, n] of cc) { const c = crep.get(k); if (n >= 2 && fromBg(c) > best) { best = fromBg(c); col = c; } }
+      // The item's ink = the AVERAGE of the pixels FARTHEST from the background (the glyph's solid
+      // core), ignoring colours seen only once (noise). "Farthest" (not "most frequent") keeps thin
+      // glyphs (a "|" or "-", mostly anti-aliased edge pixels) consistent with thick text of the SAME
+      // colour. Averaging the whole top band (≥88% of the max distance) instead of one bucket's
+      // first-seen pixel keeps the value stable across engines: WebKit blends glyph edges more than
+      // Blink/Gecko, and a single sampled pixel drifted enough to read back as a DIFFERENT colour.
+      let col = null, maxD = 0;
+      for (const [, k, d] of pix) { if (cc.get(k) >= 2 && d > maxD) maxD = d; }
+      if (maxD > 0) {
+        const cut = maxD * 0.88;
+        let n = 0, r = 0, g = 0, b = 0;
+        for (const [c, k, d] of pix) { if (cc.get(k) >= 2 && d >= cut) { r += c[0]; g += c[1]; b += c[2]; n++; } }
+        if (n) col = [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+      }
       return col;
     });
 

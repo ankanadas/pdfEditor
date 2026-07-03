@@ -83,4 +83,26 @@ export const MupdfService = {
       : new Uint8Array(pdfArrayBuffer).slice().buffer;
     return call('edit', { bytes: buf, edits, annotations }, [buf]);
   },
+
+  /**
+   * Open the current document in the worker for exact per-char ink colours (kept open across
+   * per-page calls; close with inkClose). Resolves { docId, pages }.
+   */
+  async inkOpen(pdfArrayBuffer) {
+    if (!this.isSupported()) throw new Error('mupdf-wasm unsupported in this browser');
+    const buf = pdfArrayBuffer instanceof ArrayBuffer
+      ? pdfArrayBuffer.slice(0)
+      : new Uint8Array(pdfArrayBuffer).slice().buffer;
+    return call('inkopen', { bytes: buf }, [buf]);
+  },
+
+  /** Per-char [{x, y, rgb:[0..1]×3, size}] for a 0-based page of an inkOpen'd document. */
+  async inkPage(docId, page) {
+    return call('inkpage', { docId, page });
+  },
+
+  /** Free an inkOpen'd document (fire-and-forget). */
+  inkClose(docId) {
+    call('inkclose', { docId }).catch(() => {});
+  },
 };

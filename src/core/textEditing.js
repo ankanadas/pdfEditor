@@ -5,6 +5,7 @@ import { sampleLineColors } from '../util/canvas.js';
 import { rgbCss } from '../util/color.js';
 import { fontStyleFromPdfjs } from '../util/fonts.js';
 import { LINK_BLUE } from '../util/fontCatalog.js';
+import { MupdfService } from '../services/mupdfService.js';
 
 export const TextEditingMethods = {
   /**
@@ -12,7 +13,7 @@ export const TextEditingMethods = {
    * line (same left, baseline and size) and edits that line in place. Only the lines the
    * user actually changes are tracked, so saving leaves all other text untouched.
    */
-  createEditableTextBoxes(pv) {
+  async createEditableTextBoxes(pv) {
     // Skip ROTATED pages: the per-line edit boxes are laid out in the page's unrotated text space, so
     // on a rotated render they land garbled/overlapping. Existing-text editing is therefore disabled
     // on rotated pages — Add text, Highlight, Sign, Stamp and Erase still work (they map clicks live).
@@ -23,6 +24,14 @@ export const TextEditingMethods = {
     // add text" bug). Rotated text stays as its baked rendering; other lines remain editable.
     const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === pv.pageNum && !item.rotated);
     if (pageTextItems.length === 0) return;
+
+    // EXACT per-char ink colours from the PDF itself (mupdf structured text, worker round-trip).
+    // Canvas pixel sampling drifts on WebKit (its rasteriser blends small glyphs so much that no
+    // pixel is near the true ink), so sampled colours are only the fallback. The await parks this
+    // invocation; the generation stamp discards it if a newer render re-entered for the same page.
+    const boxGen = (pv._boxGen = (pv._boxGen || 0) + 1);
+    const inkChars = await this._pageInkChars(pv.pageNum);
+    if (pv._boxGen !== boxGen) return;
 
     const canvasWrapper = pv.wrapper;
     // The canvas may be displayed smaller than its intrinsic pixels (max-width:100%).
@@ -48,10 +57,11 @@ export const TextEditingMethods = {
       // (not just one — comparing to a single "dominant" colour dropped whichever word matched it). A
       // grey/black/white ink (saturation ≈ 0) is left to inherit the box colour: its per-glyph sampling is
       // unreliable for thin shapes (anti-aliasing), and tagging it would spuriously split a uniform line.
-      if (c.itemColors) {
+      // The EXACT mupdf char colour wins over the sampled estimate whenever one maps to the item.
+      if (c.itemColors || inkChars) {
         const sat = (x) => Math.max(x[0], x[1], x[2]) - Math.min(x[0], x[1], x[2]);
         (line.items || []).forEach((it, k) => {
-          const ic = c.itemColors[k];
+          const ic = (inkChars && this._itemInkColor(inkChars, line, it)) || (c.itemColors && c.itemColors[k]);
           if (ic && sat(ic) >= 45) it.color = ic;
         });
       }
@@ -295,6 +305,52 @@ export const TextEditingMethods = {
 
       canvasWrapper.appendChild(div);
     });
+  },
+  /**
+   * EXACT per-char ink colours for a page ([{x, y, rgb 0..1, size}], PDF units, y-down), from the
+   * document opened once in the mupdf worker. Cached per document + page; resolves null whenever
+   * mupdf can't run here (unsupported browser, worker/WASM failure) so callers fall back to canvas
+   * sampling — the pre-existing behaviour.
+   */
+  _pageInkChars(pageNum) {
+    const bytes = this.originalFileData;
+    if (!bytes || !MupdfService.isSupported()) return Promise.resolve(null);
+    if (this._inkFor !== bytes) {                    // new/edited document → replace the open ink doc
+      const stale = this._inkOpenP;
+      if (stale) stale.then((r) => r && MupdfService.inkClose(r.docId)).catch(() => {});
+      this._inkFor = bytes;
+      this._inkOpenP = MupdfService.inkOpen(bytes).catch(() => null);
+      this._inkPageCache = new Map();
+    }
+    if (!this._inkPageCache.has(pageNum)) {
+      // pv.pageNum is 0-based, same as mupdf's loadPage index.
+      this._inkPageCache.set(pageNum, this._inkOpenP
+        .then((r) => (r && pageNum >= 0 && pageNum < r.pages) ? MupdfService.inkPage(r.docId, pageNum) : null)
+        .catch(() => null));
+    }
+    return this._inkPageCache.get(pageNum);
+  },
+  /**
+   * The exact ink colour (0-255 RGB) of ONE line item: the majority per-char colour whose origin
+   * falls inside the item's horizontal span near the line's baseline (canvas px ÷ scale = PDF units,
+   * both y-down/top-left). Null when no char maps to the item.
+   */
+  _itemInkColor(inkChars, line, it) {
+    const s = this.scale || 1;
+    const x0 = it.left / s - 1, x1 = it.right / s + 1;
+    const yb = line.baseline / s;
+    const tol = Math.max(2.5, ((line.bottom - line.top) / s) * 0.45);
+    const votes = new Map();
+    for (const ch of inkChars) {
+      if (ch.x < x0 || ch.x > x1 || Math.abs(ch.y - yb) > tol) continue;
+      const c = ch.rgb.map((v) => Math.max(0, Math.min(255, Math.round(v * 255))));
+      const k = c.join(',');
+      const cur = votes.get(k);
+      votes.set(k, cur ? [cur[0] + 1, c] : [1, c]);
+    }
+    let best = null, n = 0;
+    for (const [, [cnt, c]] of votes) if (cnt > n) { n = cnt; best = c; }
+    return best;
   },
   /**
    * Convert a line (canvas-pixel geometry) into the edit descriptor the backend expects:

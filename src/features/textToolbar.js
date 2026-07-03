@@ -551,6 +551,13 @@ export const TextToolbarMethods = {
       if (last && eq(last, ch)) last.text += ch.c;
       else runs.push({ text: ch.c, bold: ch.bold, italic: ch.italic, underline: ch.underline, font: ch.font || null, family: ch.family || null, color: ch.color || null, link: ch.link || null });
     }
+    // A selection covering the WHOLE line coalesces into a SINGLE uniform run — that's a whole-line
+    // edit, not a partial one. Fall back (return false) to the line-level path, which carries the
+    // change on the edit itself (fontFamily/color/bold…): lineToEdit only keeps run models with >1
+    // run, so committing the single run here would show the new style in the box but silently DROP
+    // it from the save. (Mirrors the Add-text editor, where a select-all takes the box-level path.)
+    // 'link' keeps its own whole-line handling in _applyLink, so it is exempt.
+    if (kind !== 'link' && runs.length === 1) return false;
     // Same as the on-load builder: a per-run face PDF.js didn't register (a non-embedded standard font's
     // g_d0_fN, which renders via a g_d0_sfN substitute) would fall back to Arial here too — so the words
     // the user did NOT select would "change font" the instant a partial style is applied. Drop those so
