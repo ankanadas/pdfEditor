@@ -10,9 +10,10 @@
     "test:backend": "backend/venv/bin/python backend/tests/run.py",
     "test:pages": "jest tests/site",
     "test:routes": "node scripts/smoke-routes.mjs",
-    "copy:static": "cp robots.txt sitemap.xml google*.html about.html privacy.html terms.html contact.html pages.css fonts.css favicon.svg og-image.png _headers _redirects sw.js dist/ && mkdir -p dist/.well-known && cp .well-known/security.txt dist/.well-known/ && mkdir -p dist/assets/fun-ui && cp assets/fun-ui/*.png dist/assets/fun-ui/ && mkdir -p dist/assets/fonts && cp assets/fonts/*.woff2 dist/assets/fonts/ && mkdir -p dist/assets/edit-fonts && cp backend/fonts/*.ttf backend/fonts/*.otf dist/assets/edit-fonts/",
+    "copy:static": "cp robots.txt sitemap.xml google*.html about.html privacy.html terms.html contact.html pages.css fonts.css favicon.svg og-image.png _headers _redirects sw.js dist/ && mkdir -p dist/.well-known && cp .well-known/security.txt dist/.well-known/ && cp .well-known/security.txt dist/security.txt && mkdir -p dist/assets/fun-ui && cp assets/fun-ui/*.png dist/assets/fun-ui/ && mkdir -p dist/assets/fonts && cp assets/fonts/*.woff2 dist/assets/fonts/ && mkdir -p dist/assets/edit-fonts && cp backend/fonts/*.ttf backend/fonts/*.otf dist/assets/edit-fonts/",
     "build": "npm run test:backend && webpack --mode production && npm run copy:static && node scripts/sw-precache.cjs",
-    "dev": "webpack serve --mode development"
+    "dev": "webpack serve --mode development",
+    "test:e2e": "playwright test"
   },
   "keywords": [
     "pdf",
@@ -31,6 +32,7 @@
   "devDependencies": {
     "@babel/core": "^7.23.0",
     "@babel/preset-env": "^7.23.0",
+    "@playwright/test": "^1.61.1",
     "babel-loader": "^9.1.3",
     "fast-check": "^3.13.0",
     "html-webpack-plugin": "^5.5.3",

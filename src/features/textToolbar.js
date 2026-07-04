@@ -68,9 +68,12 @@ export const TextToolbarMethods = {
       return true;
     };
     const dismiss = () => { const t = this._ttTarget; if (!t) return; if (t.kind === 'overlay') this.selectInsert(null); else this.hideTextToolbar(); };
+    // Docked in the search panel, the toolbar is NOT dismiss-on-outside-click: it stays up for as
+    // long as a match is found (the search panel manages its lifecycle, incl. Clear/Close/0-hits).
+    const docked = () => tb.classList.contains('tt-docked');
     document.addEventListener('mousedown', (e) => {
       const t = this._ttTarget;
-      if (!t || t.kind === 'editor') return;
+      if (!t || t.kind === 'editor' || docked()) return;
       if (window.matchMedia && window.matchMedia('(max-width: 767px)').matches) return;   // mobile handled by the touch logic below
       if (isOutside(e.target)) dismiss();
     }, true);
@@ -92,10 +95,10 @@ export const TextToolbarMethods = {
     document.addEventListener('touchmove', (e) => { const p = e.touches[0]; if (_ts && p && Math.abs(p.clientX - _ts.x) + Math.abs(p.clientY - _ts.y) > 12) _ts.moved = true; }, true);
     document.addEventListener('touchend', (e) => {
       const t = this._ttTarget, ts = _ts; _ts = null;
-      if (!t || t.kind === 'editor' || !ts || ts.moved) return;       // no edit / add-editor (own handler) / a scroll → keep
+      if (!t || t.kind === 'editor' || !ts || ts.moved || docked()) return;   // no edit / add-editor (own handler) / a scroll / docked → keep
       if (isOutside(e.target)) dismiss();
     }, true);
-    window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this._ttTarget && this._ttTarget.kind !== 'editor') this.hideTextToolbar(); });
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this._ttTarget && this._ttTarget.kind !== 'editor' && !docked()) this.hideTextToolbar(); });
   },
   _overlayElFor(edit) { return this.insertOverlays.find(o => o.__edit === edit) || null; },
   /** Build the Sejda-style swatch palette popover and wire it to applyTextStyle('color', …). */
@@ -140,7 +143,12 @@ export const TextToolbarMethods = {
     custom.innerHTML = `Custom <input type="color" id="${customId}" value="#000000" title="Custom colour" aria-label="Custom colour">`;
     custom.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
     pop.appendChild(custom);
-    custom.querySelector('input').addEventListener('input', (e) => onPick(e.target.value));
+    const customInput = custom.querySelector('input');
+    customInput.addEventListener('input', (e) => onPick(e.target.value));
+    // Close the swatch popover once the native picker commits ('change' = dialog closed) — like a
+    // swatch click does. Matters most when the toolbar is DOCKED in the search panel, where the
+    // open popover would otherwise sit over the panel's Replace/All buttons.
+    customInput.addEventListener('change', () => { pop.hidden = true; });
 
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     const wrap = btn.closest('.tt-color-wrap');
@@ -222,6 +230,9 @@ export const TextToolbarMethods = {
     const tb = document.getElementById('textToolbar');
     if (!tb) return;
     this._setViewportZoom(true);                 // freeze scale while editing (mobile) — no focus auto-zoom
+    // Search panel: when the target IS the current find match, the SAME toolbar docks as a static
+    // block at the top of the panel instead of floating over the page (undocks for anything else).
+    if (this._maybeDockTextToolbar) this._maybeDockTextToolbar(tb, target);
     tb.hidden = false; tb.classList.add('show');
     const dup = document.getElementById('tt-dup');
     if (dup) dup.disabled = (target.kind === 'line');   // duplicate/move are added-text only
@@ -232,7 +243,7 @@ export const TextToolbarMethods = {
   hideTextToolbar() {
     this._ttTarget = null;
     const tb = document.getElementById('textToolbar');
-    if (tb) { tb.classList.remove('show'); tb.hidden = true; }
+    if (tb) { tb.classList.remove('show'); tb.hidden = true; if (this._undockTextToolbar) this._undockTextToolbar(tb); }
     // Also close the text toolbar's pop-overs (the colour one may have been re-parented to <body> on mobile,
     // so it wouldn't hide with the toolbar otherwise — it would linger as an overlay over the next mode).
     ['tt-link-pop', 'tt-color-pop', 'tt-font-pop'].forEach(id => { const e = document.getElementById(id); if (e) e.hidden = true; });
@@ -276,9 +287,12 @@ export const TextToolbarMethods = {
     let fontOriginal = (t.kind === 'line' && !famKey);
     // PARTIAL SELECTION: when a sub-range of an existing line is selected, reflect the SELECTED run's own
     // style (font / colour / weight / slant) so the toolbar shows the style of the word under the caret —
-    // not the whole-line summary. (A whole-line selection keeps the summary above.)
+    // not the whole-line summary. (A whole-line selection keeps the summary above.) With NO live
+    // selection, the search panel's CURRENT MATCH range fills in — so searching a styled
+    // replacement mirrors ITS font/colour/B/I/U on the docked toolbar, not the line average.
     if (t.kind === 'line') {
-      const ss = this._lineSelectionStyle(t.el);
+      const ss = this._lineSelectionStyle(t.el)
+        || (this._findMatchRunStyle ? this._findMatchRunStyle(t.el) : null);
       if (ss) {
         bold = ss.bold; italic = ss.italic; underline = ss.underline;
         if (ss.color) color = ss.color;
@@ -307,8 +321,21 @@ export const TextToolbarMethods = {
     const pre = document.createRange(); pre.selectNodeContents(el); pre.setEnd(r.startContainer, r.startOffset);
     const start = pre.toString().length, len = r.toString().length;
     if (start === 0 && len >= full) return null;
-    let node = r.startContainer;
-    if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
+    return this._lineCharRangeStyle(el, start);
+  },
+  /** Style of the run at character index `start` inside a line box. Resolves by CHARACTER INDEX
+   *  (boundary-safe: reading a range's startContainer picks the WRONG run when the range is
+   *  anchored at the end of the PREVIOUS text node — exactly how a boundary selection sits after a
+   *  partial style op, which made B/I/U impossible to toggle back off). Also used by the search
+   *  panel to reflect the CURRENT MATCH's own run while nothing is live-selected. */
+  _lineCharRangeStyle(el, start) {
+    const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let acc = 0, tn = null, node = null;
+    while ((tn = tw.nextNode())) {
+      const L = tn.nodeValue.length;
+      if (acc + L > start) { node = tn.parentElement; break; }
+      acc += L;
+    }
     const span = node && node !== el && node.closest ? node.closest('span') : null;
     if (!span || !el.contains(span)) return null;
     const cs = getComputedStyle(span);
@@ -338,12 +365,16 @@ export const TextToolbarMethods = {
     this._setFontPickerValue(s.family || '', s.fontOriginal ? 'Original' : undefined);
     this._setColorSwatch(s.color ? rgbToHex(s.color) : '#000000');
     set('tt-opacity', Math.round((s.opacity == null ? 1 : s.opacity) * 100));
+    // Searching (docked toolbar): the sticky override wins the display for the kinds the user set,
+    // so stepping to the next match keeps showing the chosen font/colour/B/I/U — not "Original".
+    if (this._findReflectOverride) this._findReflectOverride();
   },
   /** Position the toolbar above the selected text, clamped inside the stage, flipping below if it
    *  would clip the top. Anchors to the (PDF-positioned) DOM element so it tracks zoom/scroll/resize. */
   _positionTextToolbar() {
     const t = this._ttTarget, tb = document.getElementById('textToolbar');
     if (!t || !tb || tb.hidden) return;
+    if (tb.classList.contains('tt-docked')) return;   // docked in the search panel — CSS places it
     // MOBILE: the toolbar is CSS-PINNED as a fixed bar at the top. Never reposition it and — crucially —
     // never auto-hide it here when the edited line scrolls out of view: it must STAY put while the user
     // scrolls. Return BEFORE the isConnected check below (which was hiding it on scroll). Desktop keeps
@@ -440,6 +471,9 @@ export const TextToolbarMethods = {
   applyTextStyle(kind, value) {
     const t = this._ttTarget;
     if (!t) return;
+    // Searching (docked toolbar): remember the choice so EVERY replacement — Replace on later
+    // matches and Replace All — carries it, not just the currently selected match.
+    if (this._findRecordOverride) this._findRecordOverride(kind, value);
     if (kind === 'link') { this._applyLink(t, value); this._reflectTextToolbar(); this._positionTextToolbar(); return; }
     if (t.kind === 'editor') {
       const ie = this._activeInsertEditor;
@@ -585,7 +619,10 @@ export const TextToolbarMethods = {
       let node, acc = 0, haveStart = false;
       while ((node = tw.nextNode())) {
         const len = node.nodeValue.length;
-        if (!haveStart && acc + len >= start) { range.setStart(node, Math.max(0, start - acc)); haveStart = true; }
+        // STRICT > for the start: with >= a boundary start (exactly at a run seam) anchors at the
+        // END of the PREVIOUS text node, so the toolbar then reflects the NEIGHBOUR run's style
+        // and B/I/U toggles re-apply instead of undoing (the "can't un-bold" bug).
+        if (!haveStart && acc + len > start) { range.setStart(node, Math.max(0, start - acc)); haveStart = true; }
         if (haveStart && acc + len >= end) { range.setEnd(node, Math.max(0, end - acc)); break; }
         acc += len;
       }

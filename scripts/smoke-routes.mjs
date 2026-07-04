@@ -33,6 +33,7 @@ const CHECKS = [
   { path: '/favicon.svg', needs: '<svg' },
   { path: '/og-image.png' },
   { path: '/.well-known/security.txt', needs: 'Contact: mailto:support@quickpdfeditor.com' },
+  { path: '/security.txt', needs: 'Contact: mailto:support@quickpdfeditor.com', label: 'root copy (upload-proof safety net)' },
 ];
 
 function get(base, path) {

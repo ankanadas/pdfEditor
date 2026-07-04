@@ -12,6 +12,7 @@ import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { mergePdfBytes } from './mergeCore.js';
 import { downloadBytes } from './util/download.js';
+import { MupdfService } from './services/mupdfService.js';
 import { bindHandleReorder } from './util/touchReorder.js';
 import { detectPlatform } from './platform/detect.js';
 import {
@@ -286,15 +287,15 @@ async function processItem(item, file) {
 
     if (res.encrypted) {
       // pdf-lib can't decrypt. If the file genuinely needs a password, reject it; if it's
-      // only restricted (empty password, opens in the editor), auto-unlock it via the
-      // backend (PyMuPDF, in memory) and then merge the unlocked copy.
+      // only restricted (empty password, opens in the editor), auto-unlock it in the
+      // browser (mupdf-wasm, in memory) and then merge the unlocked copy.
       if (!(await opensWithoutPassword(bytes))) {
         item.error = 'Password-protected, open it with its password first';
         return;
       }
       item.unlocking = true;
       render();
-      const decrypted = await backendDecrypt(bytes);
+      const decrypted = await wasmDecrypt(bytes);
       item.unlocking = false;
       if (!decrypted) {
         item.error = 'Encrypted, couldn’t auto-unlock. Open it here & Save, then re-add';
@@ -328,40 +329,17 @@ async function pdflibLoad(bytes) {
   }
 }
 
-// Ask the backend (PyMuPDF) for an unencrypted copy. Returns Uint8Array, or null if the
-// backend is unreachable / declines (caller then shows the manual workaround). The file
-// is processed in memory and not stored.
-async function backendDecrypt(bytes) {
-  const base = (typeof window !== 'undefined' && window.PDF_BACKEND_URL) || '';
-  if (!base) return null;
+// Unlock an owner-locked (empty-password) PDF entirely in the browser (mupdf-wasm). Returns
+// Uint8Array, or null when WASM is unsupported / the file needs a real user password (the
+// caller then shows the manual workaround). The file never leaves the device.
+async function wasmDecrypt(bytes) {
+  if (!MupdfService.isSupported()) return null;
   try {
-    const res = await fetch(`${base}/decrypt`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pdfBase64: bytesToBase64(bytes) }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!data || !data.success || !data.pdfBase64) return null; // incl. needsPassword case
-    return base64ToBytes(data.pdfBase64);
+    const res = await MupdfService.decryptPDF(bytes, '');
+    return res && res.bytes ? res.bytes : null;   // needsPassword -> null
   } catch (_) {
     return null;
   }
-}
-
-function bytesToBase64(bytes) {
-  let binary = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
-  }
-  return btoa(binary);
-}
-function base64ToBytes(b64) {
-  const s = atob(b64);
-  const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-  return out;
 }
 
 async function makeThumb(bytes) {
