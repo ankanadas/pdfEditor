@@ -435,9 +435,14 @@ export const TextEditingMethods = {
   groupTextItemsByLine(textItems) {
     if (textItems.length === 0) return [];
 
+    // Order left-to-right within a row using the SAME tolerance the merge loop uses below
+    // (max(3, height*0.4)); a smaller sort threshold (the old hard-coded 3px) ordered items 3–4px
+    // apart in baseline by baseline instead of by x, so a right-column value could sort AHEAD of a
+    // left-column one — the row then built right-to-left and the column split (below) missed it.
     const sorted = [...textItems].sort((a, b) => {
-      if (Math.abs(a.baseline - b.baseline) < 3) return a.left - b.left;  // same line: left to right
-      return a.baseline - b.baseline;                                     // else top to bottom
+      const tol = Math.max(3, Math.min(a.height, b.height) * 0.4);
+      if (Math.abs(a.baseline - b.baseline) <= tol) return a.left - b.left;  // same row: left to right
+      return a.baseline - b.baseline;                                        // else top to bottom
     });
 
     const lines = [];
@@ -461,8 +466,13 @@ export const TextEditingMethods = {
       const gap = sameRow ? item.left - currentLine.right : 0;
       // A gap far wider than the text is a COLUMN separator (e.g. a right-aligned date or
       // "GPA: …"). Keep each column as its own segment/box so editing one doesn't reflow the
-      // others and right-aligned items stay in place.
-      const columnBreak = sameRow && !isSpace && gap > item.height * 1.8;
+      // others and right-aligned items stay in place. Measure the gap in EITHER direction: when two
+      // columns share ~a baseline the sort can still place the right one first, so the left one
+      // arrives with item.left < currentLine.right (a NEGATIVE forward gap) — the one-directional
+      // test missed that and concatenated the columns (address "NH - 03060" + Work-State "NH" ->
+      // "NHNH - 03060"). max(forward, backward) catches the reversed order too.
+      const hGap = sameRow ? Math.max(item.left - currentLine.right, currentLine.left - item.right) : 0;
+      const columnBreak = sameRow && !isSpace && hGap > item.height * 1.8;
       // A leading bullet glyph (its own fragment) stays a SEPARATE segment, so editing the text
       // never moves, resizes, or re-renders the bullet and the text keeps its original indent.
       const bulletBreak = sameRow && !isSpace && currentLine &&
