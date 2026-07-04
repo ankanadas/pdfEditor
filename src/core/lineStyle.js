@@ -17,14 +17,25 @@ export const LineStyleMethods = {
     try { d = ctx.getImageData(Math.round(x), Math.round(y), Math.max(1, Math.round(w)), Math.max(1, Math.round(h))).data; }
     catch (e) { return 'unknown'; }
     const bgL = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
-    let sum = 0, n = 0; const vals = [];
-    for (let i = 0; i < d.length; i += 4) { const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; vals.push(l); sum += l; n++; }
+    let sum = 0, sr = 0, sg = 0, sb = 0, n = 0; const vals = [];
+    for (let i = 0; i < d.length; i += 4) {
+      const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      vals.push(l); sum += l; sr += d[i]; sg += d[i + 1]; sb += d[i + 2]; n++;
+    }
     if (!n) return 'unknown';
     const mean = sum / n;
     let q = 0; for (const l of vals) q += (l - mean) * (l - mean);
     const std = Math.sqrt(q / n);
-    // Not uniform (a line/glyph runs through it) OR materially darker than the cell's own background.
-    if (std > 24 || mean < bgL - 22) return 'dirty';
+    // Colour distance between the strip's average and the cell's OWN sampled background.
+    const bgDist = Math.abs(sr / n - bg[0]) + Math.abs(sg / n - bg[1]) + Math.abs(sb / n - bg[2]);
+    // Reject the strip when it isn't uniform (a rule/glyph runs through it → dark "shadow" band), when
+    // it's materially DARKER than the cell, OR when it differs in COLOUR from the cell — e.g. a WHITE
+    // strip sampled just above a lightly-SHADED cell (a table / paystub band). Stretched over the box
+    // that white strip painted a white block over the shade — visible only in the editor, since the
+    // saved PDF keeps the shade (a WYSIWYG mismatch). The luminance gap alone (white 255 vs a light
+    // shade ~237) is too small to catch, so compare colour too; fill solid with the sampled bg instead.
+    // A genuine smooth gradient (strip ≈ the cell's colour) still stretches via drawImage.
+    if (std > 24 || mean < bgL - 22 || bgDist > 26) return 'dirty';
     return 'clean';
   },
   /**

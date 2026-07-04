@@ -487,13 +487,30 @@ export const TextEditingMethods = {
       // Same segment: keep the PDF's own spaces (whitespace fragments are preserved during
       // extraction) and only synthesise a space across a small positional gap.
       if (isSpace) {
-        if (!/\s$/.test(currentLine.text)) currentLine.text += ' ';
+        // A whitespace fragment carries its OWN advance width. A wide gap is often a single space
+        // glyph with a large advance (e.g. the address "9 Royal Crest Dr   Apt 8" — the gap between
+        // "Dr" and "Apt" is one space item ~3× a normal space wide). Reproduce it as proportional
+        // spaces so the editor box shows the SAME gap the PDF renders; a normal space stays one.
+        const spW = item.height * 0.28;
+        const w = (item.right - item.left) || 0;
+        const n = w > spW * 1.6 ? Math.max(1, Math.min(24, Math.round(w / spW))) : 1;
+        if (n > 1) currentLine.text = currentLine.text.replace(/ +$/, '') + ' '.repeat(n);
+        else if (!/\s$/.test(currentLine.text)) currentLine.text += ' ';
         return;
       }
       const endSp = /\s$/.test(currentLine.text);
       const startSp = /^\s/.test(item.text);
-      const needSpace = !endSp && !startSp && gap > item.height * 0.18;
-      currentLine.text += (needSpace ? ' ' : '') + item.text;
+      // Synthesise spaces PROPORTIONAL to the positional gap between fragments, so the editor's box
+      // shows the SAME spacing the PDF renders. A single space collapsed a wide tab-gap (e.g. an
+      // address "9 Royal Crest Dr   Apt 8"), so the editor looked packed while the saved output kept
+      // the gap — a WYSIWYG mismatch. Space advance ≈ 0.28·font-height; cap the run so a huge
+      // right-aligned gap (a separate column that slipped the column-break) can't explode the text.
+      let sep = '';
+      if (!endSp && !startSp && gap > item.height * 0.18) {
+        const spaceW = item.height * 0.28;
+        sep = ' '.repeat(Math.max(1, Math.min(24, Math.round(gap / spaceW))));
+      }
+      currentLine.text += sep + item.text;
       currentLine.left = Math.min(currentLine.left, item.left);
       currentLine.right = Math.max(currentLine.right, item.right);
       currentLine.top = Math.min(currentLine.top, item.top);
@@ -503,7 +520,12 @@ export const TextEditingMethods = {
     });
 
     // Tidy each reconstructed segment and drop any that ended up being only whitespace.
-    lines.forEach(line => { line.text = line.text.replace(/\s+/g, ' ').trim(); });
+    // Normalise tabs/newlines to a single space and trim the ends, but KEEP internal multi-space
+    // runs so a synthesised wide gap survives — a plain /\s+/ -> ' ' collapse erased it and made the
+    // editor box look packed while the saved PDF kept the gap (a WYSIWYG mismatch). Cap runaway runs.
+    lines.forEach(line => {
+      line.text = line.text.replace(/[^\S ]+/g, ' ').replace(/ {25,}/g, ' '.repeat(24)).trim();
+    });
     const realLines = lines.filter(line => line.text.length > 0);
     realLines.forEach(line => this.finalizeLineStyle(line));
     return realLines;

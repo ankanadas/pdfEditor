@@ -405,11 +405,49 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     // 1) Redact the original text of REPLACE edits (true removal), keeping images + line-art so a
     //    coloured/shaded cell or border behind the text survives — no white cover box (the win over
     //    pdf-lib). Insert-only edits (added text) set redact:false and aren't redacted.
+    // Glyph baselines on this page (with x-extent), collected ONCE, to clamp each redaction rect so
+    // it can't reach a tightly-spaced NEIGHBOUR line. applyRedactions removes EVERY glyph the rect
+    // intersects, and the rect's full em-height band (top-1 … bottom+1) is taller than the line gap
+    // on dense docs (paystubs, offer letters) — so it used to catch the line above/below in the same
+    // column and silently delete that unedited text. Clamping to the mid-point between baselines
+    // keeps each rect inside its own row. Best-effort: any failure just leaves the rect unclamped.
+    const pageGlyphs = [];
+    try {
+      page.toStructuredText('preserve-whitespace').walk({
+        onChar(_c, origin, _font, size) {
+          const sz = +size || 0;
+          if (origin) pageGlyphs.push({ by: +origin[1], x0: +origin[0], x1: +origin[0] + sz * 0.62, sz });
+        },
+      });
+    } catch (_) { /* clamp is best-effort */ }
+
     const redactRects = [];
     for (const e of pageEdits) {
       if (e.redact === false) continue;
       const x = +(e.x || 0), top = +(e.top || 0), bottom = +(e.bottom || 0), right = +(e.right || x);
-      const rect = [Math.max(0, x - 2), Math.max(0, top - 1), Math.min(pw, Math.max(right, x + 2) + 2), Math.min(ph, bottom + 1)];
+      const rx0 = Math.max(0, x - 2), rx1 = Math.min(pw, Math.max(right, x + 2) + 2);
+      let rTop = Math.max(0, top - 1), rBot = Math.min(ph, bottom + 1);
+      const bl = +(e.baseline != null ? e.baseline : (top + bottom) / 2);
+      const fs = +(e.fontSize || (bottom - top) || 10);
+      // Clamp against neighbour lines that share this line's x-span. Clamp to the neighbour's actual
+      // glyph EDGE (from its own size), not the baseline mid-point: a line BELOW has tall caps/
+      // ascenders (~0.78·size above its baseline) that reach past a mid-point, so a mid-point clamp
+      // still deleted it. mupdf only needs the rect to INTERSECT this line's glyphs (all near the
+      // baseline) to remove them, so pulling the edge in a touch never leaves this line behind.
+      // mupdf's redaction uses each glyph's FONT-METRIC box (ascent ≈ 1·size above the baseline,
+      // descent ≈ 0.3·size below) and drops the whole text run a glyph belongs to — so the rect must
+      // clear the neighbour's font box entirely, not just its ink. This line's own glyphs sit on the
+      // baseline, so pulling the edge in still removes them (their run is caught by the x-height band).
+      for (const g of pageGlyphs) {
+        if (g.x1 <= rx0 || g.x0 >= rx1) continue;                       // no horizontal overlap
+        const d = g.by - bl, gs = g.sz || fs;
+        if (d < -0.4 * fs) rTop = Math.max(rTop, g.by + 0.32 * gs + 0.4); // ABOVE: below its descenders
+        else if (d > 0.4 * fs) rBot = Math.min(rBot, g.by - 1.0 * gs - 0.4); // BELOW: above its ascenders
+      }
+      // Never let the band invert or vanish; keep at least a thin strip on the baseline so this
+      // line's own run is still caught.
+      if (rBot <= rTop) { rTop = bl - fs * 0.2; rBot = bl + fs * 0.1; }
+      const rect = [rx0, rTop, rx1, rBot];
       const a = page.createAnnotation('Redact');
       a.setRect(rect);
       redactRects.push(rect);
