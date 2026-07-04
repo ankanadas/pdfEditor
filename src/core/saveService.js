@@ -1,10 +1,7 @@
-// Save service — backend save + the pdf-lib offline flatten fallback (white-out rects + overlays).
-// Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js (this = the app).
+// Save service — mupdf-wasm in-browser save + the pdf-lib offline flatten fallback (white-out
+// rects + overlays). Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js.
 import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
-import * as pdfjsLib from 'pdfjs-dist';
-import { PDFBackendService } from '../services/pdfBackendService.js';
 import { MupdfService } from '../services/mupdfService.js';
-import { EDIT_LIMIT_BYTES } from './limits.js';
 
 export const SaveServiceMethods = {
   async savePDF() {
@@ -42,12 +39,6 @@ export const SaveServiceMethods = {
     //     encryption, etc.). This is what handles "Pages tree contains circular reference".
     let editedPdfBytes = null;
     let flattened = false;
-    let viaBackend = false;
-
-    // Large files (over the 30 MB edit limit, or opened view-only) NEVER go to the backend — an
-    // upload would bounce off the server's size cap (413). Force the client-side path for them.
-    const forceClientSide = this.largeFileMode || (this.originalFileData &&
-      (this.originalFileData.byteLength || this.originalFileData.length || 0) > EDIT_LIMIT_BYTES);
 
     const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
     // The in-browser mupdf-wasm edit (no server, true text removal, embedded-font reuse).
@@ -56,24 +47,10 @@ export const SaveServiceMethods = {
       try { editedPdfBytes = await MupdfService.editPDF(this.originalFileData, this.edits, fabricAnnotations); }
       catch (e) { console.warn('WASM save unavailable/declined:', e); }
     };
-    // The PyMuPDF backend edit (also true text removal; the historical primary).
-    const tryBackend = async () => {
-      if (editedPdfBytes || forceClientSide) return;
-      try {
-        if (await PDFBackendService.checkHealth()) {
-          editedPdfBytes = await PDFBackendService.editPDF(this.originalFileData, this.edits, fabricAnnotations);
-          viaBackend = true;
-        }
-      } catch (e) { console.warn('Backend save failed, trying client-side:', e); }
-    };
-
-    // Tier order: WASM-FIRST by default (everything runs in the browser, no server). The PyMuPDF
-    // backend is kept as the FALLBACK beneath it — used when WASM declines an edit it can't do
-    // faithfully yet (image/signature) or isn't supported — then pdf-lib, then flatten. Set
-    // window.WASM_EDIT_FIRST = false to go back to backend-first.
-    const wasmFirst = typeof window === 'undefined' || window.WASM_EDIT_FIRST !== false;
-    if (wasmFirst) { await tryWasm(); await tryBackend(); }
-    else { await tryBackend(); await tryWasm(); }
+    // WASM-only processing: every tier runs in the browser, nothing is uploaded. When WASM
+    // declines an edit set it can't do faithfully (or isn't supported), the local pdf-lib tier
+    // below takes over, then the flatten-to-image last resort.
+    await tryWasm();
 
     if (!editedPdfBytes) {
       try {
@@ -115,24 +92,6 @@ export const SaveServiceMethods = {
     try {
       if (flattened) {
         this.showStatus('Saved a flattened copy. This PDF is protected, so text-level editing wasn\'t possible. To keep selectable text, remove the PDF\'s protection first.', 'info');
-      } else if (viaBackend) {
-        // The backend truly removed the replaced text, so reload the clean result as the new
-        // baseline so further edits build on it.
-        this.originalFileData = editedPdfBytes;
-        const loadingTask = pdfjsLib.getDocument({ data: editedPdfBytes.slice(0) });
-        this.pdfJsDoc = await loadingTask.promise;
-        await this.extractTextFromPDFjs();
-        // Remember underlines the user just applied: the backend bakes a THIN rule (≈0.055·size) that
-        // the on-load pixel underline-detection can miss on this re-render, so the edit box would lose
-        // the underline until the next save. Consumed by createEditableTextBoxes below, then cleared.
-        this._savedUnderlines = (this.edits || [])
-          .filter(e => e.underline && e.redact !== false && e.newText != null && e.pageIndex != null)
-          .map(e => ({ p: e.pageIndex, y: e.baseline }));
-        this.edits = [];
-        this.resetHistory();
-        await this.buildPages();
-        this._savedUnderlines = null;
-        this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
       } else {
         this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
       }
@@ -141,9 +100,8 @@ export const SaveServiceMethods = {
       this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
     }
 
-    // Keep the document loaded after saving so the user can continue editing — a backend save
-    // has already re-baselined to the cleaned result above. (Previously the page reloaded ~1.6s
-    // after save, wiping the document back to the upload screen.)
+    // Keep the document loaded after saving so the user can continue editing. (Previously the
+    // page reloaded ~1.6s after save, wiping the document back to the upload screen.)
   },
   /**
    * Apply all edits to the PDF in the browser using pdf-lib and return the new bytes.

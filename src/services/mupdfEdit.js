@@ -244,7 +244,13 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       const bytes = extractFontBytes(info.ff);
       if (bytes) {
         try {
-          const mfont = new mupdf.Font(key, bytes);
+          // Name the re-embed with the ORIGINAL BaseFont's case (subset prefix stripped, case
+          // KEPT): pdf.js name-sniffs BaseFont against CASE-SENSITIVE standard-font tables when
+          // it rebuilds the webfont on a reload of the saved file — a lowercased name
+          // ("calibri-bold") misses and takes a glyph-mapping path that renders some capitals
+          // (e.g. F) with the WRONG (regular-weight) glyph. The lowercase `key` stays the cache key.
+          const properName = String(info.base || key).split('+').pop() || key;
+          const mfont = new mupdf.Font(properName, bytes);
           const cs = charsets().get(key) || new Set();
           // If EVERY glyph the original drew is WinAnsi-encodable, re-embed the reuse as a SIMPLE WinAnsi
           // TrueType (same outlines). Chrome/PDFium then rasterises the edited line IDENTICALLY to the
@@ -260,6 +266,26 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     }
     cidCache.set(key, opt);
     return opt;
+  }
+
+  /** Reuse the page's OWN sibling weight of the span's family for a run whose bold/italic differ
+   *  from the primary span — e.g. a plain run inside a Calibri-Bold line reuses the embedded
+   *  "Calibri" instead of falling to the bundled clone (Carlito). Purely name-derived (Office-style
+   *  "<Family>", "<Family>-Bold", "-Italic", "-BoldItalic"); a miss keeps the existing clone path. */
+  function siblingReusedOption(span, bold, italic, pageFonts) {
+    const base = stripName(span && span.fontName || '');
+    if (!base) return null;
+    const root = base.replace(/[-,]?(bolditalic|bold-?oblique|bold|italic|oblique|regular)$/, '').replace(/[-,]+$/, '');
+    if (!root) return null;
+    const suffix = bold && italic ? 'bolditalic' : bold ? 'bold' : italic ? 'italic' : '';
+    const candidates = suffix ? [`${root}-${suffix}`, `${root},${suffix}`, root + suffix] : [root];
+    for (const key of candidates) {
+      if (pageFonts.has(key)) {
+        const o = reusedOption({ fontName: key }, pageFonts);
+        if (o) return o;
+      }
+    }
+    return null;
   }
 
   // Base-14 re-emit: a NON-embedded standard font (Helvetica/Times/Courier) is kept under its own name
@@ -527,7 +553,14 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         const opts = [];
         // Reuse the original embedded font only when the user did NOT pick a toolbar font — an explicit
         // family choice (box- or run-level) must win, so it gets the chosen face, not the reused original.
-        if (rReused && sp && !rExplicit && r.bold === sp.bold && r.italic === sp.italic) opts.push(rReused);
+        // A run whose weight/slant DIFFERS from the primary span (mixed line) reuses the page's own
+        // sibling face of the same family (Calibri-Bold line -> plain run reuses embedded Calibri)
+        // instead of dropping to the bundled clone.
+        const weightMatch = sp && r.bold === sp.bold && r.italic === sp.italic;
+        const runReused = (sp && !rExplicit)
+          ? (weightMatch ? rReused : siblingReusedOption(sp, r.bold, r.italic, pageFonts))
+          : null;
+        if (runReused) opts.push(runReused);
         else if (rB14) opts.push(base14Option(rB14, r.bold, r.italic));
         opts.push(bundledSimpleOption(bundled));   // WinAnsi-encodable glyphs → simple WinAnsi (Chrome-identical)
         opts.push(bundled);                         // genuinely non-WinAnsi → Type0 full-Unicode catch-all

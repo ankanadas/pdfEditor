@@ -59,26 +59,38 @@ export const PageRendererMethods = {
    * Re-paint every page's bitmap and rebuild its overlays in place (keeps the DOM and
    * scroll position). Use for edits / mode changes. Alias: renderCurrentPage().
    */
-  async refresh() {
+  async refresh(opts = {}) {
     if (!this.pageViews.length) return;
     // Large/view-only docs (no edits/overlays) render LAZILY — only the pages on screen, on scroll —
     // so opening/closing a 500-page file is instant instead of grinding through every page.
     if (this.largeFileMode) { this._refreshLazy(); return; }
+    // opts.only (Set of page indexes): re-render JUST those pages — undo/redo of a one-page edit
+    // must not loop a 100-page document. A refresh queued while running always reruns FULL.
+    let only = (opts.only instanceof Set && opts.only.size) ? opts.only : null;
     if (this._refreshing) { this._refreshPending = true; return; }
     this._refreshing = true;
+    // The text layer builds PROGRESSIVELY page by page below (seconds on a 100-page doc). Search
+    // consults this flag: a query that runs mid-build re-scans when pages are still arriving, so
+    // the match count converges to the full document instead of silently stopping at the pages
+    // that happened to exist at keystroke time.
+    this._textLayerComplete = false;
     try {
       do {
+        if (this._refreshPending) only = null;               // a queued request widens to a full pass
         this._refreshPending = false;
         // Rebuild the overlay registry from scratch each pass: clearPageOverlays removes the DOM nodes
         // but the array would otherwise keep stale (disconnected) refs, so _overlayElFor could return a
         // removed element and _positionTextToolbar would hide the toolbar (e.g. after styling/linking a
-        // committed overlay, which re-renders it).
-        this.insertOverlays = [];
+        // committed overlay, which re-renders it). A TARGETED pass drops only the refreshed pages'
+        // entries — the other pages' overlay DOM stays untouched, so their refs remain live.
+        if (only) this.insertOverlays = this.insertOverlays.filter((o) => !only.has(o.__edit ? o.__edit.pageIndex : -1));
+        else this.insertOverlays = [];
         // Every editing mode (Edit, Add, and smart/auto) exposes existing text as per-line editable
         // boxes — the dynamic clicking model means a click on a line edits it in any of them. Only the
         // read-only 'view' mode (and non-text tools) paint committed line edits straight onto the canvas.
         const textEditing = this.mode === 'edit' || this.mode === 'auto' || this.mode === 'text';
         for (const pv of this.pageViews) {
+          if (only && !only.has(pv.pageNum)) continue;
           this.clearPageOverlays(pv);
           await pv.page.render({ canvasContext: pv.ctx, viewport: pv.viewport }).promise;
           this.drawPendingErases(pv);
@@ -87,8 +99,10 @@ export const PageRendererMethods = {
           if (textEditing) this.createEditableTextBoxes(pv);
         }
       } while (this._refreshPending);
+      this._textLayerComplete = true;
     } catch (error) {
       console.error('Error rendering pages:', error);
+      this._textLayerComplete = true;   // don't leave search polling forever on a render error
     } finally {
       this._refreshing = false;
     }

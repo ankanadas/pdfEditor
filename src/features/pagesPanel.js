@@ -1,5 +1,6 @@
 // Pages panel — open/close the Rotate/Reorder drawer, render thumbnails, drag-to-reorder, rotate,
 // insert-pos options, move/delete pages. Assembled onto PDFEditorApp.prototype (mixin).
+import * as pdfjsLib from 'pdfjs-dist';
 import { largeFileReasonSentence } from '../core/limits.js';
 
 export const PagesPanelMethods = {
@@ -289,10 +290,62 @@ export const PagesPanelMethods = {
     return order;
   },
 
-  /** Bake any pending rotations into the document (one rebuild). Used on panel close / before save. */
+  /** Bake any pending rotations into the document. Editable docs take the TARGETED path — only
+   *  the rotated pages are re-extracted/re-rendered; the old full commitPageOrder reload
+   *  (re-extract + rebuild EVERY page) made closing the drawer after one rotation hang for many
+   *  seconds on a 100-page document. */
   async _flushPendingRot() {
     if (!this._hasPendingRot()) return;
+    if (!this.largeFileMode) { await this._applyPendingRotTargeted(); return; }
     await this.commitPageOrder(this._pendingRotOrder(), 'Rotation applied.', 'Applying rotation…');
+  },
+
+  /** Bake pending rotations LOSSLESSLY (pdf-lib /Rotate) and update ONLY the rotated pages in
+   *  place: fresh bytes become the baseline, each rotated page gets a resized canvas, a re-render,
+   *  re-extracted text geometry and rebuilt overlays. Untouched pages keep their canvases, boxes
+   *  AND their pending edits (page indexes don't change in a pure rotation — the old full-reload
+   *  path wiped every edit in the document). Edits ON a rotated page carry pre-rotation
+   *  coordinates, so those are dropped with a notice. */
+  async _applyPendingRotTargeted() {
+    const pend = this._pendingRot || {};
+    const rotSet = new Set(Object.keys(pend).map(Number).filter((i) => ((pend[i] || 0) % 360) !== 0));
+    if (!rotSet.size) { this._pendingRot = {}; return; }
+    this._showBusy('Applying rotation…');
+    try {
+      const bytes = await this.applyPageOrder(this._pendingRotOrder());   // lossless /Rotate, no reload
+      this.originalFileData = bytes;
+      this.pdfJsDoc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+
+      const dropped = (this.edits || []).filter((e) => rotSet.has(e.pageIndex)).length;
+      this.edits = (this.edits || []).filter((e) => !rotSet.has(e.pageIndex));
+      this.insertOverlays = (this.insertOverlays || []).filter((o) => !(o.__edit && rotSet.has(o.__edit.pageIndex)));
+
+      const textEditing = this.mode === 'edit' || this.mode === 'auto' || this.mode === 'text';
+      for (const pv of this.pageViews) {
+        pv.page = await this.pdfJsDoc.getPage(pv.pageNum + 1);    // fresh proxies for every page (cheap)
+        if (!rotSet.has(pv.pageNum)) continue;
+        pv.viewport = pv.page.getViewport({ scale: this.scale }); // the baked page carries its /Rotate now
+        pv.canvas.width = pv.viewport.width;
+        pv.canvas.height = pv.viewport.height;
+        await this.reextractPage(pv.pageNum);                     // geometry for the new orientation
+        this.clearPageOverlays(pv);
+        await pv.page.render({ canvasContext: pv.ctx, viewport: pv.viewport }).promise;
+        this.drawPendingErases(pv);
+        this.createInsertOverlays(pv);
+        if (textEditing) this.createEditableTextBoxes(pv);
+        this.annotationManager.mountPage(pv);                     // fabric layer re-sized with the canvas
+      }
+      this.resetHistory();                                        // baseline = the surviving edits
+      this.updatePageInfo();
+      this.showStatus(dropped
+        ? `Rotation applied — ${dropped} edit${dropped === 1 ? '' : 's'} on the rotated page${rotSet.size === 1 ? '' : 's'} discarded.`
+        : 'Rotation applied.', 'success');
+    } catch (e) {
+      console.error('Rotation failed:', e);
+      this.showStatus(`Couldn't apply the rotation: ${e.message}`, 'error');
+    } finally {
+      this._hideBusy();
+    }
   },
 
   /** Show that rotations are pending (Download bakes them for large files; close/Save for editable). */
