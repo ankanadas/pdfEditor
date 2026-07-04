@@ -4,3 +4,9 @@
 /privacy    /privacy.html    200
 /terms      /terms.html      200
 /contact    /contact.html    200
+
+# security.txt safety net: Finder drag-drop uploads silently skip the hidden .well-known folder,
+# 404ing the RFC 9116 path. copy:static also puts the file at the (visible) site root, and this
+# NON-forced rewrite serves it at the canonical path whenever the physical .well-known copy is
+# missing from an upload (a physically-present file still wins over a non-forced rewrite).
+/.well-known/security.txt   /security.txt   200

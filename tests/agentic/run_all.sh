@@ -14,7 +14,7 @@ mkdir -p "$OUT"
 SUITES="agent:core latex reflow styles annotation richtext toolbar resume_textlayer divider \
 fontlib hyperlink password protected regression reorder restriction shadow layout \
 highlight_ui annotation_incremental signature mobile editor roundtrip combo pickers mobilefix mobilefixvx largefiles allpdf \
-styleround styleadd mixedbold mixededit partialstyle addpartial partialstrict clickaway addroundtrip editflow addlink dynmode addempty partialbug partialbleed partialroundtrip mobilereorder colorbug colorreopen rotpartial stylematrix multistyle editfidelity addflip latexsize multiline wholeline"
+styleround styleadd mixedbold mixededit partialstyle addpartial partialstrict clickaway addroundtrip editflow addlink dynmode addempty partialbug partialbleed partialroundtrip mobilereorder colorbug colorreopen rotpartial stylematrix multistyle editfidelity addflip latexsize multiline wholeline findreplace partialtoggle undoredo rotatefast"
 
 # Map a suite to its agent file + verify file (core is special).
 agent_file(){ [ "$1" = core ] && echo tests/agentic/agent.cjs || echo "tests/agentic/${1}_agent.cjs"; }
@@ -25,6 +25,10 @@ sc=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/ 2>/dev/null)
 bc=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5001/health 2>/dev/null)
 echo "preflight: static9000=$sc backend5001=$bc  browser=$BROWSER"
 [ "$sc" = 200 ] || { echo "FATAL: static server :9000 not up"; exit 3; }
+# Generated fixtures live in /tmp/agent_out, which a reboot wipes — core/toolbar scenarios
+# (merge, links, align, weight, rich) then fail with ENOENT. Regenerate when missing.
+[ -f /tmp/agent_out/rich.pdf ] && [ -f /tmp/agent_out/DOC_A.pdf ] || {
+  echo "preflight: regenerating fixtures (make_fixtures.py)"; $PY tests/agentic/make_fixtures.py >/dev/null 2>&1 || true; }
 
 echo "================ AGENTIC BATTERY ($BROWSER) ================"
 green=0; red=0

@@ -1,5 +1,4 @@
 import { EditorController } from './core/EditorController.js';
-import { PDFBackendService } from './services/pdfBackendService.js';
 import { initMerge } from './merge.js';
 import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -25,11 +24,13 @@ import { FileIOMethods } from './core/fileIO.js';
 import { TextToolbarMethods } from './features/textToolbar.js';
 import { ModeManagerMethods } from './core/modeManager.js';
 import { AnnotateToolbarMethods } from './features/annotateToolbar.js';
+import { FindReplaceMethods } from './features/findReplace.js';
 import { RestrictionMethods } from './core/restrictions.js';
 import { LineStyleMethods } from './core/lineStyle.js';
 import { FontPickerMethods } from './core/fontPicker.js';
 import { TextSanitizeMethods } from './core/textSanitize.js';
 import { PageOpsMethods } from './features/pageOps.js';
+import { editLimitMb } from './core/limits.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
 // No external network request is made, so the app works fully offline and never reaches
@@ -78,8 +79,13 @@ class PDFEditorApp {
     this.annotationManager = new AnnotationManager(this);
 
     this.initializeEventListeners();
+    this.initFindReplace();   // Find & Replace bar (top toolbar)
     this.setupControllerEvents();
-    
+
+    // Landing hint reflects THIS device's edit limit (200 MB desktop / 30 MB mobile).
+    const editHint = document.getElementById('editLimitHint');
+    if (editHint) editHint.textContent = `To Edit, upload files up to ${editLimitMb()} MB`;
+
     console.log('PDF Editor App initialized (runs entirely in your browser)');
   }
 
@@ -289,7 +295,26 @@ class PDFEditorApp {
 
     for (let pageNum = 0; pageNum < this.pdfJsDoc.numPages; pageNum++) {
       const page = await this.pdfJsDoc.getPage(pageNum + 1);
-      const viewport = page.getViewport({ scale: this.scale });
+      await this._extractPageText(pageNum, page, page.getViewport({ scale: this.scale }));
+    }
+
+    console.log('PDF.js extracted', this.extractedTextItems.length, 'text items (canvas px)');
+  }
+
+  /** Re-extract ONE page's text geometry + links (drops its previous entries first). Used when a
+   *  single page changes (e.g. a rotation baked on drawer close) — re-extracting the whole
+   *  document for that took seconds on long files. */
+  async reextractPage(pageIndex) {
+    this.extractedTextItems = (this.extractedTextItems || []).filter((t) => t.pageIndex !== pageIndex);
+    this.extractedLinks = (this.extractedLinks || []).filter((l) => l.pageIndex !== pageIndex);
+    const page = await this.pdfJsDoc.getPage(pageIndex + 1);
+    await this._extractPageText(pageIndex, page, page.getViewport({ scale: this.scale }));
+  }
+
+  /** Extract one page's text items + link annotations into the shared registries (verbatim body
+   *  of the old per-page loop in extractTextFromPDFjs). */
+  async _extractPageText(pageNum, page, viewport) {
+    {
       const textContent = await page.getTextContent();
       const styles = textContent.styles || {};
 
@@ -350,8 +375,6 @@ class PDFEditorApp {
           });
         });
     }
-
-    console.log('PDF.js extracted', this.extractedTextItems.length, 'text items (canvas px)');
   }
 
   /** Rebuild the HTML overlay layer for ONE page only — no pdf.js canvas re-render, and no loop
@@ -464,7 +487,7 @@ class PDFEditorApp {
 }
 
 
-Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods);
+Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
