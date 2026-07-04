@@ -26,7 +26,10 @@ export const InsertEditorMethods = {
       if (kind === 'size') { span.setAttribute('data-sz', value); span.style.fontSize = (value * unit) + 'px'; }
       else if (kind === 'bold') { span.setAttribute('data-bold', value ? '1' : '0'); span.style.fontWeight = value ? 'bold' : 'normal'; }
       else if (kind === 'italic') { span.setAttribute('data-italic', value ? '1' : '0'); span.style.fontStyle = value ? 'italic' : 'normal'; }
-      else if (kind === 'underline') { if (value) { span.setAttribute('data-underline', '1'); span.style.textDecoration = 'underline'; } else { span.removeAttribute('data-underline'); span.style.textDecoration = 'none'; } }
+      // underline OFF writes an EXPLICIT '0' (like bold/italic) — merely removing the attribute
+      // let an underlined ANCESTOR span win in both the caret-style reader and the serializer,
+      // so a partial un-underline never stuck.
+      else if (kind === 'underline') { span.setAttribute('data-underline', value ? '1' : '0'); span.style.textDecoration = value ? 'underline' : 'none'; }
       else if (kind === 'color') { const hex = rgbToHex(value); span.setAttribute('data-color', hex); span.style.color = rgbCss(value); }
       else if (kind === 'family') { span.setAttribute('data-family', value); span.style.fontFamily = this._familyCss(value); }
       else if (kind === 'link') { if (value) { span.setAttribute('data-link', value); span.classList.add('tt-has-link'); } else { span.removeAttribute('data-link'); span.classList.remove('tt-has-link'); } }
@@ -90,17 +93,39 @@ export const InsertEditorMethods = {
     // independently, falling back to the box defaults.
     const caretStyle = (range) => {
       let node = null, offset = 0;
-      if (range) { node = range.endContainer; offset = range.endOffset; }
-      else { const sel = window.getSelection(); if (sel && sel.rangeCount) { node = sel.focusNode; offset = sel.focusOffset; } }
-      // If the position is at an element boundary (e.g. a whole-content selection ends on the
-      // editor div), descend into the run just before the caret so we read its real style — not
-      // the box default. Skip <br>.
-      if (node && node.nodeType === Node.ELEMENT_NODE) {
-        let child = node.childNodes[Math.max(0, offset - 1)] || node.childNodes[offset];
-        while (child && child.nodeType === Node.ELEMENT_NODE && child.nodeName !== 'BR' && child.lastChild) {
-          child = child.lastChild;
+      if (range && !range.collapsed) {
+        // A REAL selection: read the style at its FIRST character (start side). Reading the END
+        // container picked the NEIGHBOUR run whenever the selection was anchored at a run seam
+        // (offset 0 of the next node / end of the previous) — the B/I/U buttons then mirrored the
+        // wrong run, so a second click re-applied the style instead of undoing it.
+        node = range.startContainer; offset = range.startOffset;
+        if (node.nodeType === Node.TEXT_NODE && offset >= node.nodeValue.length) {
+          // anchored at the very end of the previous text node -> the first selected char lives
+          // in the NEXT text node
+          const tw = document.createTreeWalker(div, NodeFilter.SHOW_TEXT);
+          let cur, next = null, seen = false;
+          while ((cur = tw.nextNode())) { if (seen) { next = cur; break; } if (cur === node) seen = true; }
+          if (next) node = next;
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+          let child = node.childNodes[offset] || node.childNodes[Math.max(0, offset - 1)];
+          while (child && child.nodeType === Node.ELEMENT_NODE && child.nodeName !== 'BR' && child.firstChild) {
+            child = child.firstChild;
+          }
+          if (child) node = child;
         }
-        if (child) node = child;
+      } else {
+        if (range) { node = range.endContainer; offset = range.endOffset; }
+        else { const sel = window.getSelection(); if (sel && sel.rangeCount) { node = sel.focusNode; offset = sel.focusOffset; } }
+        // Collapsed caret at an element boundary (e.g. after a whole-content select-then-click):
+        // descend into the run just BEFORE the caret so we read its real style — not the box
+        // default. Skip <br>.
+        if (node && node.nodeType === Node.ELEMENT_NODE) {
+          let child = node.childNodes[Math.max(0, offset - 1)] || node.childNodes[offset];
+          while (child && child.nodeType === Node.ELEMENT_NODE && child.nodeName !== 'BR' && child.lastChild) {
+            child = child.lastChild;
+          }
+          if (child) node = child;
+        }
       }
       if (node && node.nodeType === Node.TEXT_NODE) node = node.parentNode;
       const st = { ...boxDefaults };
@@ -192,8 +217,32 @@ export const InsertEditorMethods = {
       range.insertNode(span);
       const r2 = document.createRange();
       r2.selectNodeContents(span);
-      if (liveInEditor) { sel.removeAllRanges(); sel.addRange(r2); }
-      this._insertSavedRange = r2.cloneRange();
+      // NORMALIZE: re-render the content as FLAT run spans via the serializer (which resolves the
+      // nested data-* inheritance). Each op otherwise nests another span — and an underline-OFF
+      // span nested inside an underlined ancestor would still PAINT underlined, because CSS
+      // text-decoration draws through descendants (a child's 'none' cannot cancel it).
+      const pre = document.createRange(); pre.selectNodeContents(div); pre.setEnd(r2.startContainer, r2.startOffset);
+      const selFrom = pre.toString().replace(/​/g, '').length;
+      const selLen = r2.toString().replace(/​/g, '').length;
+      const model = this.serializeEditor(div, boxDefaults);
+      div.innerHTML = model.runs
+        .map(line => line.map(r => spanHTML(r.text, { size: r.size, bold: !!r.bold, italic: !!r.italic, underline: !!r.underline, color: r.color || null, family: r.fontFamily || null, link: r.link || null })).join(''))
+        .join('<br>');
+      // Restore the selection over the same characters (STRICT > for the start, so a boundary
+      // start lands at the beginning of the NEXT run — not the end of the previous one).
+      const tw = document.createTreeWalker(div, NodeFilter.SHOW_TEXT);
+      const rr = document.createRange();
+      let acc = 0, nd, started = false;
+      while ((nd = tw.nextNode())) {
+        const L = nd.nodeValue.length;
+        if (!started && acc + L > selFrom) { rr.setStart(nd, Math.max(0, selFrom - acc)); started = true; }
+        if (started && acc + L >= selFrom + selLen) { rr.setEnd(nd, Math.max(0, selFrom + selLen - acc)); break; }
+        acc += L;
+      }
+      if (started) {
+        if (liveInEditor) { sel.removeAllRanges(); sel.addRange(rr); }
+        this._insertSavedRange = rr.cloneRange();
+      }
       grow(); syncToolbar();
     };
 

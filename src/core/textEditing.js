@@ -139,6 +139,9 @@ export const TextEditingMethods = {
       const div = document.createElement('div');
       div.contentEditable = 'true';
       div.className = 'editable-text-box';
+      // Back-reference for the Search panel: it builds the docked text-toolbar target for a found
+      // match ({kind:'line', el, line}) without waiting for the box to be focused.
+      div.__line = line;
       // If this line was already edited, show the edited text (so edits persist on re-render).
       const pending = this.findLineEdit(line);
       const shownText = pending ? pending.newText : line.text;

@@ -34,3 +34,7 @@ backend/tests/fixtures/*.pdf
 
 # Generated test reports (Stryker mutation json) — regenerable, never committed.
 reports/
+
+# Playwright Test artifacts (tests/e2e)
+test-results/
+playwright-report/

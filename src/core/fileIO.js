@@ -2,30 +2,26 @@
 // Assembled onto PDFEditorApp.prototype (mixin); verbatim from app.js (this = the app).
 import * as pdfjsLib from 'pdfjs-dist';
 import { confirmDialog } from '../util/dialog.js';
-import { PDFBackendService } from '../services/pdfBackendService.js';
 import { MupdfService } from '../services/mupdfService.js';
 import {
-  EDIT_LIMIT_BYTES, EDIT_LIMIT_PAGES, deviceCapBytes, DEVICE_CAP_MESSAGE,
+  editLimitBytes, editLimitMb, EDIT_LIMIT_PAGES, deviceCapBytes, DEVICE_CAP_MESSAGE,
 } from './limits.js';
 
 // View-only controls stay enabled even for large (non-editable) files; edit controls are gated.
 const VIEW_CONTROLS = ['prevPageBtn', 'nextPageBtn', 'pagesPanelBtn'];
 const EDIT_CONTROLS = ['saveBtn', 'textInput', 'editModeBtn', 'textModeBtn',
-  'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'annotateModeBtn', 'clearSignatureBtn'];
+  'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'annotateModeBtn', 'searchToolBtn', 'clearSignatureBtn'];
 
 export const FileIOMethods = {
   /**
    * Enable the tools/controls that require a loaded PDF. When `large` is true the document is
-   * over the edit limit (30 MB / 500 pages) and opens VIEW-ONLY: viewing, paging, Rotate/Reorder
+   * over the edit limit (200 MB desktop / 30 MB mobile, or 500 pages) and opens VIEW-ONLY: viewing, paging, Rotate/Reorder
    * and Merge stay available, but the editing tools (Edit/Add/Sign/Erase/Stamp/Highlight/Save)
    * are disabled.
    */
   enableUiAfterLoad(large = false) {
     VIEW_CONTROLS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
     EDIT_CONTROLS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !!large; });
-    // Warm the edit backend now (free hosts sleep when idle) so it's awake by the time the
-    // user saves — avoids the first save silently falling back to client-side. Fire-and-forget.
-    if (!large) PDFBackendService.checkHealth().catch(() => {});
   },
   /** Clear the loaded PDF and return to the empty upload state. Used by the Merge panel
    *  when the user removes the current document (the one open here). */
@@ -65,12 +61,14 @@ export const FileIOMethods = {
     const modal = document.getElementById('largeFileModal');
     if (!modal) return;
     // Name the LIMIT the file crossed (so the user learns the cap), not the file's own numbers.
-    const overSize = this.originalFile && this.originalFile.size > EDIT_LIMIT_BYTES;
+    // The byte cap is device-aware (200 MB desktop / 30 MB mobile).
+    const mb = editLimitMb();
+    const overSize = this.originalFile && this.originalFile.size > editLimitBytes();
     const overPages = this.pdfJsDoc && this.pdfJsDoc.numPages > EDIT_LIMIT_PAGES;
     let reason;
-    if (overSize && overPages) reason = 'is greater than 30 MB and has more than 500 pages';
-    else if (overSize) reason = 'is greater than 30 MB';
-    else reason = 'has more than 500 pages';
+    if (overSize && overPages) reason = `is greater than ${mb} MB and has more than ${EDIT_LIMIT_PAGES} pages`;
+    else if (overSize) reason = `is greater than ${mb} MB`;
+    else reason = `has more than ${EDIT_LIMIT_PAGES} pages`;
     const msgEl = document.getElementById('largeFileMsg');
     if (msgEl) msgEl.textContent =
       `This file ${reason}, which is too large to edit. You can still rotate, reorder, or merge it.`;
@@ -167,27 +165,20 @@ export const FileIOMethods = {
       // that ALSO restrict modification — both get the authorisation confirmation before editing.
       const editRestricted = await this._detectEditRestriction();
 
-      // If the user supplied a real password, fetch an unlocked copy from the backend so the
-      // edit/save pipeline works on plain bytes (the saved copy is unlocked, by design). If the
-      // backend can't be reached, we keep the viewable PDF.js doc and the save chain flattens.
+      // If the user supplied a real password, unlock a copy IN THE BROWSER (mupdf-wasm) so the
+      // edit/save pipeline works on plain bytes (the saved copy is unlocked, by design). If WASM
+      // can't unlock it, we keep the viewable PDF.js doc and the save chain flattens.
       let workingData = arrayBuffer.slice(0);
       if (enteredPassword) {
         this.showStatus('Unlocking PDF…', 'info');
-        // WASM-first: unlock in the browser (mupdf-wasm, no server). The backend is the FALLBACK if
-        // WASM is unsupported or fails. Only if BOTH fail do we keep the locked doc and let save flatten.
+        // WASM-only: unlock in the browser (mupdf-wasm, no server). If WASM is unsupported or
+        // fails, we keep the locked doc and let save flatten.
         let res = null;
         if (MupdfService.isSupported()) {
           try {
             res = await MupdfService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
           } catch (e) {
-            console.warn('WASM decrypt unavailable; trying the backend:', e);
-          }
-        }
-        if (!res || !res.bytes) {
-          try {
-            res = await PDFBackendService.decryptPDF(arrayBuffer.slice(0), enteredPassword);
-          } catch (e) {
-            console.warn('Backend decrypt unavailable; protected PDF will save as a flattened copy:', e);
+            console.warn('WASM decrypt unavailable; protected PDF will save as a flattened copy:', e);
           }
         }
         if (res && res.bytes) {
@@ -205,10 +196,11 @@ export const FileIOMethods = {
       this._editRestricted = editRestricted;
       this._restrictionConfirmed = false;
 
-      // Decide editable vs view-only by the OUTPUT we just loaded: > 30 MB OR > 500 pages (whichever
-      // hits first) means editing is unsupported, but the file still opens for viewing/merge/reorder.
+      // Decide editable vs view-only by the OUTPUT we just loaded: over the device-aware byte
+      // limit (200 MB desktop / 30 MB mobile) OR > 500 pages (whichever hits first) means editing
+      // is unsupported, but the file still opens for viewing/merge/reorder.
       const pageCount = this.pdfJsDoc.numPages;
-      this.largeFileMode = (file.size > EDIT_LIMIT_BYTES) || (pageCount > EDIT_LIMIT_PAGES);
+      this.largeFileMode = (file.size > editLimitBytes()) || (pageCount > EDIT_LIMIT_PAGES);
 
       if (this.largeFileMode) {
         // Large file: do NOT render the editor first. Show the choice dialog immediately; only render
