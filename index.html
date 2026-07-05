@@ -532,6 +532,26 @@
       border-radius: 3px;
     }
 
+    /* Move-lines: drag grip beside each line (shown on hover/focus), the active move-mode look,
+       and the purple snap guides drawn while a dragged box aligns with another edge. */
+    .qpe-move-grip {
+      position: absolute; width: 12px; z-index: 210; cursor: move;
+      opacity: 0; pointer-events: none; transition: opacity .12s;
+      border-radius: 3px; touch-action: none;
+      background-image: radial-gradient(circle, #8b7fd6 1.1px, transparent 1.3px);
+      background-size: 6px 6px; background-position: 2px 3px;
+    }
+    .qpe-move-grip.show { opacity: .9; pointer-events: auto; }
+    .qpe-move-grip:hover { background-color: rgba(124, 92, 255, .12); }
+    .editable-text-box.qpe-moving {
+      cursor: move !important;
+      border: 1.5px solid #7c5cff !important;
+      box-shadow: 0 0 0 3px rgba(124, 92, 255, .22) !important;
+      background: rgba(124, 92, 255, .05) !important;
+      user-select: none;
+    }
+    .qpe-snap-guide { position: absolute; background: #7c5cff; opacity: .8; z-index: 205; pointer-events: none; }
+
     /* In-place editor for "Add text" (click a spot, type, Enter = new line). It's a
        contentEditable div so a single box can mix font size / bold / italic per run. Size and
        B / I are applied from the top toolbar to the current selection. */

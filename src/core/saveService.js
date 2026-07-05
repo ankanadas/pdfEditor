@@ -235,7 +235,9 @@ export const SaveServiceMethods = {
       // line by its own height (rotated about the origin), then chain its runs along the baseline.
       const rot = edit.rotation || 0;
       const rad = rot * Math.PI / 180;
-      const baseX = edit.x, baseY = ph - edit.baseline;
+      // A MOVED line: the cover above stays on the ORIGINAL rect; the redraw shifts by dx/dy
+      // (PDF pts, top-origin — so +dy moves DOWN, i.e. subtracts in pdf-lib's bottom-origin y).
+      const baseX = edit.x + (+(edit.dx) || 0), baseY = ph - (edit.baseline + (+(edit.dy) || 0));
       let drop = 0, prevMax = null;
       lineModel.forEach((parts) => {
         const thisMax = Math.max(4, ...parts.map(r => r.size));

@@ -500,7 +500,11 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     //    fit the available width, then draw each run with its font at the baseline (rotated if asked).
     for (const e of pageEdits) {
       const isInsert = e.redact === false;
-      const x = +(e.x || 0), baseline = +(e.baseline || 0);
+      // A MOVED line (drag / arrow-nudge): redaction above used the ORIGINAL rect (e.x/top/bottom),
+      // but every drawn artefact — text runs, underline, link rects — originates from (x, baseline),
+      // so offsetting them here places the whole line at its new spot in the output.
+      const mdx = +(e.dx) || 0, mdy = +(e.dy) || 0;
+      const x = +(e.x || 0) + mdx, baseline = +(e.baseline || 0) + mdy;
       const sp = e._span;   // detected original style (replace edits only)
       // Bundled-font selection: an explicit toolbar family (Arial/Calibri/Georgia/…) wins; else a LaTeX
       // original blends with the matching open LaTeX face (Latin Modern / TeX Gyre); else the generic
@@ -684,7 +688,8 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // text_runs.py _link_rect_for_edit) so the link tracks the TEXT, not the full-width container box.
       if (e.link || e.linkRemoved) {
         if (!isInsert) {
-          const top = +(e.top || 0), bottom = +(e.bottom || 0), right = +(e.right || x);
+          const top = +(e.top || 0) + mdy, bottom = +(e.bottom || 0) + mdy;
+          const right = (e.right != null ? +e.right : +(e.x || 0)) + mdx;
           e._linkRect = [Math.max(0, x - 1), Math.max(0, top - 1), Math.max(right, x + 4) + 1, bottom + 1];
         } else {
           const nLines = Math.max(1, lineModel.filter(parts => parts.some(r => r.text)).length);

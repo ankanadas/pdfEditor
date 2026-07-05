@@ -30,6 +30,7 @@ import { LineStyleMethods } from './core/lineStyle.js';
 import { FontPickerMethods } from './core/fontPicker.js';
 import { TextSanitizeMethods } from './core/textSanitize.js';
 import { PageOpsMethods } from './features/pageOps.js';
+import { MoveLinesMethods } from './features/moveLines.js';
 import { editLimitMb } from './core/limits.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
@@ -407,6 +408,13 @@ class PDFEditorApp {
     );
 
     if (existingIndex >= 0) {
+      // A moved line keeps its position across later re-tracks of the SAME line (text retype,
+      // style change): those rebuild the edit from the line's original geometry without dx/dy,
+      // which would silently snap the text back to its old spot on save.
+      const prev = this.edits[existingIndex];
+      if ((prev.dx || prev.dy) && edit.dx == null && edit.dy == null) {
+        edit.dx = prev.dx; edit.dy = prev.dy;
+      }
       this.edits[existingIndex] = edit;
     } else {
       this.edits.push(edit);
@@ -487,7 +495,7 @@ class PDFEditorApp {
 }
 
 
-Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods);
+Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods, MoveLinesMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
