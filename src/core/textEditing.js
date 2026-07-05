@@ -362,8 +362,37 @@ export const TextEditingMethods = {
       this._inkPageCache.set(pageNum, this._inkOpenP
         .then((r) => (r && pageNum >= 0 && pageNum < r.pages) ? MupdfService.inkPage(r.docId, pageNum) : null)
         .catch(() => null));
+      // LRU cap: per-page char/image payloads for a 1000+ page doc would otherwise accumulate
+      // unbounded as the user scrolls. Maps iterate in insertion order → first key is oldest.
+      while (this._inkPageCache.size > 60) {
+        this._inkPageCache.delete(this._inkPageCache.keys().next().value);
+      }
     }
     return this._inkPageCache.get(pageNum);
+  },
+  /**
+   * LAZY-editable docs: hydrate ONE page's text geometry + links on demand (the eager path
+   * extracts every page up front at load). Called by the windowed painter before building the
+   * page's boxes; concurrent calls for the same page share one promise. Extracted pages stay —
+   * items are small (text + numbers), it's the CANVASES that blow the memory budget.
+   */
+  _ensurePageExtracted(pv) {
+    if (!this.lazyEditMode) return Promise.resolve();
+    if (!this._extractedPages) this._extractedPages = new Set();
+    if (this._extractedPages.has(pv.pageNum)) return Promise.resolve();
+    if (!this._extractingPages) this._extractingPages = new Map();
+    if (!this._extractingPages.has(pv.pageNum)) {
+      // Idempotent: drop any stale entries for this page first (e.g. a rotation bake already
+      // re-extracted it via reextractPage) so a second pass can never double the page's items.
+      this.extractedTextItems = (this.extractedTextItems || []).filter((t) => t.pageIndex !== pv.pageNum);
+      this.extractedLinks = (this.extractedLinks || []).filter((l) => l.pageIndex !== pv.pageNum);
+      const p = this._extractPageText(pv.pageNum, pv.page, pv.page.getViewport({ scale: this.scale }))
+        .then(() => { this._extractedPages.add(pv.pageNum); })
+        .catch((e) => console.warn('lazy text extraction failed for page', pv.pageNum + 1, e))
+        .finally(() => this._extractingPages.delete(pv.pageNum));
+      this._extractingPages.set(pv.pageNum, p);
+    }
+    return this._extractingPages.get(pv.pageNum);
   },
   /**
    * The exact ink colour (0-255 RGB) of ONE line item: the majority per-char colour whose origin

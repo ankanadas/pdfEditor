@@ -4,7 +4,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import { confirmDialog } from '../util/dialog.js';
 import { MupdfService } from '../services/mupdfService.js';
 import {
-  editLimitBytes, editLimitMb, EDIT_LIMIT_PAGES, deviceCapBytes, DEVICE_CAP_MESSAGE,
+  editLimitBytes, editLimitMb, EDIT_LIMIT_PAGES, LAZY_EDIT_PAGES, deviceCapBytes, DEVICE_CAP_MESSAGE,
 } from './limits.js';
 
 // View-only controls stay enabled even for large (non-editable) files; edit controls are gated.
@@ -15,7 +15,7 @@ const EDIT_CONTROLS = ['saveBtn', 'textInput', 'editModeBtn', 'textModeBtn',
 export const FileIOMethods = {
   /**
    * Enable the tools/controls that require a loaded PDF. When `large` is true the document is
-   * over the edit limit (200 MB desktop / 30 MB mobile, or 500 pages) and opens VIEW-ONLY: viewing, paging, Rotate/Reorder
+   * over the edit limit (200 MB desktop / 30 MB mobile, or 1500 pages) and opens VIEW-ONLY: viewing, paging, Rotate/Reorder
    * and Merge stay available, but the editing tools (Edit/Add/Sign/Erase/Stamp/Highlight/Save)
    * are disabled.
    */
@@ -30,6 +30,7 @@ export const FileIOMethods = {
     this.originalFile = null;
     this.originalFileData = null;
     this.largeFileMode = false;
+    this.lazyEditMode = false;
     this.edits = [];
     this.currentPage = 0;
     if (typeof this.resetHistory === 'function') this.resetHistory();
@@ -53,7 +54,7 @@ export const FileIOMethods = {
     document.querySelectorAll('.tool.active').forEach((el) => el.classList.remove('active'));
   },
   /**
-   * Modal shown when a file is opened that's too large to EDIT (over 30 MB / 500 pages) but small
+   * Modal shown when a file is opened that's too large to EDIT (over the device byte limit / 1500 pages) but small
    * enough to view. Offers Rotate/Reorder or Merge (both client-side). Cancel/X leaves the file
    * open view-only. Handlers are assigned with onclick (idempotent across repeated opens).
    */
@@ -201,6 +202,9 @@ export const FileIOMethods = {
       // is unsupported, but the file still opens for viewing/merge/reorder.
       const pageCount = this.pdfJsDoc.numPages;
       this.largeFileMode = (file.size > editLimitBytes()) || (pageCount > EDIT_LIMIT_PAGES);
+      // Editable but big (501–1500 pages): render lazily (paint near the viewport, evict far pages)
+      // — eagerly painting 1000+ full-res canvases is multi-GB and crashes the tab. ≤500 unchanged.
+      this.lazyEditMode = !this.largeFileMode && pageCount > LAZY_EDIT_PAGES;
 
       if (this.largeFileMode) {
         // Large file: do NOT render the editor first. Show the choice dialog immediately; only render
@@ -248,7 +252,16 @@ export const FileIOMethods = {
 
       // Extract text geometry with PDF.js — the same engine that renders the canvas —
       // so the editable overlays align exactly. The backend is used only when saving.
-      await this.extractTextFromPDFjs();
+      // LAZY-editable docs (501+ pages) hydrate text per page as it scrolls into view instead
+      // (getTextContent × 1000+ up front costs a minute+ and holds every page's items at once);
+      // see _ensurePageExtracted, called by the windowed painter before building a page's boxes.
+      if (this.lazyEditMode) {
+        this.extractedTextItems = [];
+        this.extractedLinks = [];
+        this._extractedPages = new Set();
+      } else {
+        await this.extractTextFromPDFjs();
+      }
 
       this.currentPage = 0;
       // Smart default: don't force a tool choice. Set it BEFORE buildPages so the pages render
