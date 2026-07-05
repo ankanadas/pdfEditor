@@ -236,8 +236,14 @@ export const TextEditingMethods = {
       const widthCss = (line.right - line.left) * displayScale;
 
       div.style.position = 'absolute';
-      div.style.left = (leftCss - 1) + 'px';
-      div.style.top = (topCss - 1) + 'px';
+      // Original (unmoved) position in CSS px — the move tool measures its dx/dy from these, so a
+      // second drag doesn't compound the first. A pending moved edit re-applies its offset here.
+      div.dataset.qpeLeft0 = String(leftCss - 1);
+      div.dataset.qpeTop0 = String(topCss - 1);
+      const mvX = (pending && pending.dx ? pending.dx : 0) * this.scale * displayScale;
+      const mvY = (pending && pending.dy ? pending.dy : 0) * this.scale * displayScale;
+      div.style.left = (leftCss - 1 + mvX) + 'px';
+      div.style.top = (topCss - 1 + mvY) + 'px';
       div.style.minWidth = Math.max(widthCss, 20) + 'px';   // width:auto -> grows with text
       div.style.height = (lineBoxPx + 2) + 'px';
       div.style.fontSize = fontSizePx + 'px';
@@ -339,6 +345,8 @@ export const TextEditingMethods = {
       });
 
       canvasWrapper.appendChild(div);
+      // Drag / arrow-key repositioning (grip + move mode) — see features/moveLines.js.
+      this._initLineMove(div, line, pv, displayScale);
     });
   },
   /**
@@ -715,7 +723,7 @@ export const TextEditingMethods = {
    */
   clearEditableTextBoxes() {
     const container = document.getElementById('canvasContainer');
-    if (container) container.querySelectorAll('.editable-text-box').forEach(el => el.remove());
+    if (container) container.querySelectorAll('.editable-text-box, .qpe-move-grip, .qpe-snap-guide').forEach(el => el.remove());
     this.editableTextBoxes = [];
     this.activeEditBox = null;
   },

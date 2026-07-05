@@ -240,7 +240,7 @@ export const PageRendererMethods = {
   // Back-compat: existing call sites use renderCurrentPage() to mean "refresh overlays".
   renderCurrentPage() { return this.refresh(); },
   clearPageOverlays(pv) {
-    pv.wrapper.querySelectorAll('.editable-text-box, .insert-overlay').forEach(el => el.remove());
+    pv.wrapper.querySelectorAll('.editable-text-box, .insert-overlay, .qpe-move-grip, .qpe-snap-guide').forEach(el => el.remove());
   },
   /**
    * Draw pending erase rectangles (white-out areas, e.g. an old signature) as a preview.
