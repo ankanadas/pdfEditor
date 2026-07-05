@@ -33,6 +33,7 @@ import { FontPickerMethods } from './core/fontPicker.js';
 import { TextSanitizeMethods } from './core/textSanitize.js';
 import { PageOpsMethods } from './features/pageOps.js';
 import { MoveLinesMethods } from './features/moveLines.js';
+import { CheckmarkMethods } from './features/checkmark.js';
 import { editLimitMb } from './core/limits.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
@@ -83,6 +84,7 @@ class PDFEditorApp {
 
     this.initializeEventListeners();
     this.initFindReplace();   // Find & Replace bar (top toolbar)
+    this.initCheckTool();     // Check tool: place ✓ / ✗ / ☑ / ● marks
     this.setupControllerEvents();
 
     // Landing hint reflects THIS device's edit limit (200 MB desktop / 30 MB mobile).
@@ -199,6 +201,22 @@ class PDFEditorApp {
     document.getElementById('nextPageBtn')?.addEventListener('click', () => {
       this.nextPage();
     });
+
+    // Editable page number (Chrome-style): Enter or clicking away jumps to the typed page; an
+    // INVALID value (out of range / empty / non-numeric) silently reverts to the current page and
+    // NEVER navigates. Enter just blurs so goToTypedPage runs exactly ONCE (a second call on the
+    // reverted value used to navigate to it — that's why an invalid entry could jump to page 1).
+    const pageNumInput = document.getElementById('pageNumInput');
+    pageNumInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); pageNumInput.blur(); }
+      else if (e.key === 'Escape') { e.preventDefault(); this._pageInputCancel = true; pageNumInput.blur(); }
+    });
+    pageNumInput?.addEventListener('blur', () => {
+      if (this._pageInputCancel) { this._pageInputCancel = false; pageNumInput.value = String(this.currentPage + 1); return; }
+      this.goToTypedPage();
+    });
+    pageNumInput?.addEventListener('focus', () => pageNumInput.select());
+    pageNumInput?.addEventListener('input', () => { pageNumInput.value = pageNumInput.value.replace(/[^0-9]/g, ''); });
 
     // Per-page canvas click & erase-drag listeners are attached in buildPages().
     // Global move/up so an erase drag keeps tracking outside the page canvas.
@@ -499,7 +517,7 @@ class PDFEditorApp {
 }
 
 
-Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods, MoveLinesMethods, WatermarkMethods);
+Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods, MoveLinesMethods, WatermarkMethods, CheckmarkMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {

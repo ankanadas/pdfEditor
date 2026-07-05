@@ -15,10 +15,11 @@ export const ModeManagerMethods = {
     const eraseBtn = document.getElementById('eraseModeBtn');
     const stampBtn = document.getElementById('stampModeBtn');
     const annotateBtn = document.getElementById('annotateModeBtn');
+    const checkBtn = document.getElementById('checkModeBtn');
 
     // Highlight the active tool and expose the mode on <body> so the UI (CSS) can
-    // show the relevant inputs / cursor for that tool.
-    [textBtn, editBtn, sigBtn, eraseBtn, stampBtn, annotateBtn].forEach(btn => btn && btn.classList.remove('active'));
+    // show the relevant inputs / cursor for that tool (e.g. the Check mark picker).
+    [textBtn, editBtn, sigBtn, eraseBtn, stampBtn, annotateBtn, checkBtn].forEach(btn => btn && btn.classList.remove('active'));
     document.body.dataset.mode = mode || '';
 
     // Enable / disable the Fabric layers based on whether Annotate is active
@@ -38,6 +39,10 @@ export const ModeManagerMethods = {
       if (eraseBtn) eraseBtn.classList.add('active');
     } else if (mode === 'stamp') {
       if (stampBtn) stampBtn.classList.add('active');
+    } else if (mode === 'check') {
+      if (checkBtn) checkBtn.classList.add('active');
+      this._reflectCheckMark();
+      this.showStatus('Tap a mark above, then tap a box on the page to place it.', 'info');
     } else if (mode === 'annotate') {
       if (annotateBtn) annotateBtn.classList.add('active');
       // Activate the last-used sub-tool (default to the text highlighter — Draw was removed).
@@ -89,6 +94,9 @@ export const ModeManagerMethods = {
       indicator.classList.add('active');
     } else if (this.mode === 'stamp') {
       indicator.textContent = 'Stamp';
+      indicator.classList.add('active');
+    } else if (this.mode === 'check') {
+      indicator.textContent = 'Check';
       indicator.classList.add('active');
     } else if (this.mode === 'annotate') {
       indicator.textContent = 'Highlight';
@@ -153,6 +161,8 @@ export const ModeManagerMethods = {
     } else if (this.mode === 'stamp') {
       if (!this.activeStamp) { this.showStatus('Pick a stamp (Approved, Reject, …) first', 'error'); return; }
       this.placeStamp(xPt, clickYPt, pv);
+    } else if (this.mode === 'check') {
+      this.placeMark(xPt, clickYPt, pv);      // drop the selected ✓ / ✗ / ☑ / ● at the tapped point
     }
     // Signatures are added via the Sign dialog (drawn/typed/image), not by clicking.
   },

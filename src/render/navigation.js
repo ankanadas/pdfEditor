@@ -27,9 +27,31 @@ export const NavigationMethods = {
   },
 
   updatePageInfo() {
+    const input = document.getElementById('pageNumInput');
     const pageInfo = document.getElementById('pageInfo');
-    if (pageInfo && this.pdfJsDoc) {
-      pageInfo.textContent = `Page ${this.currentPage + 1} of ${this.pdfJsDoc.numPages}`;
+    if (this.pdfJsDoc) {
+      // Don't stomp the field WHILE the user is typing in it; the total goes in #pageInfo.
+      if (input) {
+        input.disabled = false;
+        if (document.activeElement !== input) input.value = String(this.currentPage + 1);
+      }
+      if (pageInfo) pageInfo.textContent = `/ ${this.pdfJsDoc.numPages}`;
+    }
+  },
+
+  /** Jump to the page number typed into #pageNumInput (Chrome-style). An empty/non-numeric/
+   *  out-of-range value silently reverts to the current page — never navigates anywhere invalid. */
+  goToTypedPage() {
+    const input = document.getElementById('pageNumInput');
+    if (!input || !this.pdfJsDoc) return;
+    // Refresh the current page from the ACTUAL scroll position first, so an invalid entry reverts
+    // to the page the user is really on — not a stale value (which is how it could show/jump to 1).
+    this.updateCurrentPageFromScroll();
+    const n = parseInt(input.value, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= this.pdfJsDoc.numPages) {
+      this.scrollToPage(n - 1);
+    } else {
+      input.value = String(this.currentPage + 1);   // invalid → stay on the current page (no navigation)
     }
   },
 };

@@ -584,12 +584,15 @@ export const InsertEditorMethods = {
         (dx, dy) => { box.style.left = (ox + dx) + 'px'; box.style.top = (oy + dy) + 'px'; },
         commit);
     });
-    // Proportional resize from the corner handle.
+    // Proportional resize from the corner handle. A CHECK MARK (✓/✗/☑/●) may need to be tiny to fit
+    // a small form checkbox, so it shrinks much further than a signature/stamp (which keep a usable
+    // floor).
     handle.addEventListener('pointerdown', (e) => {
       const w0 = parseFloat(box.style.width), h0 = parseFloat(box.style.height);
       const ar = h0 / w0;
+      const minW = edit && edit.mark ? 6 : 24;
       drag(handle, e,
-        (dx) => { const w = Math.max(24, w0 + dx); box.style.width = w + 'px'; box.style.height = (w * ar) + 'px'; },
+        (dx) => { const w = Math.max(minW, w0 + dx); box.style.width = w + 'px'; box.style.height = (w * ar) + 'px'; },
         commit);
     });
     // Delete — keep on tap/click (no preventDefault so the tap still produces a click); stop it
