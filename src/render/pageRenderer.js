@@ -210,6 +210,11 @@ export const PageRendererMethods = {
       return;
     }
 
+    // Expose the painter to features that must materialise a far page on demand — Search jumps
+    // to a match on an unpainted page by awaiting _lePaint(pv) before resolving its DOM box.
+    this._lePaint = paint;
+    this._leEvict = evict;
+
     if (this._lazyEditIO) { this._lazyEditIO.disconnect(); this._lazyEditIO = null; }
     this.pageViews.forEach((pv) => { pv._lePainted = false; pv._lePainting = false; });
     this.insertOverlays = [];

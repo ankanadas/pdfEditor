@@ -64,7 +64,7 @@ export const FindReplaceMethods = {
     tb?.addEventListener('mousedown', () => {
       if (!tb.classList.contains('tt-docked')) return;
       const m = this._find.matches[this._find.idx];
-      if (!m || !m.el.isConnected) return;
+      if (!m || !m.el || !m.el.isConnected) return;
       const sel = window.getSelection();
       const r = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
       if (!(r && !r.collapsed && m.el.contains(r.commonAncestorContainer))) this.findSelectCurrent();
@@ -83,6 +83,7 @@ export const FindReplaceMethods = {
     btn?.classList.add('active');
     btn?.setAttribute('aria-pressed', 'true');
     if (this.pdfJsDoc && this.refresh) await this.refresh();   // re-place boxes for the narrowed stage
+    if (this.lazyEditMode) this._findEnsureIndex();            // pre-warm the whole-doc text index
     const input = document.getElementById('findInput');
     if (input) {
       if (input.value.trim()) this.findRun(input.value);
@@ -206,8 +207,12 @@ export const FindReplaceMethods = {
     this._ttTarget = prev;
   },
 
-  /** The searchable text layer: every line box, with its committed text and page. */
+  /** The searchable text layer: every line box, with its committed text and page.
+   *  LAZY-editable docs (501+ pages) never have boxes for more than the painted window, so they
+   *  search the BACKGROUND INDEX instead (virtual entries, el resolved on demand); ≤500-page docs
+   *  keep this exact DOM scan. */
   _findEntries() {
+    if (this.lazyEditMode) return this._findVirtualEntries();
     const out = [];
     for (const pv of (this.pageViews || [])) {
       if (!pv || !pv.wrapper) continue;
@@ -217,6 +222,80 @@ export const FindReplaceMethods = {
       });
     }
     return out;
+  },
+
+  // ---- Background index for LAZY-editable docs (search is decoupled from the painted window) ----
+  /** Build the whole-document text index in the background: hydrate every page's text geometry
+   *  (idempotent, shared with the painter — pages the user visited are already done) WITHOUT
+   *  painting anything. Data-only: extractedTextItems grows; no canvas, no layout. Progress is
+   *  exposed via _lazyIndexDone so the summary shows "scanning…" until the count is final. */
+  async _findEnsureIndex() {
+    if (!this.lazyEditMode || !this.pdfJsDoc) return;
+    const gen = this.originalFileData;                 // doc identity: a new load aborts this build
+    if (this._lazyIndexFor === gen && (this._lazyIndexDone || this._lazyIndexBuilding)) return;
+    this._lazyIndexFor = gen;
+    this._lazyIndexBuilding = true;
+    this._lazyIndexDone = false;
+    try {
+      for (const pv of (this.pageViews || [])) {
+        if (this.originalFileData !== gen || !this.lazyEditMode) return;
+        await this._ensurePageExtracted(pv);
+        // Yield between pages so typing/scrolling stays smooth while the index builds.
+        if ((pv.pageNum & 3) === 3) await new Promise((r) => setTimeout(r, 0));
+      }
+      if (this.originalFileData === gen) this._lazyIndexDone = true;
+    } finally {
+      if (this.originalFileData === gen) this._lazyIndexBuilding = false;
+    }
+  },
+  /** Virtual entries from the index: the SAME line grouping the painter uses (identical text and
+   *  geometry as the eventual boxes), with pending edits reflected. el stays null until the
+   *  match's page is painted and _findMaterialize resolves the live box. */
+  _findVirtualEntries() {
+    const byPage = new Map();
+    for (const it of (this.extractedTextItems || [])) {
+      let a = byPage.get(it.pageIndex);
+      if (!a) byPage.set(it.pageIndex, a = []);
+      a.push(it);
+    }
+    const out = [];
+    for (const [pageIndex, items] of byPage) {
+      for (const line of this.groupTextItemsByLine(items)) {
+        const pend = this.findLineEdit(line);
+        const text = pend ? pend.newText : line.text;
+        if (text && text.trim()) out.push({ el: null, line, text, pageIndex });
+      }
+    }
+    return out;
+  },
+  /** The live box for a virtual match on a PAINTED page (matched by the line's own geometry). */
+  _findResolveEl(m, pv) {
+    pv = pv || (this.pageViews || [])[m.pageIndex];
+    if (!pv || !pv.wrapper || !m.line) return null;
+    for (const el of pv.wrapper.querySelectorAll('.editable-text-box')) {
+      const ln = el.__line;
+      if (ln && Math.abs(ln.left - m.line.left) < 2 && Math.abs(ln.baseline - m.line.baseline) < 2) return el;
+    }
+    return null;
+  },
+  /** Materialise a virtual match: (optionally) scroll its page into view, drive the windowed
+   *  painter directly, and poll until the page's boxes exist and the match's box resolves. The
+   *  highlight/replace machinery then runs on the SAME live-element path as small documents. */
+  async _findMaterialize(m, scroll = true) {
+    if (m.el && m.el.isConnected) return m.el;
+    if (!this.lazyEditMode) return null;
+    const pv = (this.pageViews || [])[m.pageIndex];
+    if (!pv) return null;
+    if (scroll) pv.wrapper.scrollIntoView({ block: 'center' });
+    if (this._lePaint) this._lePaint(pv);
+    const t0 = performance.now();
+    while (performance.now() - t0 < 12000) {
+      const el = this._findResolveEl(m, pv);
+      if (el) { m.el = el; return el; }
+      await new Promise((r) => setTimeout(r, 120));
+      if (this._lePaint) this._lePaint(pv);          // re-kick if an eviction raced the resolve
+    }
+    return null;
   },
 
   /** Run the search; with keepPos=true try to stay at/after the previous match (post-replace). */
@@ -248,8 +327,14 @@ export const FindReplaceMethods = {
       f.matches = collect(0);
       if (!f.matches.length && !matchCase) f.matches = collect(undefined);   // undefined -> default edit budget
       // Reading order: page, then vertical position on the page, then offset in the line.
-      f.matches.sort((a, b) => a.pageIndex - b.pageIndex || a.el.offsetTop - b.el.offsetTop
-        || a.el.offsetLeft - b.el.offsetLeft || a.start - b.start);
+      // Virtual (index) entries have no box yet — their line geometry gives the same ordering.
+      const top = (m) => (m.el ? m.el.offsetTop : m.line.top);
+      const left = (m) => (m.el ? m.el.offsetLeft : m.line.left);
+      f.matches.sort((a, b) => a.pageIndex - b.pageIndex || top(a) - top(b)
+        || left(a) - left(b) || a.start - b.start);
+      // Lazy docs: make sure the background index is building; the rescan below converges the
+      // count as pages are indexed (data-only — nothing paints).
+      if (this.lazyEditMode) this._findEnsureIndex();
     }
     const on = f.matches.length > 0;
     ['findPrevBtn', 'findNextBtn', 'replaceBtn', 'replaceAllBtn'].forEach((id) => {
@@ -271,10 +356,11 @@ export const FindReplaceMethods = {
     this._findGoto(at);
   },
 
-  /** Step to the next (+1) / previous (−1) match, wrapping; rescans if boxes were rebuilt. */
+  /** Step to the next (+1) / previous (−1) match, wrapping; rescans if boxes were rebuilt.
+   *  (Virtual matches — el not resolved yet — are NOT stale; only a disconnected box is.) */
   findStep(d) {
     const f = this._find;
-    if (f.matches.some((m) => !m.el.isConnected)) this.findRun(f.q, true);
+    if (f.matches.some((m) => m.el && !m.el.isConnected)) this.findRun(f.q, true);
     if (!f.matches.length) return;
     this._findGoto((f.idx + d + f.matches.length) % f.matches.length);
   },
@@ -293,7 +379,8 @@ export const FindReplaceMethods = {
     let s = f.matches.length ? `${f.matches.length} match${f.matches.length === 1 ? '' : 'es'} found`
       : (f.q ? 'No matches' : '');
     // Mid-build: the number is a floor, not the final count — say so instead of looking done.
-    if (f.q && this._textLayerComplete === false) s += ' — scanning…';
+    // (Eager docs: the progressive text layer; lazy docs: the background index still filling.)
+    if (f.q && (this._textLayerComplete === false || (this.lazyEditMode && this._lazyIndexDone === false))) s += ' — scanning…';
     el.textContent = s;
   },
 
@@ -303,7 +390,8 @@ export const FindReplaceMethods = {
   _findScheduleBuildRescan() {
     clearTimeout(this._findBuildT);
     const f = this._find;
-    if (!f.q || this._textLayerComplete !== false) return;
+    const indexing = this.lazyEditMode && this._lazyIndexDone === false;
+    if (!f.q || (this._textLayerComplete !== false && !indexing)) return;
     const q = f.q;
     this._findBuildT = setTimeout(() => {
       if (this._find.q !== q || this._find.busy) return;   // query changed / replace in flight
@@ -366,13 +454,21 @@ export const FindReplaceMethods = {
     return null;
   },
 
-  /** Highlight match i and scroll it into view (does NOT focus the box — navigation stays calm). */
-  _findGoto(i) {
+  /** Highlight match i and scroll it into view (does NOT focus the box — navigation stays calm).
+   *  On a lazy doc the match may live on an UNPAINTED page: jump the viewport there, let the
+   *  windowed painter hydrate it, resolve the live box, THEN place the highlight as usual. */
+  async _findGoto(i) {
     const f = this._find;
     const m = f.matches[i];
     if (!m) return;
     f.idx = i;
     this._findCount();
+    if (!m.el || !m.el.isConnected) {
+      const gen = (this._findGotoGen = (this._findGotoGen || 0) + 1);
+      const el = await this._findMaterialize(m, true);
+      // A newer goto/rescan superseded this one while the page painted — drop this highlight.
+      if (!el || this._findGotoGen !== gen || f.matches[f.idx] !== m) return;
+    }
     const range = this._matchRange(m);
     if (!range) return;
     const rect = range.getBoundingClientRect();
@@ -405,7 +501,7 @@ export const FindReplaceMethods = {
    *  for a style override before replacing. */
   findSelectCurrent() {
     const m = this._find.matches[this._find.idx];
-    if (!m || !m.el.isConnected) return false;
+    if (!m || !m.el || !m.el.isConnected) return false;
     m.el.focus();
     const r = this._matchRange(m);
     if (!r) return false;
@@ -465,15 +561,21 @@ export const FindReplaceMethods = {
     const f = this._find;
     let m = f.matches[f.idx];
     if (!m) return;
-    if (!m.el.isConnected) {
+    if (m.el && !m.el.isConnected) {
       // Stale text layer (a mode round-trip or re-render rebuilt the boxes): rescan and CONTINUE
       // with the fresh match — returning here made the first Replace click a silent no-op.
       this.findRun(f.q, true);
       m = f.matches[f.idx];
-      if (!m || !m.el.isConnected) return;
+      if (!m || (m.el && !m.el.isConnected)) return;
     }
     if (!this._findBusyStart('replaceBtn')) return;
     await this._findNextPaint();                   // let the spinner render before the work
+    // Virtual match on an unpainted page (lazy doc): hydrate it first — the replace itself then
+    // runs through the identical live-box path (styling, undo, save) as a small document.
+    if (!m.el || !m.el.isConnected) {
+      const el = await this._findMaterialize(m, true);
+      if (!el) { this._findBusyEnd(); return; }
+    }
     const rep = document.getElementById('replaceInput')?.value ?? '';
     const after = { pageIndex: m.pageIndex, start: m.start };
     if (!this.findSelectCurrent()) { this._findBusyEnd(); return; }
@@ -491,6 +593,10 @@ export const FindReplaceMethods = {
     if (!f.matches.length) return;
     if (!this._findBusyStart('replaceAllBtn')) return;
     await this._findNextPaint();                   // let the spinner render before the batch
+    // LAZY doc: virtual matches replace page by page — hydrate each affected page, run the same
+    // live-box replacement, move on (the painter's window cap evicts behind us, so a Replace All
+    // across a 1200-page doc never accumulates canvases).
+    if (this.lazyEditMode) { await this._findReplaceAllLazy(); return; }
     // Stale text layer (mode round-trip): the grouping below would silently SKIP disconnected
     // boxes — rescan first so every match is live.
     if (f.matches.some((m) => !m.el.isConnected)) {
@@ -533,6 +639,50 @@ export const FindReplaceMethods = {
     // UNDOCKS into a floating bubble anchored to that line — which then just lingered on screen
     // after the batch (the rescan's cleanup only hides a DOCKED toolbar). Hide it outright; the
     // rescan below re-docks it if matches remain.
+    this.hideTextToolbar();
+    if (this.showStatus) this.showStatus(`Replaced ${n} match${n === 1 ? '' : 'es'}.`, 'success');
+    this._findRescanAt(null);
+  },
+
+  /** Replace All over the background index (lazy docs): group matches by LINE, walk pages in
+   *  order, hydrate each page once, replace its matches right-to-left through the live box —
+   *  the exact insert/override/blur mechanics of the eager path — then let the window cap evict.
+   *  One history batch = one undo step for the whole operation, same as the eager Replace All. */
+  async _findReplaceAllLazy() {
+    const f = this._find;
+    const rep = document.getElementById('replaceInput')?.value ?? '';
+    const byLine = new Map();
+    f.matches.forEach((m) => {
+      const k = m.line || m.el;
+      const a = byLine.get(k) || [];
+      a.push(m);
+      byLine.set(k, a);
+    });
+    let n = 0;
+    this.beginHistoryBatch();
+    try {
+      for (const [, list] of byLine) {
+        const el = await this._findMaterialize(list[0], false);
+        if (!el) continue;                          // page failed to hydrate — skip, keep going
+        el.focus();
+        list.sort((a, b) => b.start - a.start);
+        const t = el.__line ? { kind: 'line', el, line: el.__line } : null;
+        for (const m of list) {
+          m.el = el;
+          const r = this._matchRange(m);
+          if (!r) continue;
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+          if (t) this._findApplyOverride(t);
+          this._findInsertOverSelection(rep);
+          n++;
+        }
+        el.blur();
+      }
+    } finally {
+      this.endHistoryBatch();
+    }
     this.hideTextToolbar();
     if (this.showStatus) this.showStatus(`Replaced ${n} match${n === 1 ? '' : 'es'}.`, 'success');
     this._findRescanAt(null);
