@@ -40,8 +40,9 @@ export const PageRendererMethods = {
       canvas.addEventListener('click', (e) => this.handleCanvasClick(e, pv));
       canvas.addEventListener('mousedown', (e) => this.onEraseStart(e, pv));
       this.pageViews.push(pv);
-      // Mount Fabric.js annotation layer over this page
-      this.annotationManager.mountPage(pv);
+      // Mount Fabric.js annotation layer over this page. A LAZY-editable doc (501+ pages) defers
+      // this to first paint — 1000+ eager Fabric canvases alone are enough memory to crash the tab.
+      if (!this.lazyEditMode) this.annotationManager.mountPage(pv);
     }
 
     this.pageWidth = this.pageViews[0] ? this.pageViews[0].page.view[2] : 612;
@@ -64,6 +65,10 @@ export const PageRendererMethods = {
     // Large/view-only docs (no edits/overlays) render LAZILY — only the pages on screen, on scroll —
     // so opening/closing a 500-page file is instant instead of grinding through every page.
     if (this.largeFileMode) { this._refreshLazy(); return; }
+    // Big-but-EDITABLE doc (501–1500 pages): windowed rendering — full overlays (boxes, covers,
+    // annotations) but only for pages near the viewport, evicting far ones. Same editing pipeline,
+    // page at a time, so memory stays flat instead of scaling with the page count.
+    if (this.lazyEditMode) { this._refreshLazyEditable(opts); return; }
     // opts.only (Set of page indexes): re-render JUST those pages — undo/redo of a one-page edit
     // must not loop a 100-page document. A refresh queued while running always reruns FULL.
     let only = (opts.only instanceof Set && opts.only.size) ? opts.only : null;
@@ -127,6 +132,105 @@ export const PageRendererMethods = {
     } else {
       this.pageViews.slice(0, 25).forEach(paint);              // no IO: just the first pages
     }
+  },
+  /**
+   * Windowed renderer for LAZY-EDITABLE docs (501–1500 pages). Each page paints — bitmap render,
+   * pending-erase preview, insert overlays, editable text boxes, Fabric layer (mounted once) —
+   * only when it scrolls within ~1200px of the viewport, and far pages are EVICTED (overlays
+   * removed, canvas backing shrunk to 1×1 while the locked CSS size preserves layout/scroll).
+   * Re-entering repaints from the same pipeline, so pending edits re-render correctly.
+   * Known trade-off: Search only sees painted pages' boxes on these documents.
+   */
+  _refreshLazyEditable(opts = {}) {
+    const textEditing = this.mode === 'edit' || this.mode === 'auto' || this.mode === 'text';
+    const stage = document.getElementById('stage');
+    const paint = async (pv, force = false) => {
+      if (pv._lePainting) { pv._leRepaint = pv._leRepaint || force; return; }
+      if (pv._lePainted && !force) return;
+      pv._lePainting = true;
+      try {
+        // Lock the on-screen size once so evicting (attr 1×1) can't collapse layout / jump scroll.
+        if (!pv._leCssLocked) {
+          const cw = pv.canvas.clientWidth, ch = pv.canvas.clientHeight;
+          if (cw && ch) { pv.canvas.style.width = cw + 'px'; pv.canvas.style.height = ch + 'px'; pv._leCssLocked = true; }
+        }
+        // Restore full-res backing if this canvas was evicted.
+        if (pv.canvas.width !== pv.viewport.width || pv.canvas.height !== pv.viewport.height) {
+          pv.canvas.width = pv.viewport.width;
+          pv.canvas.height = pv.viewport.height;
+        }
+        this.insertOverlays = this.insertOverlays.filter((o) => (o.__edit ? o.__edit.pageIndex : -1) !== pv.pageNum);
+        this.clearPageOverlays(pv);
+        // On-demand hydration: this page's text geometry is extracted only now (lazy docs skip
+        // the all-pages extraction at load), then the normal per-page pipeline runs unchanged.
+        await this._ensurePageExtracted(pv);
+        await pv.page.render({ canvasContext: pv.ctx, viewport: pv.viewport }).promise;
+        this.drawPendingErases(pv);
+        if (!textEditing) this.drawPendingLineEdits(pv);
+        this.createInsertOverlays(pv);
+        if (textEditing) await this.createEditableTextBoxes(pv);
+        if (!pv._annMounted) { this.annotationManager.mountPage(pv); pv._annMounted = true; }
+        pv._lePainted = true;
+        // Hard cap on concurrently-painted pages (fast scrolling can outrun leave events): evict
+        // the stalest painted page outside the current visible set until we're back under budget.
+        const painted = this.pageViews.filter((p) => p._lePainted);
+        if (painted.length > 14) {
+          painted
+            .filter((p) => p !== pv && !(this._leVisible && this._leVisible.has(p)))
+            .sort((a, b) => (a._leSeen || 0) - (b._leSeen || 0))
+            .slice(0, painted.length - 14)
+            .forEach((p) => evict(p));
+        }
+      } catch (e) {
+        console.warn('lazy-edit paint failed for page', pv.pageNum + 1, e);
+      } finally {
+        pv._lePainting = false;
+        if (pv._leRepaint) { pv._leRepaint = false; paint(pv, true); }
+      }
+    };
+    const evict = (pv) => {
+      if (!pv._lePainted || pv._lePainting) return;
+      // Never evict the page the user is interacting with (removing a focused box skips its blur
+      // commit) — it will be evicted on a later pass once focus moves on.
+      if (pv.wrapper.contains(document.activeElement)) return;
+      this.insertOverlays = this.insertOverlays.filter((o) => (o.__edit ? o.__edit.pageIndex : -1) !== pv.pageNum);
+      this.clearPageOverlays(pv);
+      pv.canvas.width = 1; pv.canvas.height = 1;    // frees the multi-MB backing store
+      pv._lePainted = false;
+      // The Fabric layer stays mounted once created: it may hold the user's annotations, and one
+      // stays cheap — only pages the user actually visited ever mount one.
+    };
+
+    // Targeted pass (undo/redo, style commits): repaint just those pages if currently painted.
+    if (opts.only instanceof Set && opts.only.size && this._lazyEditIO) {
+      for (const pv of this.pageViews) {
+        if (opts.only.has(pv.pageNum) && (pv._lePainted || pv._lePainting)) paint(pv, true);
+      }
+      this._textLayerComplete = true;
+      return;
+    }
+
+    if (this._lazyEditIO) { this._lazyEditIO.disconnect(); this._lazyEditIO = null; }
+    this.pageViews.forEach((pv) => { pv._lePainted = false; pv._lePainting = false; });
+    this.insertOverlays = [];
+    this._leVisible = new Set();
+    if (typeof IntersectionObserver === 'function') {
+      const byEl = new Map(this.pageViews.map((pv) => [pv.wrapper, pv]));
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          const pv = byEl.get(e.target);
+          if (!pv) continue;
+          if (e.isIntersecting) { this._leVisible.add(pv); pv._leSeen = performance.now(); paint(pv); }
+          else { this._leVisible.delete(pv); evict(pv); }
+        }
+      }, { root: stage || null, rootMargin: '1200px 0px' });
+      for (const pv of this.pageViews) io.observe(pv.wrapper);
+      this._lazyEditIO = io;
+    } else {
+      this.pageViews.slice(0, 8).forEach((pv) => paint(pv));     // no IO: just the first pages
+    }
+    // Search polls this to know box-building settled; on lazy docs it covers the painted window.
+    this._textLayerComplete = true;
   },
   // Back-compat: existing call sites use renderCurrentPage() to mean "refresh overlays".
   renderCurrentPage() { return this.refresh(); },

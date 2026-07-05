@@ -2,12 +2,13 @@
 // processing cap. Used by the editor open path (fileIO), Merge, and the Rotate/Reorder pages tool.
 //
 // Two independent thresholds:
-//  - EDIT limit (byte size OR 500 pages): above this a document can still be VIEWED, MERGED and
+//  - EDIT limit (byte size OR 1500 pages): above this a document can still be VIEWED, MERGED and
 //    ROTATED/REORDERED (all client-side), it just can't be edited or opened back into the editor.
 //    The BYTE limit is DEVICE-AWARE: 200 MB on desktop, 30 MB on mobile. Everything now runs in
 //    the browser (mupdf-wasm, no upload), and a desktop comfortably edits+saves a 200 MB file
 //    (measured: ~200 MB PDF opens editable in ~3s, saves in ~3s, JS heap ~640 MB). A phone can't
-//    hold that, so mobile keeps the conservative 30 MB gate. The PAGE limit (500) is the same on
+//    hold that, so mobile keeps the conservative 30 MB gate. The PAGE limit (1500 — raised from
+//    500 once editing went fully client-side; no server round-trip to protect) is the same on
 //    both. Whichever of the two hits first applies.
 //  - DEVICE cap (500 MB desktop / 150 MB mobile): above this we can't safely hold/process the
 //    file in this browser at all. Keyed to the ACTUAL device (touch + UA, plus navigator.deviceMemory
@@ -17,7 +18,11 @@ const MB = 1024 * 1024;
 
 export const EDIT_LIMIT_DESKTOP_MB = 200;   // in-browser edit is fine at this size on a desktop
 export const EDIT_LIMIT_MOBILE_MB = 30;     // a phone can't hold a 200 MB doc in memory
-export const EDIT_LIMIT_PAGES = 500;
+export const EDIT_LIMIT_PAGES = 1500;
+// Above this page count an EDITABLE doc renders lazily (paint pages near the viewport, evict far
+// ones) instead of eagerly. Eager canvases are ~4.4 MB each at scale 1.5 — a 1000+ page doc painted
+// up front is multi-GB of canvas memory and crashes the tab. ≤ this, behaviour is unchanged.
+export const LAZY_EDIT_PAGES = 500;
 
 const DESKTOP_CAP_MB = 500;
 const MOBILE_CAP_MB = 150;
