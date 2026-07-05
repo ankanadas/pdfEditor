@@ -155,6 +155,18 @@ export class AnnotationManager {
     this.pages.splice(i, 1);
   }
 
+  /** Free a page's Fabric canvas ONLY if it holds no annotations — used by the lazy renderer when
+   *  a page scrolls out of the window on a big document. A Fabric canvas per visited page otherwise
+   *  accumulates unbounded (a Replace All / long scroll over hundreds of pages), which is a large
+   *  chunk of the memory that OOM-killed iPad Safari. Returns true if it unmounted. */
+  unmountPageIfEmpty(pageIndex) {
+    const entry = this.pages.find(p => p.pageIndex === pageIndex);
+    if (!entry) return false;
+    try { if (entry.fabricCanvas.getObjects().length) return false; } catch (_) { return false; }
+    this._unmountPage(pageIndex);
+    return true;
+  }
+
   /** Destroy all Fabric canvases (called when a new PDF is loaded). */
   unmountAll() {
     if (this._resizeObs) { this._resizeObs.disconnect(); this._resizeObs = null; }

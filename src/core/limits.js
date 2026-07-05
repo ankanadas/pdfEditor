@@ -20,9 +20,16 @@ export const EDIT_LIMIT_DESKTOP_MB = 200;   // in-browser edit is fine at this s
 export const EDIT_LIMIT_MOBILE_MB = 30;     // a phone can't hold a 200 MB doc in memory
 export const EDIT_LIMIT_PAGES = 1500;
 // Above this page count an EDITABLE doc renders lazily (paint pages near the viewport, evict far
-// ones) instead of eagerly. Eager canvases are ~4.4 MB each at scale 1.5 — a 1000+ page doc painted
-// up front is multi-GB of canvas memory and crashes the tab. ≤ this, behaviour is unchanged.
+// ones) instead of eagerly. Eager canvases are ~4.4 MB each at scale 1.5 — a few hundred pages
+// painted up front is already 1-2 GB of native canvas memory. Desktop tolerates that; a touch
+// device (iPad/phone) does NOT — Safari kills the tab. So the threshold is DEVICE-AWARE: touch
+// devices virtualize much sooner. Below the threshold, rendering is eager (unchanged).
 export const LAZY_EDIT_PAGES = 500;
+export function lazyRenderThreshold() {
+  // Touch = iPad/phone: a 466-page book eager = ~2 GB of canvases = an instant OOM on iPad. 50 full
+  // canvases (~220 MB) is a safe ceiling before virtualizing; desktop keeps the roomy 500.
+  return isMobileDevice() ? 50 : LAZY_EDIT_PAGES;
+}
 
 const DESKTOP_CAP_MB = 500;
 const MOBILE_CAP_MB = 150;
@@ -41,19 +48,40 @@ export function isMobileDevice() {
   } catch (_) { return false; }
 }
 
+// A PHONE specifically (small-screen handset) — NOT a tablet. Only phones get the conservative
+// mobile edit limits; a TABLET (iPad, incl. iPadOS-as-desktop, or an Android tablet) is treated
+// like a desktop for the edit LIMITS. Modern tablets have the RAM to edit large files in-browser,
+// and the renderer already virtualizes pages to keep memory flat, so the 30 MB / small gate that
+// suits a phone needlessly blocked iPads. Phones: iPhone/iPod, an Android UA carrying "Mobile"
+// (Android tablets omit it), and the legacy handset UAs. iPad/tablet fall through to false.
+export function isPhoneDevice() {
+  try {
+    const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+    const touch = (typeof navigator !== 'undefined' && (navigator.maxTouchPoints || 0) > 0) ||
+      (typeof window !== 'undefined' && 'ontouchstart' in window);
+    if (!touch) return false;
+    const iPhone = /iPhone|iPod/i.test(ua);
+    const androidPhone = /Android/i.test(ua) && /Mobile/i.test(ua);
+    const otherPhone = /Windows Phone|BlackBerry|Opera Mini|IEMobile/i.test(ua);
+    return iPhone || androidPhone || otherPhone;
+  } catch (_) { return false; }
+}
+
 // The edit byte limit for THIS device, resolved at call time (the same bundle serves desktop and
 // mobile, so this can't be a load-time constant). Very low-RAM machines (deviceMemory ≤ 2 GB) get
 // the mobile limit even on a desktop UA.
 export function editLimitMb() {
   const mem = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 0;   // GB, Chromium-only
-  if (isMobileDevice() || (mem && mem <= 2)) return EDIT_LIMIT_MOBILE_MB;
+  // PHONES (and genuinely low-RAM machines) get the conservative gate; tablets/iPads = desktop.
+  if (isPhoneDevice() || (mem && mem <= 2)) return EDIT_LIMIT_MOBILE_MB;
   return EDIT_LIMIT_DESKTOP_MB;
 }
 export function editLimitBytes() { return editLimitMb() * MB; }
 
 // Bytes ceiling for what this device can process at all (merge/rotate output, or a file to open).
 export function deviceCapBytes() {
-  let capMb = isMobileDevice() ? MOBILE_CAP_MB : DESKTOP_CAP_MB;
+  // Phones get the tight processing cap; iPads/tablets get the desktop cap (they have the RAM).
+  let capMb = isPhoneDevice() ? MOBILE_CAP_MB : DESKTOP_CAP_MB;
   const mem = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 0;  // GB, Chromium-only
   if (mem && mem <= 2) capMb = Math.min(capMb, MOBILE_CAP_MB);                     // very low-RAM machine
   return capMb * MB;

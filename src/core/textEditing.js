@@ -296,7 +296,8 @@ export const TextEditingMethods = {
       div.style.border = '1px solid transparent';
       div.style.background = 'transparent';
       div.style.zIndex = '100';
-      div.style.cursor = 'text';
+      // Cursor comes from CSS: `move` while unfocused (hover-drag repositions the line, a plain
+      // click edits), `text` once focused — an inline value here would override both states.
       div.style.outline = 'none';
       div.style.boxSizing = 'border-box';
       div.style.whiteSpace = 'pre';        // single line; typing extends to the right

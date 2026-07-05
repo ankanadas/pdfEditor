@@ -4,7 +4,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import { confirmDialog } from '../util/dialog.js';
 import { MupdfService } from '../services/mupdfService.js';
 import {
-  editLimitBytes, editLimitMb, EDIT_LIMIT_PAGES, LAZY_EDIT_PAGES, deviceCapBytes, DEVICE_CAP_MESSAGE,
+  editLimitBytes, editLimitMb, EDIT_LIMIT_PAGES, lazyRenderThreshold, deviceCapBytes, DEVICE_CAP_MESSAGE,
 } from './limits.js';
 
 // View-only controls stay enabled even for large (non-editable) files; edit controls are gated.
@@ -202,9 +202,11 @@ export const FileIOMethods = {
       // is unsupported, but the file still opens for viewing/merge/reorder.
       const pageCount = this.pdfJsDoc.numPages;
       this.largeFileMode = (file.size > editLimitBytes()) || (pageCount > EDIT_LIMIT_PAGES);
-      // Editable but big (501–1500 pages): render lazily (paint near the viewport, evict far pages)
-      // — eagerly painting 1000+ full-res canvases is multi-GB and crashes the tab. ≤500 unchanged.
-      this.lazyEditMode = !this.largeFileMode && pageCount > LAZY_EDIT_PAGES;
+      // Editable but past the (device-aware) render threshold: render lazily (paint near the
+      // viewport, evict far pages) — eagerly painting hundreds of full-res canvases is 1-2 GB and
+      // crashes iPad Safari. Desktop threshold 500; touch devices virtualize at 50 (a 466-page book
+      // on iPad was crashing precisely because 466 < 500 kept it on the eager path).
+      this.lazyEditMode = !this.largeFileMode && pageCount > lazyRenderThreshold();
 
       if (this.largeFileMode) {
         // Large file: do NOT render the editor first. Show the choice dialog immediately; only render

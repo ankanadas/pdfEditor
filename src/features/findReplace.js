@@ -82,12 +82,19 @@ export const FindReplaceMethods = {
     const btn = document.getElementById('searchToolBtn');
     btn?.classList.add('active');
     btn?.setAttribute('aria-pressed', 'true');
-    if (this.pdfJsDoc && this.refresh) await this.refresh();   // re-place boxes for the narrowed stage
-    if (this.lazyEditMode) this._findEnsureIndex();            // pre-warm the whole-doc text index
+    // Focus the input IMMEDIATELY so the panel is usable the instant it opens — do NOT block on a
+    // full re-render first (on a 700-page lazy doc that stalled the panel for seconds, so taps
+    // seemed to do nothing and the user tapped repeatedly). Re-place the boxes for the narrowed
+    // stage asynchronously; the visible pages repaint via the windowed painter without blocking.
     const input = document.getElementById('findInput');
+    input?.focus();
+    if (this.pdfJsDoc && this.refresh) Promise.resolve().then(() => this.refresh());
+    // The whole-document text index is built lazily WHEN the user actually searches (findRun), not
+    // merely on opening the panel — indexing 700 pages the moment the panel opens is wasted work on
+    // a phone/tablet if the user is only glancing.
     if (input) {
       if (input.value.trim()) this.findRun(input.value);
-      input.focus(); input.select();
+      input.select();
     }
   },
 
@@ -237,11 +244,20 @@ export const FindReplaceMethods = {
     this._lazyIndexBuilding = true;
     this._lazyIndexDone = false;
     try {
+      // ASYNCHRONOUS CHUNKING: extract ~50 pages, then hand a macrotask back to the browser so it
+      // can run layout / GC / touch handling before the next chunk. This is what stops the iPad
+      // from freezing (and then panic-killing the tab) while indexing a 700-page document.
+      const CHUNK = 50;
+      let sinceBreath = 0;
       for (const pv of (this.pageViews || [])) {
         if (this.originalFileData !== gen || !this.lazyEditMode) return;
         await this._ensurePageExtracted(pv);
-        // Yield between pages so typing/scrolling stays smooth while the index builds.
-        if ((pv.pageNum & 3) === 3) await new Promise((r) => setTimeout(r, 0));
+        // Free the pdf.js operator-list cache for pages that aren't on screen — extracting text
+        // for 700 pages otherwise leaves 700 parsed pages resident (a big chunk of the iPad memory
+        // that crashed the tab). The text we need is already copied into extractedTextItems; if the
+        // page is later scrolled to, the painter re-parses it on demand.
+        if (!pv._lePainted && !pv._lePainting && pv.page && pv.page.cleanup) { try { pv.page.cleanup(); } catch (_) {} }
+        if (++sinceBreath >= CHUNK) { sinceBreath = 0; await new Promise((r) => setTimeout(r, 0)); }
       }
       if (this.originalFileData === gen) this._lazyIndexDone = true;
     } finally {
@@ -250,23 +266,54 @@ export const FindReplaceMethods = {
   },
   /** Virtual entries from the index: the SAME line grouping the painter uses (identical text and
    *  geometry as the eventual boxes), with pending edits reflected. el stays null until the
-   *  match's page is painted and _findMaterialize resolves the live box. */
+   *  match's page is painted and _findMaterialize resolves the live box.
+   *
+   *  CACHED: grouping every page of a 700-page doc is expensive, and findRun calls this on EVERY
+   *  keystroke and every rescan — doing it each time froze typing on iPad ("type 'se', 'o' lands
+   *  seconds later"). We cache by a cheap signature (item count + extracted-page count + edit
+   *  count); typing the query touches none of those, so keystrokes reuse the cache and only re-run
+   *  the (fast) matcher. New indexed pages or a replace bump the signature and rebuild once. */
   _findVirtualEntries() {
+    const items = this.extractedTextItems || [];
+    const sig = items.length + ':' + ((this._extractedPages && this._extractedPages.size) || 0) + ':' + ((this.edits && this.edits.length) || 0);
+    // Include the document identity so a newly loaded doc with coincidentally-equal counts can't
+    // reuse the previous doc's cached lines.
+    if (this._veCache && this._veSig === sig && this._veDoc === this.originalFileData) return this._veCache;
     const byPage = new Map();
-    for (const it of (this.extractedTextItems || [])) {
+    for (const it of items) {
       let a = byPage.get(it.pageIndex);
       if (!a) byPage.set(it.pageIndex, a = []);
       a.push(it);
     }
+    // O(1) pending-edit lookup by geometry key — findLineEdit per line is O(edits), so on a doc
+    // with thousands of tracked edits (a big Replace All) this whole-document loop was O(n²) and
+    // froze the rescan. The key is the SAME deterministic grouping value on both sides, so an exact
+    // rounded match is safe (no drift, unlike a cross-render compare).
+    const editMap = this._buildEditKeyMap();
+    const s = this.scale || 1;
     const out = [];
-    for (const [pageIndex, items] of byPage) {
-      for (const line of this.groupTextItemsByLine(items)) {
-        const pend = this.findLineEdit(line);
+    for (const [pageIndex, pageItems] of byPage) {
+      for (const line of this.groupTextItemsByLine(pageItems)) {
+        const pend = editMap.get(pageIndex + ':' + Math.round(line.left / s) + ':' + Math.round(line.baseline / s));
         const text = pend ? pend.newText : line.text;
         if (text && text.trim()) out.push({ el: null, line, text, pageIndex });
       }
     }
+    this._veCache = out;
+    this._veSig = sig;
+    this._veDoc = this.originalFileData;
     return out;
+  },
+  /** Map every replace edit by a geometry key (pageIndex:round(xPt):round(baselinePt)) for O(1)
+   *  lookup from a line — used by the whole-document search/replace loops to stay linear. */
+  _buildEditKeyMap() {
+    const m = new Map();
+    for (const e of (this.edits || [])) {
+      if (e && e.redact !== false && e.kind !== 'erase' && e.baseline != null && e.x != null) {
+        m.set(e.pageIndex + ':' + Math.round(e.x) + ':' + Math.round(e.baseline), e);
+      }
+    }
+    return m;
   },
   /** The live box for a virtual match on a PAINTED page (matched by the line's own geometry). */
   _findResolveEl(m, pv) {
@@ -303,20 +350,34 @@ export const FindReplaceMethods = {
     const f = this._find;
     const prevAt = keepPos && f.matches[f.idx]
       ? { p: f.matches[f.idx].pageIndex, s: f.matches[f.idx].start } : null;
-    const qNew = (query ?? f.q ?? '').trim();
-    if (qNew !== f.q) f.override = {};       // a NEW search starts style-clean
-    f.q = qNew;
+    // WHITESPACE-SIGNIFICANT anchors: a space the user typed at the START or END of the query
+    // means "word edge here" — searching ` light ` finds "the light on" but neither "headlight"
+    // nor "head-light", while plain `light` keeps matching all of them. Each anchored side must
+    // land on whitespace OR the line edge (so ` light` still matches a line STARTING with the
+    // word — there is no literal space before column 0). f.q stores the RAW query so rescans and
+    // replaces keep the anchors; the trimmed core is what actually gets matched.
+    const qRaw = String(query ?? f.q ?? '');
+    const qCore = qRaw.trim();
+    const anchorL = !!qCore && /^\s/.test(qRaw);
+    const anchorR = !!qCore && /\s$/.test(qRaw);
+    if (qRaw !== f.q) f.override = {};       // a NEW search starts style-clean
+    f.q = qRaw;
     f.matches = []; f.idx = -1;
-    if (f.q) {
+    if (qCore) {
       // Match case (exact): case-SENSITIVE comparison AND no typo tolerance — with the fuzzy
       // budget left on, a pure case difference would still land as a 1-edit "close match",
       // which is exactly what the option exists to exclude.
       const matchCase = !!document.getElementById('findCaseCb')?.checked;
       const entries = this._findEntries();
+      const ws = (ch) => ch === undefined || /\s/.test(ch);
       const collect = (budget) => {
         const out = [];
         for (const entry of entries) {
-          for (const hit of findInText(entry.text, f.q, budget, { matchCase })) out.push({ ...entry, ...hit });
+          for (const hit of findInText(entry.text, qCore, budget, { matchCase })) {
+            if (anchorL && !(hit.start === 0 || ws(entry.text[hit.start - 1]))) continue;
+            if (anchorR && !(hit.end >= entry.text.length || ws(entry.text[hit.end]))) continue;
+            out.push({ ...entry, ...hit });
+          }
         }
         return out;
       };
@@ -325,7 +386,11 @@ export const FindReplaceMethods = {
       // "test"). The close-match rescue (typos, "Sofware"→Software) only runs when NOTHING
       // matches exactly, so it still saves a misspelt query without polluting a correct one.
       f.matches = collect(0);
-      if (!f.matches.length && !matchCase) f.matches = collect(undefined);   // undefined -> default edit budget
+      // Fuzzy fallback (typo tolerance) scans EVERY line with an edit-distance budget — fine on a
+      // normal doc, but O(all lines) of a 466+ page doc froze the main thread ~1 s (felt worst as
+      // the post-Replace-All rescan, when the exact query now matches nothing). Skip it on lazy
+      // (big) docs: exact-first search there stays instant, which is what matters at that scale.
+      if (!f.matches.length && !matchCase && !this.lazyEditMode) f.matches = collect(undefined);
       // Reading order: page, then vertical position on the page, then offset in the line.
       // Virtual (index) entries have no box yet — their line geometry gives the same ordering.
       const top = (m) => (m.el ? m.el.offsetTop : m.line.top);
@@ -353,7 +418,12 @@ export const FindReplaceMethods = {
         || (m.pageIndex === prevAt.p && m.start >= prevAt.s));
       if (i >= 0) at = i;
     }
-    this._findGoto(at);
+    // Scroll to the match ONLY on a fresh query (the user just typed something new). A rescan of
+    // the SAME query — fired every 600ms while a big index builds, or after a replace — must NOT
+    // move the viewport, or it fights the user's own scrolling (the "keeps yanking down" on iPad).
+    const freshQuery = f.q !== this._findScrolledFor;
+    this._findScrolledFor = f.q;
+    this._findGoto(at, freshQuery && !keepPos);
   },
 
   /** Step to the next (+1) / previous (−1) match, wrapping; rescans if boxes were rebuilt.
@@ -386,12 +456,22 @@ export const FindReplaceMethods = {
 
   /** While the renderer is still building the text layer page-by-page, re-run the active query on
    *  a short cadence (anchored via keepPos) so the results grow to cover the WHOLE document. Stops
-   *  when the build completes (one final run lands with the flag true) or the query changes. */
+   *  when the build completes — with ONE guaranteed final pass after the flags flip: a rescan can
+   *  execute a beat before the last page's boxes land while the flag turns true in the same
+   *  window, which froze the count one page short (99 of 100) with no further rescans. */
   _findScheduleBuildRescan() {
     clearTimeout(this._findBuildT);
     const f = this._find;
     const indexing = this.lazyEditMode && this._lazyIndexDone === false;
-    if (!f.q || (this._textLayerComplete !== false && !indexing)) return;
+    const building = this._textLayerComplete === false || indexing;
+    if (!f.q) { this._findFinalPass = false; return; }
+    if (!building) {
+      // Build finished. If the PREVIOUS run happened mid-build, run one last full pass now.
+      if (!this._findFinalPass) return;
+      this._findFinalPass = false;
+    } else {
+      this._findFinalPass = true;      // a mid-build run occurred — owe one pass after completion
+    }
     const q = f.q;
     this._findBuildT = setTimeout(() => {
       if (this._find.q !== q || this._find.busy) return;   // query changed / replace in flight
@@ -454,16 +534,22 @@ export const FindReplaceMethods = {
     return null;
   },
 
-  /** Highlight match i and scroll it into view (does NOT focus the box — navigation stays calm).
-   *  On a lazy doc the match may live on an UNPAINTED page: jump the viewport there, let the
-   *  windowed painter hydrate it, resolve the live box, THEN place the highlight as usual. */
-  async _findGoto(i) {
+  /** Highlight match i (does NOT focus the box — navigation stays calm). With scroll=true also
+   *  bring it into view; a lazy match on an UNPAINTED page is hydrated (jump the viewport, let the
+   *  windowed painter build it) — but ONLY when scrolling is allowed. With scroll=false (a rescan)
+   *  we just track the index/count and refresh the highlight if its box happens to be on screen;
+   *  we never move the viewport or paint an off-screen page. */
+  async _findGoto(i, scroll = true) {
     const f = this._find;
     const m = f.matches[i];
     if (!m) return;
     f.idx = i;
     this._findCount();
     if (!m.el || !m.el.isConnected) {
+      if (!scroll) {   // rescan: don't hydrate/scroll an off-screen match, just sync the list/toolbar
+        (f.cards || []).forEach((c, ci) => c.classList.toggle('active', ci === i));
+        return;
+      }
       const gen = (this._findGotoGen = (this._findGotoGen || 0) + 1);
       const el = await this._findMaterialize(m, true);
       // A newer goto/rescan superseded this one while the page painted — drop this highlight.
@@ -489,10 +575,10 @@ export const FindReplaceMethods = {
     hl.style.top = (rect.top - wr.top - 1) + 'px';
     hl.style.width = (rect.width + 4) + 'px';
     hl.style.height = (rect.height + 2) + 'px';
-    hl.scrollIntoView({ block: 'center' });
+    if (scroll) hl.scrollIntoView({ block: 'center' });
     // Sync the results list (active card) and the docked toolbar to the new current match.
     (f.cards || []).forEach((c, ci) => c.classList.toggle('active', ci === i));
-    if (f.cards && f.cards[i]) f.cards[i].scrollIntoView({ block: 'nearest' });
+    if (scroll && f.cards && f.cards[i]) f.cards[i].scrollIntoView({ block: 'nearest' });
     this._findToolbarOn(m);
   },
 
@@ -651,41 +737,127 @@ export const FindReplaceMethods = {
   async _findReplaceAllLazy() {
     const f = this._find;
     const rep = document.getElementById('replaceInput')?.value ?? '';
+    const override = f.override && Object.keys(f.override).length ? f.override : null;
+    // Group matches by their LINE (pure data identity — geometry, NOT a DOM box). Painting a box
+    // per affected page is what OOM-killed the tab on a 700-page doc; we never touch the canvas.
     const byLine = new Map();
-    f.matches.forEach((m) => {
-      const k = m.line || m.el;
-      const a = byLine.get(k) || [];
-      a.push(m);
-      byLine.set(k, a);
-    });
-    let n = 0;
-    this.beginHistoryBatch();
-    try {
-      for (const [, list] of byLine) {
-        const el = await this._findMaterialize(list[0], false);
-        if (!el) continue;                          // page failed to hydrate — skip, keep going
-        el.focus();
-        list.sort((a, b) => b.start - a.start);
-        const t = el.__line ? { kind: 'line', el, line: el.__line } : null;
-        for (const m of list) {
-          m.el = el;
-          const r = this._matchRange(m);
-          if (!r) continue;
-          const sel = window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(r);
-          if (t) this._findApplyOverride(t);
-          this._findInsertOverSelection(rep);
-          n++;
-        }
-        el.blur();
-      }
-    } finally {
-      this.endHistoryBatch();
+    for (const m of f.matches) {
+      if (!m.line) continue;
+      const key = m.pageIndex + ':' + Math.round(m.line.left) + ':' + Math.round(m.line.baseline);
+      let g = byLine.get(key);
+      if (!g) byLine.set(key, g = { line: m.line, pageIndex: m.pageIndex, list: [] });
+      g.list.push(m);
     }
+    // O(1) edit lookup/update by geometry key so tracking N line-edits is O(N), not O(N²)
+    // (trackEdit's findIndex + findLineEdit are each O(edits) — quadratic at tens of thousands of
+    // hits, which was timing the whole Replace All out).
+    const s = this.scale || 1;
+    const key = (pageIndex, xPt, basePt) => pageIndex + ':' + Math.round(xPt) + ':' + Math.round(basePt);
+    const idxByKey = new Map();
+    this.edits.forEach((e, i) => { if (e && e.baseline != null && e.x != null) idxByKey.set(key(e.pageIndex, e.x, e.baseline), i); });
+    let n = 0;
+    const repaint = new Set();
+    const lineNewText = new Map();   // line object -> its replaced text, to PATCH the search cache
+    let i = 0;
+    for (const { line, pageIndex, list } of byLine.values()) {
+      // DATA ONLY: build the replaced line text (+ styled runs for a sticky override) and update
+      // this.edits directly. No canvas, no DOM box — the edit renders lazily when its page scrolls
+      // into view (buildTextLayer reads the pending edit -> newText), and Save reads this.edits, so
+      // the whole document updates with ~zero graphical memory.
+      const k = key(pageIndex, line.left / s, line.baseline / s);
+      const existIdx = idxByKey.get(k);
+      const baseText = existIdx != null ? this.edits[existIdx].newText : (line.text || '');
+      const edit = this._lazyLineReplaceEdit(line, list, rep, override, baseText);
+      if (edit) {
+        if (existIdx != null) this.edits[existIdx] = edit;
+        else { this.edits.push(edit); idxByKey.set(k, this.edits.length - 1); }
+        lineNewText.set(line, edit.newText);
+        n += list.length;
+      }
+      const pv = this.pageViews[pageIndex];
+      if (pv && (pv._lePainted || pv._lePainting)) repaint.add(pageIndex);   // on screen now
+      // Breathe every 50 lines: yield the main thread so a huge Replace All (thousands of hits
+      // for "the"/"and") never blocks past a frame — the iPad's watchdog can't panic-kill us.
+      if ((++i % 50) === 0) await new Promise((r) => setTimeout(r, 0));
+    }
+    this.commitHistory();          // ONE undo step for the whole Replace All
+    // PATCH the virtual-entries cache in place (updated line text only) instead of letting the
+    // post-replace rescan re-group all N pages from scratch — that full regroup was a ~700 ms
+    // main-thread freeze on a 466-page doc (and grows with page count). The cache's line objects
+    // ARE the match lines, so a reference-keyed patch is exact; bump the signature so the rescan
+    // accepts the patched cache. (m.el entries — eager path — carry no `line`, so they're skipped.)
+    if (this._veCache && lineNewText.size) {
+      for (const e of this._veCache) { const nt = lineNewText.get(e.line); if (nt != null) e.text = nt; }
+      const items = this.extractedTextItems || [];
+      this._veSig = items.length + ':' + ((this._extractedPages && this._extractedPages.size) || 0) + ':' + ((this.edits && this.edits.length) || 0);
+    }
+    // Repaint ONLY the pages already on screen so their boxes show the new text immediately; every
+    // other page draws the replacement from the tracked edits when the user scrolls to it.
+    if (repaint.size && this.refresh) await this.refresh({ only: repaint });
     this.hideTextToolbar();
     if (this.showStatus) this.showStatus(`Replaced ${n} match${n === 1 ? '' : 'es'}.`, 'success');
-    this._findRescanAt(null);
+    // Finish WITHOUT a full-document re-scan when we can prove zero matches remain: every current
+    // match was just replaced, so unless the REPLACEMENT text itself contains the query, nothing
+    // can match anymore. Re-scanning all N lines only to confirm "No matches" was a ~700 ms freeze
+    // on a 466-page doc. If the replacement can re-match (e.g. seo→myseo), fall back to the rescan.
+    const q = (this._find.q || '').trim();
+    const repCanMatch = q && rep && rep.toLowerCase().includes(q.toLowerCase());
+    if (!repCanMatch) {
+      f.matches = []; f.idx = -1; f.cards = [];
+      f.hl?.remove(); f.hl = null;
+      this._findToolbarOff();
+      const res = document.getElementById('findResults'); if (res) res.textContent = '';
+      ['findPrevBtn', 'findNextBtn', 'replaceBtn', 'replaceAllBtn'].forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = true; });
+      this._findCount(); this._findSummary();
+      this._findBusyEnd();
+    } else {
+      this._findRescanAt(null);
+    }
+  },
+
+  /** Build ONE line's replace edit as pure data: apply every match (right-to-left so offsets stay
+   *  valid), then, when a sticky style override is active, split the new text into runs so the
+   *  replacements carry that style. Returns a lineToEdit result ready for trackEdit — no DOM. */
+  _lazyLineReplaceEdit(line, matches, rep, override, baseText) {
+    let text = baseText != null ? baseText : (line.text || '');
+    const spans = [];
+    for (const m of matches.slice().sort((a, b) => b.start - a.start)) {
+      const s = Math.max(0, Math.min(m.start, text.length));
+      const e = Math.max(s, Math.min(m.end, text.length));
+      text = text.slice(0, s) + rep + text.slice(e);
+      spans.push([s, s + rep.length]);           // replacement span in the FINAL text (right-to-left keeps these valid)
+    }
+    spans.sort((a, b) => a[0] - b[0]);
+    let runs = null;
+    if (override && rep.length) {
+      const styled = () => {
+        const r = {};
+        if (override.bold != null) r.bold = !!override.bold;
+        if (override.italic != null) r.italic = !!override.italic;
+        if (override.underline != null) r.underline = !!override.underline;
+        if (override.color) r.color = override.color;
+        if (override.family) r.family = override.family;
+        return r;
+      };
+      runs = []; let cur = 0;
+      for (const [s, e] of spans) {
+        if (s > cur) runs.push({ text: text.slice(cur, s) });
+        runs.push({ ...styled(), text: text.slice(s, e) });
+        cur = e;
+      }
+      if (cur < text.length) runs.push({ text: text.slice(cur) });
+      runs = runs.filter((r) => r.text);
+    }
+    const edit = this.lineToEdit(line, text, runs && runs.length > 1 ? runs : null);
+    // Whole-line override (single run) → land it on the box-level style so it still applies on save.
+    if (override && (!runs || runs.length <= 1)) {
+      if (override.bold != null) edit.bold = !!override.bold;
+      if (override.italic != null) edit.italic = !!override.italic;
+      if (override.underline) edit.underline = true;
+      if (override.color) edit.color = override.color;
+      if (override.family) edit.fontFamily = override.family;
+    }
+    return edit;
   },
 
   /** Re-run the search after a replace (the commit may rebuild boxes), staying near `pos`.

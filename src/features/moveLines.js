@@ -1,53 +1,36 @@
 // Move lines — drag-and-drop (and arrow-key nudge) repositioning of existing text lines.
 // Assembled onto PDFEditorApp.prototype (mixin); this = the app instance.
 //
-// Interaction model (kept OUT of the contentEditable so caret editing is untouched):
-//  - Every editable line gets a small grip (⠿ dots) just left of its box, shown while the box is
-//    hovered/focused. DRAGGING the grip drags the line. CLICKING the grip (no movement) toggles
-//    MOVE MODE: the box shows an accent border + `move` cursor, dragging anywhere on the box moves
-//    it, and the keyboard nudges it — Arrow = 1px, Shift+Arrow = 10px. Escape / clicking elsewhere
-//    exits. While in move mode the box is NOT text-focused, so arrows never fight the caret.
+// Interaction model (NO extra handle — the line itself is the affordance):
+//  - Hovering an UNFOCUSED line shows the `move` cursor (the four-direction arrow). Press and
+//    DRAG right away moves the line; a plain CLICK (press–release under 3px) enters normal text
+//    editing with the caret placed at the click point. Once a line is FOCUSED (being edited),
+//    the cursor is the text beam and dragging selects text exactly as before — to move it again,
+//    click elsewhere first (blur), then hover-drag.
+//  - After a drag the line stays in a MOVING state (accent border): arrow keys nudge 1px,
+//    Shift+Arrow 10px, Escape or clicking anywhere exits; clicking the line itself exits into
+//    editing (click = edit, always).
 //  - Bounds: the box is clamped inside the page canvas — it can never be dragged off-page.
-//  - Snap: while dragging, the box's left/top snap (4px) to its own ORIGINAL position and to other
-//    boxes' left/top edges on the page, with purple guide lines. Hold Alt to bypass snapping.
+//  - Snap: while dragging, the box's left/top snap (4px) to its own ORIGINAL position and other
+//    boxes' edges, with purple guide lines. Hold Alt to bypass snapping.
 //  - Commit: each completed gesture (drag end, or a burst of nudges going quiet) tracks ONE edit
 //    carrying dx/dy in PDF points — one undo step (trackEdit -> commitHistory). The save engines
 //    redact the line at its ORIGINAL rect and draw the new text at (x+dx, baseline+dy), so the
 //    moved position lands physically in the output PDF (mupdf WASM and the pdf-lib fallback).
+//  - Touch pointers keep the native behaviour (tap = edit, swipe = scroll); moving is mouse-only.
 export const MoveLinesMethods = {
   /**
-   * Wire move affordances for one editable line box. Called by buildTextLayer after the box is in
-   * the DOM. Grip + guides are SIBLINGS of the box (never inside the contentEditable), cleaned up
-   * with the text layer (`.qpe-move-grip, .qpe-snap-guide` in the layer-clear selectors).
+   * Wire move behaviour for one editable line box. Called by buildTextLayer after the box is in
+   * the DOM. Snap guides are SIBLINGS of the box (cleaned with the text layer via the
+   * `.qpe-snap-guide` selector in the layer-clear calls).
    */
   _initLineMove(div, line, pv, displayScale) {
     const app = this;
     const wrapper = pv.wrapper;
-    const grip = document.createElement('div');
-    grip.className = 'qpe-move-grip';
-    grip.title = 'Move line — drag, or click then use arrow keys (Shift = 10px)';
-    wrapper.appendChild(grip);
-    div.__qpeGrip = grip;
 
-    const placeGrip = () => {
-      grip.style.left = (parseFloat(div.style.left) - 14) + 'px';
-      grip.style.top = div.style.top;
-      grip.style.height = div.style.height;
-    };
-    placeGrip();
-
-    const show = () => grip.classList.add('show');
-    const hide = () => { if (!app._moveState || app._moveState.div !== div) grip.classList.remove('show'); };
-    div.addEventListener('mouseenter', show);
-    div.addEventListener('mouseleave', (e) => { if (e.relatedTarget !== grip) hide(); });
-    div.addEventListener('focus', show);
-    div.addEventListener('blur', () => setTimeout(hide, 120));
-    grip.addEventListener('mouseenter', show);
-    grip.addEventListener('mouseleave', (e) => { if (e.relatedTarget !== div) hide(); });
-
-    // ---- shared drag machinery (used by grip-drag and by box-drag while in move mode) ----
+    // ---- drag machinery (drag = move; motionless release = the click-to-edit fallback) ----
     const beginDrag = (ev) => {
-      ev.preventDefault();
+      ev.preventDefault();                       // hold off focus/caret until the intent is known
       const startX = ev.clientX, startY = ev.clientY;
       const baseLeft = parseFloat(div.style.left) || 0;
       const baseTop = parseFloat(div.style.top) || 0;
@@ -70,6 +53,12 @@ export const MoveLinesMethods = {
       const onMove = (e) => {
         const dx = e.clientX - startX, dy = e.clientY - startY;
         if (!moved && Math.abs(dx) + Math.abs(dy) < 3) return;   // click vs drag threshold
+        if (!moved) {
+          // The drag is real: commit/close any OTHER line still being edited (its blur handler
+          // tracks the edit and hides the toolbar) so the page never shows caret + move at once.
+          const ae = document.activeElement;
+          if (ae && ae !== div && ae.classList && ae.classList.contains('editable-text-box')) ae.blur();
+        }
         moved = true;
         let nl = Math.min(maxLeft, Math.max(0, baseLeft + dx));
         let nt = Math.min(maxTop, Math.max(0, baseTop + dy));
@@ -82,43 +71,68 @@ export const MoveLinesMethods = {
         }
         div.style.left = nl + 'px';
         div.style.top = nt + 'px';
-        placeGrip();
         app._showSnapGuides(wrapper, snapX, snapY);
       };
-      const onUp = () => {
+      const onUp = (e) => {
         target.removeEventListener('pointermove', onMove);
         target.removeEventListener('pointerup', onUp);
         target.removeEventListener('pointercancel', onUp);
         app._clearSnapGuides(wrapper);
-        if (moved) app._commitLineMove(div, line, pv, displayScale);
-        else if (target === grip) app._toggleMoveMode(div, line, pv, displayScale);  // plain click on grip
+        if (moved) {
+          app._commitLineMove(div, line, pv, displayScale);
+          app._enterMoveState(div, line, pv, displayScale);       // arrows nudge right after a drag
+        } else {
+          // Plain click: ALWAYS falls through to editing — focus the box and put the caret where
+          // the user actually clicked (preventDefault above suppressed the native caret).
+          app._exitMoveMode();
+          app._focusLineAtPoint(div, e);
+        }
       };
       target.addEventListener('pointermove', onMove);
       target.addEventListener('pointerup', onUp);
       target.addEventListener('pointercancel', onUp);
     };
 
-    grip.addEventListener('pointerdown', (ev) => {
-      // Grip drag always moves the line; a motionless press-release toggles move mode (onUp above).
-      if (document.activeElement === div) div.blur();             // commit any in-progress text edit
+    div.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== 0 || ev.pointerType !== 'mouse') return;  // touch keeps tap-to-edit + scroll
+      const editing = document.activeElement === div;
+      const inMove = app._moveState && app._moveState.div === div;
+      if (editing && !inMove) return;             // focused box: native caret + text selection
       beginDrag(ev);
     });
-    // In MOVE MODE the whole box is a drag handle and never takes the caret.
-    div.addEventListener('pointerdown', (ev) => {
-      if (app._moveState && app._moveState.div === div) beginDrag(ev);
+
+    // One-time discovery tip the first time a line is focused.
+    div.addEventListener('focus', () => {
+      if (!app._moveTipShown && app.showStatus) {
+        app._moveTipShown = true;
+        app.showStatus('Tip: hover a line and drag to move it (the cursor becomes the move arrow); click to edit. After a drag, arrow keys nudge — Esc finishes.', 'info');
+      }
     });
   },
 
-  /** Enter/exit move mode for a box (accent border, move cursor, arrow-key nudging). */
-  _toggleMoveMode(div, line, pv, displayScale) {
-    if (this._moveState && this._moveState.div === div) { this._exitMoveMode(); return; }
+  /** Focus the line and place the caret at the pointer position (the click-to-edit fallback). */
+  _focusLineAtPoint(div, ev) {
+    div.focus();
+    try {
+      const r = document.caretRangeFromPoint
+        ? document.caretRangeFromPoint(ev.clientX, ev.clientY)
+        : null;
+      if (r && div.contains(r.startContainer)) {
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+    } catch (_) { /* focus alone is fine — the caret lands at the box start */ }
+  },
+
+  /** MOVING state after a drag: accent border + arrow-key nudging until Escape / click-away. */
+  _enterMoveState(div, line, pv, displayScale) {
+    if (this._moveState && this._moveState.div === div) return;
     this._exitMoveMode();
-    if (document.activeElement === div) div.blur();               // keyboard belongs to the move, not the caret
     div.classList.add('qpe-moving');
-    if (div.__qpeGrip) div.__qpeGrip.classList.add('show');
     const onKey = (e) => this._onMoveKeydown(e);
     const onDocDown = (e) => {
-      if (e.target === div || div.contains(e.target) || e.target === div.__qpeGrip) return;
+      if (e.target === div || div.contains(e.target)) return;     // clicks on the line handle edit
       this._exitMoveMode();
     };
     this._moveState = { div, line, pv, displayScale, onKey, onDocDown, nudgeTimer: null };
@@ -131,7 +145,6 @@ export const MoveLinesMethods = {
     if (!st) return;
     if (st.nudgeTimer) { clearTimeout(st.nudgeTimer); this._commitLineMove(st.div, st.line, st.pv, st.displayScale); }
     st.div.classList.remove('qpe-moving');
-    if (st.div.__qpeGrip) st.div.__qpeGrip.classList.remove('show');
     document.removeEventListener('keydown', st.onKey, true);
     document.removeEventListener('pointerdown', st.onDocDown, true);
     this._clearSnapGuides(st.pv.wrapper);
@@ -157,7 +170,6 @@ export const MoveLinesMethods = {
     const maxTop = Math.max(0, (pv.wrapper.clientHeight || pv.canvas.clientHeight) - rect.height);
     div.style.left = Math.min(maxLeft, Math.max(0, (parseFloat(div.style.left) || 0) + dx)) + 'px';
     div.style.top = Math.min(maxTop, Math.max(0, (parseFloat(div.style.top) || 0) + dy)) + 'px';
-    if (div.__qpeGrip) { div.__qpeGrip.style.left = (parseFloat(div.style.left) - 14) + 'px'; div.__qpeGrip.style.top = div.style.top; }
     if (st.nudgeTimer) clearTimeout(st.nudgeTimer);
     st.nudgeTimer = setTimeout(() => {
       st.nudgeTimer = null;
