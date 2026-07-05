@@ -100,10 +100,19 @@ export function findInText(text, query, maxEdits, opts = {}) {
   }
   taken.sort((a, b) => a.s - b.s);
 
+  const isWordChar = (ch) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
   return taken.map((f) => {
     let { s, e } = f;
     while (s < e && norm[s] === ' ') s++;          // never anchor a match on a synthetic space
     while (e > s && norm[e - 1] === ' ') e--;
-    return { start: map[s], end: map[e - 1] + 1, dist: f.dist };
-  }).filter((f) => f.end > f.start);
+    return { s, e, dist: f.dist };
+  }).filter((f) => {
+    if (f.e <= f.s) return false;
+    // A FUZZY (edit-distance) match must sit on WORD BOUNDARIES on both ends. Without this an
+    // approximate match lands INSIDE a longer word — query "JOIN" matched "ROIN" within "GROIN",
+    // "POIN" within "SPOIN" — so searching an exact word read as if it silently dropped letters.
+    // Exact matches (dist 0) still match substrings anywhere, like Ctrl+F ("join" inside "adjoin").
+    if (f.dist > 0 && (isWordChar(norm[f.s - 1]) || isWordChar(norm[f.e]))) return false;
+    return true;
+  }).map((f) => ({ start: map[f.s], end: map[f.e - 1] + 1, dist: f.dist }));
 }

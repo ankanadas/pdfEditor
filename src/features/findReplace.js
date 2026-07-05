@@ -64,10 +64,14 @@ export const FindReplaceMethods = {
     tb?.addEventListener('mousedown', () => {
       if (!tb.classList.contains('tt-docked')) return;
       const m = this._find.matches[this._find.idx];
-      if (!m || !m.el || !m.el.isConnected) return;
+      if (!m) return;
       const sel = window.getSelection();
       const r = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
-      if (!(r && !r.collapsed && m.el.contains(r.commonAncestorContainer))) this.findSelectCurrent();
+      const liveMatchSel = r && !r.collapsed && m.el && m.el.isConnected && m.el.contains(r.commonAncestorContainer);
+      // No live selection over the match (or its box went stale in a rescan) — (re)select it. Robust to
+      // a DETACHED m.el: findSelectCurrent re-resolves the current box before selecting, so a docked
+      // Bold/colour during the "scanning…" window styles JUST the match, not the whole line.
+      if (!liveMatchSel) this.findSelectCurrent();
     }, true);
   },
 
@@ -219,7 +223,16 @@ export const FindReplaceMethods = {
    *  search the BACKGROUND INDEX instead (virtual entries, el resolved on demand); ≤500-page docs
    *  keep this exact DOM scan. */
   _findEntries() {
-    if (this.lazyEditMode) return this._findVirtualEntries();
+    const base = this.lazyEditMode ? this._findVirtualEntries() : this._findBoxEntries();
+    // Added-text overlays (the Add tool's inserts) AND rotated text (diagonal watermarks, and any
+    // added text that was rotated then saved & reopened — now rotated PDF content) are searchable
+    // too, in BOTH modes. Appended OUTSIDE the cached virtual index so a replace that only rewrites
+    // an insert's text is reflected on the very next scan (concat returns a fresh array — the cache
+    // is never mutated).
+    return base.concat(this._findAddedEntries(), this._findRotatedEntries());
+  },
+  /** Eager path: every painted per-line editable box, with its committed text and page. */
+  _findBoxEntries() {
     const out = [];
     for (const pv of (this.pageViews || [])) {
       if (!pv || !pv.wrapper) continue;
@@ -227,6 +240,39 @@ export const FindReplaceMethods = {
         const text = el.dataset.originalText || el.textContent || '';
         if (text.trim()) out.push({ el, text, pageIndex: pv.pageNum });
       });
+    }
+    return out;
+  },
+  /** Added text (the Add tool) as searchable entries. Each is a tracked edit with redact:false and
+   *  newText, rendered as an .insert-overlay (NOT an .editable-text-box) — so the box/virtual scans
+   *  miss it. The box is resolved by edit identity when the page is painted (null until then: the
+   *  query still matches on newText, and navigating a match materialises its page). Signatures &
+   *  images aren't text and are skipped. Rotation lives on edit.rotation (a CSS transform) and is
+   *  never touched by replace, so a rotated insert keeps its slant after find-and-replace. */
+  _findAddedEntries() {
+    const out = [];
+    for (const e of (this.edits || [])) {
+      if (!e || e.redact !== false || e.kind === 'image' || e.kind === 'erase' || e.style === 'signature') continue;
+      const text = e.newText;
+      if (!text || !text.trim()) continue;
+      out.push({ el: this._overlayElFor(e), text, pageIndex: e.pageIndex, addEdit: e });
+    }
+    return out;
+  },
+  /** Rotated text runs (diagonal watermarks; and any added text that was rotated, saved, then reopened
+   *  as rotated PDF content) as searchable entries. Each pdf.js item already carries its FULL string,
+   *  so one item = one entry — they are deliberately NOT merged into the horizontal body lines (that
+   *  merge is exactly what scrambled body-line offsets, so the virtual index / editable boxes still
+   *  exclude rotated items). There is no editable box for rotated text, so a rotated match highlights
+   *  from the item's own geometry (see _findGotoRotated) and is not offered for replace. This is what
+   *  makes "add rotated text → save → reopen → search still finds it" work — the reported iPad bug. */
+  _findRotatedEntries() {
+    const out = [];
+    for (const it of (this.extractedTextItems || [])) {
+      if (!it || !it.rotated) continue;
+      const text = it.text;
+      if (!text || !text.trim()) continue;
+      out.push({ el: null, text, pageIndex: it.pageIndex, rotItem: it });
     }
     return out;
   },
@@ -281,6 +327,13 @@ export const FindReplaceMethods = {
     if (this._veCache && this._veSig === sig && this._veDoc === this.originalFileData) return this._veCache;
     const byPage = new Map();
     for (const it of items) {
+      // Skip ROTATED glyphs (diagonal watermarks like "OceanofPDF.com", stamps). The editable line
+      // boxes are built from the same items with `!item.rotated` (see createEditableTextBoxes), so
+      // including them HERE scrambled the index: where a slanted watermark's baseline crosses a body
+      // line, its glyphs merged into that line's text — a match found on the scrambled index then
+      // highlighted/replaced the CLEAN box at a drifted offset (searching "JOIN" removed "J"/"JO"/…
+      // inconsistently per page as the diagonal crossed different lines). Keep the index == the boxes.
+      if (it.rotated) continue;
       let a = byPage.get(it.pageIndex);
       if (!a) byPage.set(it.pageIndex, a = []);
       a.push(it);
@@ -318,6 +371,9 @@ export const FindReplaceMethods = {
   /** The live box for a virtual match on a PAINTED page (matched by the line's own geometry). */
   _findResolveEl(m, pv) {
     pv = pv || (this.pageViews || [])[m.pageIndex];
+    // Added-text match: its live box is the insert overlay, found by the edit's identity (it exists
+    // once the page is painted — createInsertOverlays runs in both the eager and lazy paint paths).
+    if (m.addEdit) return this._overlayElFor(m.addEdit);
     if (!pv || !pv.wrapper || !m.line) return null;
     for (const el of pv.wrapper.querySelectorAll('.editable-text-box')) {
       const ln = el.__line;
@@ -393,8 +449,12 @@ export const FindReplaceMethods = {
       if (!f.matches.length && !matchCase && !this.lazyEditMode) f.matches = collect(undefined);
       // Reading order: page, then vertical position on the page, then offset in the line.
       // Virtual (index) entries have no box yet — their line geometry gives the same ordering.
-      const top = (m) => (m.el ? m.el.offsetTop : m.line.top);
-      const left = (m) => (m.el ? m.el.offsetLeft : m.line.left);
+      // Added-text matches (Add tool) carry neither a painted box (until their page is materialised)
+      // NOR a `line` — they use the edit's own baseline/x. WITHOUT this guard `m.line.top` threw on
+      // an unpainted added match, silently crashing the whole search (the "added-text search does
+      // nothing on iPad/lazy" bug — an added insert on an off-screen page has el=null AND line=undefined).
+      const top = (m) => (m.el ? m.el.offsetTop : (m.line ? m.line.top : (m.rotItem ? m.rotItem.top : (m.addEdit ? m.addEdit.baseline : 0))));
+      const left = (m) => (m.el ? m.el.offsetLeft : (m.line ? m.line.left : (m.rotItem ? m.rotItem.left : (m.addEdit ? m.addEdit.x : 0))));
       f.matches.sort((a, b) => a.pageIndex - b.pageIndex || top(a) - top(b)
         || left(a) - left(b) || a.start - b.start);
       // Lazy docs: make sure the background index is building; the rescan below converges the
@@ -545,6 +605,9 @@ export const FindReplaceMethods = {
     if (!m) return;
     f.idx = i;
     this._findCount();
+    // Rotated text (watermark / reopened rotated add-text) has no editable box — highlight it from
+    // its own geometry instead of a DOM range.
+    if (m.rotItem) return this._findGotoRotated(m, i, scroll);
     if (!m.el || !m.el.isConnected) {
       if (!scroll) {   // rescan: don't hydrate/scroll an off-screen match, just sync the list/toolbar
         (f.cards || []).forEach((c, ci) => c.classList.toggle('active', ci === i));
@@ -571,6 +634,7 @@ export const FindReplaceMethods = {
       wrap.appendChild(hl);
       f.hl = hl;
     }
+    hl.style.transform = 'none';                   // clear any rotation left by a previous rotated match
     hl.style.left = (rect.left - wr.left - 2) + 'px';
     hl.style.top = (rect.top - wr.top - 1) + 'px';
     hl.style.width = (rect.width + 4) + 'px';
@@ -582,18 +646,67 @@ export const FindReplaceMethods = {
     this._findToolbarOn(m);
   },
 
+  /** Highlight a ROTATED match (watermark / reopened rotated add-text). No editable box exists, so the
+   *  highlight is positioned + rotated from the text item's OWN geometry (canvas px → CSS px via the
+   *  canvas display scale), pivoting on the baseline-left exactly like a rotated insert overlay. On a
+   *  lazy doc the page is painted first so the canvas has its display size. Rotated text isn't offered
+   *  for replace (there is no horizontal box to redraw through), so the docked style toolbar stays off. */
+  async _findGotoRotated(m, i, scroll) {
+    const f = this._find;
+    const pv = (this.pageViews || [])[m.pageIndex];
+    if (!pv || !pv.wrapper) return;
+    if (scroll) pv.wrapper.scrollIntoView({ block: 'center' });
+    if (this.lazyEditMode && this._lePaint && !pv._lePainted) {
+      this._lePaint(pv);
+      for (let t = 0; t < 20 && !pv._lePainted; t++) await new Promise((r) => setTimeout(r, 100));
+    }
+    const it = m.rotItem;
+    const ds = (pv.canvas.clientWidth || pv.canvas.width) / (pv.canvas.width || 1);
+    const h = Math.max(6, (it.height || 12) * ds);
+    const ascent = h * 0.8;
+    const w = Math.max(6, ((it.width != null ? it.width : (it.right - it.left)) || h) * ds);
+    const deg = (it.angle || 0) * 180 / Math.PI;
+    let hl = f.hl;
+    if (!hl || !hl.isConnected || hl.parentElement !== pv.wrapper) {
+      hl?.remove();
+      hl = document.createElement('div');
+      hl.className = 'find-hl';
+      pv.wrapper.appendChild(hl);
+      f.hl = hl;
+    }
+    hl.style.left = (it.left * ds) + 'px';
+    hl.style.top = (it.baseline * ds - ascent) + 'px';
+    hl.style.width = w + 'px';
+    hl.style.height = h + 'px';
+    hl.style.transformOrigin = '0px ' + ascent + 'px';   // pivot on the baseline-left (like insert rotation)
+    hl.style.transform = `rotate(${deg}deg)`;
+    if (scroll) hl.scrollIntoView({ block: 'center' });
+    (f.cards || []).forEach((c, ci) => c.classList.toggle('active', ci === i));
+    if (scroll && f.cards && f.cards[i]) f.cards[i].scrollIntoView({ block: 'nearest' });
+    this._findToolbarOff();                          // no editable box → no docked style toolbar
+  },
+
   /** Focus the current match's box and select the matched range — the text toolbar shows via the
    *  focus handler (docked in the panel for the current match) and reflects the selection, ready
    *  for a style override before replacing. */
   findSelectCurrent() {
     const m = this._find.matches[this._find.idx];
-    if (!m || !m.el || !m.el.isConnected) return false;
+    if (!m) return false;
+    // The rescan cadence (while a big index builds) swaps in fresh match objects and can leave m.el
+    // pointing at a DETACHED box — re-resolve the current live box for this match's line so the
+    // selection (and the style that follows) lands on the LIVE node. Without this a docked Bold/colour
+    // during the "scanning…" window read no selection and fell through to the WHOLE line.
+    if ((!m.el || !m.el.isConnected) && m.line && !m.addEdit) { const el = this._findResolveEl(m); if (el) m.el = el; }
+    if (!m.el || !m.el.isConnected) return false;
     m.el.focus();
     const r = this._matchRange(m);
     if (!r) return false;
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(r);
+    // Point the docked toolbar at THIS live box so the partial-style capture reads the right element
+    // (a stale _ttTarget.el from before the rescan would make the style miss the selection).
+    this._ttTarget = { kind: 'line', el: m.el, line: m.el.__line || m.line };
     // The toolbar's selection capture listens for mouseup on the box (same as manual selection).
     m.el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     return true;
@@ -642,11 +755,74 @@ export const FindReplaceMethods = {
     }
   },
 
+  /** Replace ADDED-TEXT matches (the Add tool's inserts) as data — no contentEditable box. Each
+   *  match carries its edit (m.addEdit) and offsets into that edit's newText; apply them right-to-
+   *  left so earlier offsets stay valid, then the overlay re-renders from the updated edit. The
+   *  edit's rotation and whole-box style (bold/italic/colour/font) are untouched, so a rotated or
+   *  styled insert keeps its look. Per-run partial styling (edit.runs, only when the user styled
+   *  PART of an insert) is collapsed to the whole-box style in a changed insert — the text stays
+   *  correct. An insert replaced down to empty is removed. Returns {n, pages}. */
+  _replaceAddedTextMatches(matches, rep) {
+    const byEdit = new Map();
+    for (const m of matches) {
+      if (!m || !m.addEdit) continue;
+      let a = byEdit.get(m.addEdit); if (!a) byEdit.set(m.addEdit, a = []); a.push(m);
+    }
+    let n = 0; const pages = new Set(); const remove = [];
+    for (const [edit, list] of byEdit) {
+      let text = edit.newText || '';
+      list.sort((a, b) => b.start - a.start);   // right-to-left keeps earlier offsets valid
+      for (const m of list) {
+        const s = Math.max(0, Math.min(m.start, text.length));
+        const e = Math.max(s, Math.min(m.end, text.length));
+        text = text.slice(0, s) + rep + text.slice(e); n++;
+      }
+      // In-place mutation is safe for undo: snapshotEdits() shallow-copies each edit at commit, so
+      // prior history snapshots keep their own newText/runs. Callers commit ONE snapshot afterwards.
+      edit.newText = text;
+      if (edit.runs) edit.runs = null;
+      pages.add(edit.pageIndex);
+      if (!text.trim()) remove.push(edit);      // replaced to nothing -> drop the insert
+    }
+    if (remove.length) {
+      const drop = new Set(remove);
+      this.edits = (this.edits || []).filter((x) => !drop.has(x));
+      if (drop.has(this.selectedInsert)) this.selectedInsert = null;
+    }
+    return { n, pages };
+  },
+  /** Repaint the insert overlays on the given pages after an added-text replace. Only pages that are
+   *  actually painted are touched (lazy docs redraw the rest from the tracked edit on scroll). */
+  _reRenderInsertPages(pages) {
+    for (const pi of (pages || [])) {
+      const pv = (this.pageViews || [])[pi];
+      if (!pv || !pv.wrapper) continue;
+      if (this.lazyEditMode && !(pv._lePainted || pv._lePainting)) continue;
+      this.refreshPageOverlays(pv);
+    }
+  },
+  /** Replace ONLY the current added-text match (single Replace click on an insert). */
+  async _findReplaceAddedCurrent(m) {
+    if (!this._findBusyStart('replaceBtn')) return;
+    await this._findNextPaint();
+    const rep = document.getElementById('replaceInput')?.value ?? '';
+    const after = { pageIndex: m.pageIndex, start: m.start };
+    const { pages } = this._replaceAddedTextMatches([m], rep);
+    this.commitHistory();                        // one undo step
+    this._reRenderInsertPages(pages);
+    this._findRescanAt(after);
+  },
+
   /** Replace the current match with the Replace field's text (empty = delete the match). */
   async findReplaceCurrent() {
     const f = this._find;
     let m = f.matches[f.idx];
     if (!m) return;
+    // Added-text insert: data replace (no editable box / execCommand path).
+    if (m.addEdit) return this._findReplaceAddedCurrent(m);
+    // Rotated text (watermark / reopened rotated add-text): searchable/highlightable, but there is no
+    // horizontal box to redraw through, so it can't be replaced. Say so instead of silently no-op-ing.
+    if (m.rotItem) { if (this.showStatus) this.showStatus('Rotated text can be found but not replaced.', 'info'); return; }
     if (m.el && !m.el.isConnected) {
       // Stale text layer (a mode round-trip or re-render rebuilt the boxes): rescan and CONTINUE
       // with the fresh match — returning here made the first Replace click a silent no-op.
@@ -684,15 +860,19 @@ export const FindReplaceMethods = {
     // across a 1200-page doc never accumulates canvases).
     if (this.lazyEditMode) { await this._findReplaceAllLazy(); return; }
     // Stale text layer (mode round-trip): the grouping below would silently SKIP disconnected
-    // boxes — rescan first so every match is live.
-    if (f.matches.some((m) => !m.el.isConnected)) {
+    // boxes — rescan first so every match is live. (Guard el: added-text matches may carry none.)
+    if (f.matches.some((m) => m.el && !m.el.isConnected)) {
       this.findRun(f.q, true);
       if (!f.matches.length) { this._findBusyEnd(); return; }
     }
     const rep = document.getElementById('replaceInput')?.value ?? '';
+    // Added-text inserts (the Add tool) replace as DATA — no editable box / execCommand. Split them
+    // out and fold them into the SAME undo batch as the box replacements below.
+    const addedMatches = f.matches.filter((m) => m.addEdit);
     const byEl = new Map();
-    f.matches.forEach((m) => { const a = byEl.get(m.el) || []; a.push(m); byEl.set(m.el, a); });
+    f.matches.forEach((m) => { if (m.addEdit || !m.el) return; const a = byEl.get(m.el) || []; a.push(m); byEl.set(m.el, a); });
     let n = 0;
+    let insertPages = null;
     // ONE undo step for the WHOLE batch: every per-line blur/style commit inside the loop is
     // batched, and a single history snapshot lands at endHistoryBatch — so one Ctrl+Z reverts
     // the entire Replace All instead of needing one undo per replaced line.
@@ -718,9 +898,15 @@ export const FindReplaceMethods = {
         }
         el.blur();
       }
+      // Added-text inserts: data replace inside the same undo batch (rotation/style preserved).
+      if (addedMatches.length) {
+        const r = this._replaceAddedTextMatches(addedMatches, rep);
+        n += r.n; insertPages = r.pages;
+      }
     } finally {
       this.endHistoryBatch();
     }
+    if (insertPages) this._reRenderInsertPages(insertPages);
     // The per-box focus above re-shows the toolbar, and for boxes OTHER than the current match it
     // UNDOCKS into a floating bubble anchored to that line — which then just lingered on screen
     // after the batch (the rescan's cleanup only hides a DOCKED toolbar). Hide it outright; the
@@ -780,6 +966,10 @@ export const FindReplaceMethods = {
       // for "the"/"and") never blocks past a frame — the iPad's watchdog can't panic-kill us.
       if ((++i % 50) === 0) await new Promise((r) => setTimeout(r, 0));
     }
+    // Added-text inserts (the Add tool — no line geometry, so skipped by the byLine grouping above)
+    // replace as data too, inside the SAME single undo step. Rotation/whole-box style preserved.
+    const addRes = this._replaceAddedTextMatches(f.matches.filter((m) => m.addEdit), rep);
+    n += addRes.n;
     this.commitHistory();          // ONE undo step for the whole Replace All
     // PATCH the virtual-entries cache in place (updated line text only) instead of letting the
     // post-replace rescan re-group all N pages from scratch — that full regroup was a ~700 ms
@@ -794,6 +984,7 @@ export const FindReplaceMethods = {
     // Repaint ONLY the pages already on screen so their boxes show the new text immediately; every
     // other page draws the replacement from the tracked edits when the user scrolls to it.
     if (repaint.size && this.refresh) await this.refresh({ only: repaint });
+    this._reRenderInsertPages(addRes.pages);   // redraw any painted pages whose inserts changed
     this.hideTextToolbar();
     if (this.showStatus) this.showStatus(`Replaced ${n} match${n === 1 ? '' : 'es'}.`, 'success');
     // Finish WITHOUT a full-document re-scan when we can prove zero matches remain: every current
