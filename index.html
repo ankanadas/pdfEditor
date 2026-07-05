@@ -532,22 +532,22 @@
       border-radius: 3px;
     }
 
-    /* Move-lines: drag grip beside each line (shown on hover/focus), the active move-mode look,
-       and the purple snap guides drawn while a dragged box aligns with another edge. */
-    .qpe-move-grip {
-      position: absolute; width: 12px; z-index: 210; cursor: move;
-      opacity: 0; pointer-events: none; transition: opacity .12s;
-      border-radius: 3px; touch-action: none;
-      background-image: radial-gradient(circle, #8b7fd6 1.1px, transparent 1.3px);
-      background-size: 6px 6px; background-position: 2px 3px;
+    /* Move-lines: the line ITSELF is the move affordance — hovering an unfocused line shows a
+       BIG PURPLE four-direction cursor (custom 32px SVG with a white halo so it never blends
+       into the text underneath; native `move` as fallback); press-drag moves it, a plain click
+       drops into editing (the caret lands at the click point). Focused lines keep the text beam
+       so dragging selects text. Plus the moving-state look and the purple snap guides. */
+    .editable-text-box:not(:focus), .editable-text-box.qpe-moving {
+      cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'><g fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M16 3v26M3 16h26M16 3l-4 4M16 3l4 4M16 29l-4-4M16 29l4-4M3 16l4-4M3 16l4 4M29 16l-4-4M29 16l-4 4' stroke='white' stroke-width='5.5'/><path d='M16 3v26M3 16h26M16 3l-4 4M16 3l4 4M16 29l-4-4M16 29l4-4M3 16l4-4M3 16l4 4M29 16l-4-4M29 16l-4 4' stroke='%237c5cff' stroke-width='2.6'/></g></svg>") 16 16, move !important;
     }
-    .qpe-move-grip.show { opacity: .9; pointer-events: auto; }
-    .qpe-move-grip:hover { background-color: rgba(124, 92, 255, .12); }
+    .editable-text-box:focus { cursor: text; }
     .editable-text-box.qpe-moving {
-      cursor: move !important;
       border: 1.5px solid #7c5cff !important;
       box-shadow: 0 0 0 3px rgba(124, 92, 255, .22) !important;
       background: rgba(124, 92, 255, .05) !important;
+      /* The just-moved line stays ON TOP of whatever it now overlaps — clicks (edit) and further
+         drags must land on IT, not on a later-DOM sibling box underneath the pointer. */
+      z-index: 220 !important;
       user-select: none;
     }
     .qpe-snap-guide { position: absolute; background: #7c5cff; opacity: .8; z-index: 205; pointer-events: none; }
@@ -1203,6 +1203,24 @@
        transforms). The page canvas keeps max-width:100% and the app's getBoundingClientRect
        based coordinate mapping, so editing stays pixel-accurate at any width and scroll.
        ===================================================================================== */
+    /* iPad / tablets (touch, but wider than a phone): the top bar holds more controls than fit at
+       this width, and on a single nowrap row the right-hand ones (Undo/Redo/page nav) got CUT OFF.
+       Make the bar horizontally SCROLLABLE so every control is reachable with a swipe. Phones
+       (< 768px) wrap to rows instead (the block below); desktop (pointer:fine) is unchanged. */
+    @media (pointer: coarse) and (min-width: 768px) {
+      .toolbar {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-x: contain;
+      }
+      .toolbar > * { flex: 0 0 auto; }            /* keep natural size; the row scrolls to reveal the rest */
+      .toolbar .spacer { display: none; }          /* no elastic gap when the bar scrolls */
+      .toolbar .btn { min-height: 44px; }          /* comfortable touch targets */
+      .toolbar::-webkit-scrollbar { height: 0; }   /* iOS auto-hides it anyway; the row still drags */
+    }
+
     @media (max-width: 767px) {
       /* ---- Header (app bar) + Open/Save/pager toolbar: compact, touch-friendly, wraps ---- */
       .promobar { font-size: 12px; padding: 6px 12px; }

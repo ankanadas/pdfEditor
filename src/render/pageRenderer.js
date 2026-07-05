@@ -13,8 +13,18 @@ export const PageRendererMethods = {
     container.innerHTML = '';
     this.pageViews = [];
 
-    for (let i = 0; i < this.pdfJsDoc.numPages; i++) {
-      const page = await this.pdfJsDoc.getPage(i + 1);
+    // Prefetch page objects in parallel batches: 1000+ SERIAL getPage round-trips to the pdf.js
+    // worker took minutes on max-page docs (the 1501-page Rotate/Reorder hang); batching keeps
+    // the worker busy without flooding it. Order is preserved — the loop below is unchanged.
+    const nPages = this.pdfJsDoc.numPages;
+    const pageObjs = new Array(nPages);
+    const BATCH = 64;
+    for (let b = 0; b < nPages; b += BATCH) {
+      await Promise.all(Array.from({ length: Math.min(BATCH, nPages - b) },
+        (_, j) => this.pdfJsDoc.getPage(b + j + 1).then((pg) => { pageObjs[b + j] = pg; })));
+    }
+    for (let i = 0; i < nPages; i++) {
+      const page = pageObjs[i];
       // Show any not-yet-baked rotation (large/view-only docs) by rotating the pdf.js viewport — fast,
       // no pdf-lib rebuild. The bake into the file happens only on Download. (Empty for normal docs.)
       const pend = (this._pendingRot && this._pendingRot[i]) || 0;
@@ -28,8 +38,26 @@ export const PageRendererMethods = {
 
       const canvas = document.createElement('canvas');
       canvas.className = 'page-canvas';
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+      if (this.lazyEditMode || this.largeFileMode) {
+        // LAZY docs: do NOT allocate a full-res backing store for every page up front — 700 pages ×
+        // ~4.4 MB ≈ 3 GB of NATIVE canvas memory (invisible to the JS heap), the real iPad-Safari
+        // OOM. Start collapsed (1×1); the lazy painter sizes the backing on paint and shrinks it on
+        // evict, so only the on-screen window holds a real bitmap.
+        // Reserve the layout box on the WRAPPER (aspect-ratio + responsive width) and let the canvas
+        // FILL it. Because the wrapper's size never depends on the canvas backing, restoring/evicting
+        // a backing causes ZERO layout shift — no scroll drift as pages hydrate while scrolling.
+        wrapper.style.width = viewport.width + 'px';
+        wrapper.style.maxWidth = '100%';
+        wrapper.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
+        wrapper.style.margin = '0 auto';
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
+        canvas.width = 1;
+        canvas.height = 1;
+      } else {
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+      }
       wrapper.appendChild(canvas);
       container.appendChild(wrapper);
 
@@ -42,7 +70,9 @@ export const PageRendererMethods = {
       this.pageViews.push(pv);
       // Mount Fabric.js annotation layer over this page. A LAZY-editable doc (501+ pages) defers
       // this to first paint — 1000+ eager Fabric canvases alone are enough memory to crash the tab.
-      if (!this.lazyEditMode) this.annotationManager.mountPage(pv);
+      // VIEW-ONLY large docs skip it entirely: annotation is disabled there, and mounting 1500+
+      // Fabric canvases made closing the Rotate/Reorder drawer grind for minutes.
+      if (!this.lazyEditMode && !this.largeFileMode) this.annotationManager.mountPage(pv);
     }
 
     this.pageWidth = this.pageViews[0] ? this.pageViews[0].page.view[2] : 612;
@@ -112,6 +142,20 @@ export const PageRendererMethods = {
       this._refreshing = false;
     }
   },
+  /** Max full-res page canvases kept painted at once in lazy-edit mode. iOS Safari (and low-RAM
+   *  devices) get a much tighter budget — a full-page canvas at scale 1.5 is ~4-5 MB, and iOS
+   *  kills tabs far sooner than desktop. deviceMemory (Chromium) ≤4 GB also drops the cap. */
+  _computeLazyPaintCap() {
+    try {
+      const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+      const touch = typeof navigator !== 'undefined' && (navigator.maxTouchPoints || 0) > 0;
+      const iOS = /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/i.test(ua) && touch);   // incl. iPadOS-as-desktop
+      const mem = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 0;    // GB, Chromium only
+      if (iOS || /Android|Mobile/i.test(ua)) return 6;
+      if (mem && mem <= 4) return 8;
+      return 14;
+    } catch (_) { return 14; }
+  },
   /** Lazy bitmap render for large/view-only docs: paint each page only when it scrolls near view. */
   _refreshLazy() {
     if (this._lazyIO) { this._lazyIO.disconnect(); this._lazyIO = null; }
@@ -120,6 +164,12 @@ export const PageRendererMethods = {
     const paint = (pv) => {
       if (pv._paintedVp === pv.viewport) return;     // already painted this exact viewport
       pv._paintedVp = pv.viewport;
+      // Restore the backing store (buildPages leaves lazy canvases collapsed at 1×1 to avoid
+      // allocating every page's bitmap up front).
+      if (pv.canvas.width !== pv.viewport.width || pv.canvas.height !== pv.viewport.height) {
+        pv.canvas.width = pv.viewport.width;
+        pv.canvas.height = pv.viewport.height;
+      }
       pv.page.render({ canvasContext: pv.ctx, viewport: pv.viewport }).promise.catch(() => {});
     };
     if (typeof IntersectionObserver === 'function') {
@@ -149,11 +199,11 @@ export const PageRendererMethods = {
       if (pv._lePainted && !force) return;
       pv._lePainting = true;
       try {
-        // Lock the on-screen size once so evicting (attr 1×1) can't collapse layout / jump scroll.
-        if (!pv._leCssLocked) {
-          const cw = pv.canvas.clientWidth, ch = pv.canvas.clientHeight;
-          if (cw && ch) { pv.canvas.style.width = cw + 'px'; pv.canvas.style.height = ch + 'px'; pv._leCssLocked = true; }
-        }
+        // NOTE: the canvas keeps its RESPONSIVE CSS box from buildPages (width + aspect-ratio +
+        // max-width:100%), which reserves layout at any backing size — so evicting to 1×1 never
+        // collapses it. We deliberately do NOT freeze a fixed px size here: a frozen size went
+        // stale when the stage width changed (search panel opening, iPad rotation), leaving the
+        // text-box overlays misaligned over the page ("overlapping text" on iPad).
         // Restore full-res backing if this canvas was evicted.
         if (pv.canvas.width !== pv.viewport.width || pv.canvas.height !== pv.viewport.height) {
           pv.canvas.width = pv.viewport.width;
@@ -173,12 +223,13 @@ export const PageRendererMethods = {
         pv._lePainted = true;
         // Hard cap on concurrently-painted pages (fast scrolling can outrun leave events): evict
         // the stalest painted page outside the current visible set until we're back under budget.
+        const cap = this._lazyPaintCap || (this._lazyPaintCap = this._computeLazyPaintCap());
         const painted = this.pageViews.filter((p) => p._lePainted);
-        if (painted.length > 14) {
+        if (painted.length > cap) {
           painted
             .filter((p) => p !== pv && !(this._leVisible && this._leVisible.has(p)))
             .sort((a, b) => (a._leSeen || 0) - (b._leSeen || 0))
-            .slice(0, painted.length - 14)
+            .slice(0, painted.length - cap)
             .forEach((p) => evict(p));
         }
       } catch (e) {
@@ -197,8 +248,10 @@ export const PageRendererMethods = {
       this.clearPageOverlays(pv);
       pv.canvas.width = 1; pv.canvas.height = 1;    // frees the multi-MB backing store
       pv._lePainted = false;
-      // The Fabric layer stays mounted once created: it may hold the user's annotations, and one
-      // stays cheap — only pages the user actually visited ever mount one.
+      // Free the Fabric annotation canvas too, UNLESS this page actually holds annotations (then it
+      // keeps them and re-shows on repaint). Retaining a Fabric canvas per visited page otherwise
+      // grows unbounded across a long scroll / Replace All — a big slice of the iPad OOM budget.
+      if (pv._annMounted && this.annotationManager.unmountPageIfEmpty(pv.pageNum)) pv._annMounted = false;
     };
 
     // Targeted pass (undo/redo, style commits): repaint just those pages if currently painted.

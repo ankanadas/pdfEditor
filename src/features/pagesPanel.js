@@ -110,9 +110,40 @@ export const PagesPanelMethods = {
       this.platform.bindPageReorder(thumb);   // desktop: HTML5 DnD; mobile: MOBILE-TODO
       grid.appendChild(thumb);
 
-      this.renderThumbCanvas(canvas, i);   // async paint; doesn't block the drawer opening
+      // ≤300 pages: paint every thumb straight away (unchanged behaviour). BIGGER docs render
+      // thumbs LAZILY — kicking 1000+ concurrent getPage+render calls floods the pdf.js worker
+      // and allocates hundreds of MB of thumb canvases, freezing the drawer for minutes (the
+      // 1501-page Rotate/Reorder path). The observer below paints each thumb near the viewport.
+      if (n <= 300) this.renderThumbCanvas(canvas, i);
       this._applyThumbRotCss(canvas, (this._pendingRot && this._pendingRot[i]) || 0);  // restore any pending preview
     }
+    if (n > 300) this._observeLazyThumbs(grid);
+  },
+
+  /** Lazy thumbnails for BIG docs: render each thumb when its card nears the drawer viewport. */
+  _observeLazyThumbs(grid) {
+    if (this._thumbIO) { this._thumbIO.disconnect(); this._thumbIO = null; }
+    if (typeof IntersectionObserver !== 'function') {
+      // No IO (ancient env): first screenfuls only — scrolling docs this big without IO is rare.
+      grid.querySelectorAll('.page-thumb').forEach((t, i) => {
+        if (i < 30) this.renderThumbCanvas(t.querySelector('.thumb-canvas'), +t.dataset.index);
+      });
+      return;
+    }
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const t = e.target;
+        io.unobserve(t);                                   // render once; thumbs are tiny, keep them
+        const canvas = t.querySelector('.thumb-canvas');
+        if (canvas && !canvas.dataset.painted) {
+          canvas.dataset.painted = '1';
+          this.renderThumbCanvas(canvas, +t.dataset.index);
+        }
+      }
+    }, { root: grid.closest('#pagesDrawer') || grid, rootMargin: '900px 0px' });
+    grid.querySelectorAll('.page-thumb').forEach((t) => io.observe(t));
+    this._thumbIO = io;
   },
 
   /** Render page `pageIndex` into the small thumbnail canvas (crisp on HiDPI screens). */
