@@ -91,12 +91,31 @@ function inkPage(docId, pageIndex) {
   const page = doc.loadPage(pageIndex);
   try {
     const colors = [];
-    page.toStructuredText('preserve-whitespace').walk({
+    // Raster image placements (top-origin PDF pts, same space as the char origins). The editor's
+    // cover strips punch holes over these so a baked signature/initials image that overlaps a text
+    // line's band isn't erased from the on-screen page (it was chopped/hidden before).
+    const images = [];
+    const walker = {
       onChar(_c, origin, _font, size, _quad, color) {
         if (origin) colors.push({ x: origin[0], y: origin[1], rgb: normColor(color), size: +size || 0 });
       },
-    });
-    return colors;
+      onImageBlock(bbox) {
+        try {
+          const r = bbox || {};
+          const x0 = +(r[0] != null ? r[0] : r.x0), y0 = +(r[1] != null ? r[1] : r.y0);
+          const x1 = +(r[2] != null ? r[2] : r.x1), y1 = +(r[3] != null ? r[3] : r.y1);
+          if (isFinite(x0) && isFinite(y0) && x1 > x0 && y1 > y0) images.push({ x0, y0, x1, y1 });
+        } catch (_) {}
+      },
+    };
+    // Never let the images option cost us the colours: fall back to the plain walk on any failure.
+    try {
+      page.toStructuredText('preserve-whitespace,preserve-images').walk(walker);
+    } catch (_) {
+      colors.length = 0; images.length = 0;
+      page.toStructuredText('preserve-whitespace').walk(walker);
+    }
+    return { colors, images };
   } finally {
     try { page.destroy(); } catch (_) {}
   }

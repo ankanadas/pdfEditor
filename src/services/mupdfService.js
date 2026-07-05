@@ -96,7 +96,10 @@ export const MupdfService = {
     return call('inkopen', { bytes: buf }, [buf]);
   },
 
-  /** Per-char [{x, y, rgb:[0..1]×3, size}] for a 0-based page of an inkOpen'd document. */
+  /**
+   * Page inspection for a 0-based page of an inkOpen'd document, top-origin PDF pts:
+   * { colors: per-char [{x, y, rgb:[0..1]×3, size}], images: [{x0,y0,x1,y1}] raster placements }.
+   */
   async inkPage(docId, page) {
     return call('inkpage', { docId, page });
   },

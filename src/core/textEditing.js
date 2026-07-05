@@ -30,14 +30,24 @@ export const TextEditingMethods = {
     // pixel is near the true ink), so sampled colours are only the fallback. The await parks this
     // invocation; the generation stamp discards it if a newer render re-entered for the same page.
     const boxGen = (pv._boxGen = (pv._boxGen || 0) + 1);
-    const inkChars = await this._pageInkChars(pv.pageNum);
+    const inkRes = await this._pageInkChars(pv.pageNum);
     if (pv._boxGen !== boxGen) return;
+    // inkPage returns { colors, images }; older shape was the bare colors array — accept both.
+    const inkChars = Array.isArray(inkRes) ? inkRes : ((inkRes && inkRes.colors) || null);
+    // Baked raster images on this page (top-origin PDF pts). The cover strips below must NOT paint
+    // over them: a signature/initials image stamped onto a form line otherwise gets chopped (its ink
+    // inside the line's band erased) or hidden entirely — editor-display damage the save never had.
+    pv._pageImages = (inkRes && !Array.isArray(inkRes) && inkRes.images) || [];
 
     const canvasWrapper = pv.wrapper;
     // The canvas may be displayed smaller than its intrinsic pixels (max-width:100%).
     const displayScale = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
 
     const lines = this.groupTextItemsByLine(pageTextItems);
+    // Kept for save-time: an edit whose redaction band overlaps ANOTHER segment on the same row
+    // (an overlay fill-in and the blank under it) must re-add that segment, or mupdf's run-drop
+    // removes it from the saved page. savePDF walks these via _withEntangledPreserves().
+    pv._segments = lines;
 
     // Correct bold/italic from PDF.js's loaded fonts now that the page has rendered, so the edit
     // box previews the real weight (a non-embedded "Helvetica-Bold" heading the font-NAME guess
@@ -120,6 +130,28 @@ export const TextEditingMethods = {
       // section rule the strip catches that dark line and, stretched over the box, shows as a dark
       // band ("shadow") above the text. In that case cover with the line's solid background colour
       // instead — hides the original text with no band. A smooth gradient strip stays on drawImage.
+      // Punch holes in this cover over any baked raster image it intersects (a signature ink
+      // descending into a "Signature: ___" line's band, an initials stamp sitting ON a blank), so
+      // the image survives on screen exactly as the saved PDF keeps it. Guards: a near-page-sized
+      // image is the page's own backdrop (scanned docs) — never a hole, covering must still hide
+      // the text; likewise an image that swallows the whole cover rect (letterhead behind text).
+      const s = this.scale || 1;
+      const holes = (pv._pageImages || []).map(im => ({
+        x: im.x0 * s, y: im.y0 * s, w: (im.x1 - im.x0) * s, h: (im.y1 - im.y0) * s,
+      })).filter(h =>
+        h.x < lx + lw && h.x + h.w > lx && h.y < ly + lh && h.y + h.h > ly &&
+        h.w * h.h < 0.4 * cw * ch &&
+        !(h.x <= lx && h.y <= ly && h.x + h.w >= lx + lw && h.y + h.h >= ly + lh));
+      const paintCover = (fn) => {
+        if (!holes.length) return fn();
+        pv.ctx.save();
+        const p = new Path2D();
+        p.rect(lx, ly, lw, lh);
+        holes.forEach(h => p.rect(h.x, h.y, h.w, h.h));
+        pv.ctx.clip(p, 'evenodd');            // cover rect minus the image rects
+        fn();
+        pv.ctx.restore();
+      };
       const fillSolid = () => {
         const c = line.bgColor;
         pv.ctx.fillStyle = c ? `rgb(${c[0]},${c[1]},${c[2]})` : '#ffffff';
@@ -127,10 +159,10 @@ export const TextEditingMethods = {
       };
       try {
         if (sy < 0 || lw <= 0 || lh <= 0) throw new Error('no source strip');
-        if (this._coverStripState(pv.ctx, lx, sy, lw, band, line.bgColor) === 'dirty') fillSolid();
-        else pv.ctx.drawImage(pv.canvas, lx, sy, lw, band, lx, ly, lw, lh);   // stretch clean bg strip
+        if (this._coverStripState(pv.ctx, lx, sy, lw, band, line.bgColor) === 'dirty') paintCover(fillSolid);
+        else paintCover(() => pv.ctx.drawImage(pv.canvas, lx, sy, lw, band, lx, ly, lw, lh));   // stretch clean bg strip
       } catch (e) {
-        fillSolid();
+        paintCover(fillSolid);
       }
     });
     pv.ctx.restore();
@@ -369,6 +401,55 @@ export const TextEditingMethods = {
     }
     return null;
   },
+  /**
+   * Expand the edit list with PRESERVE edits for segments entangled with an edited line. Two runs
+   * that share a baseline and overlap horizontally (a form fill-in written ON a blank — the exact
+   * layout the overlay grouping keeps as separate boxes) are inseparable at redaction time: mupdf
+   * removes every RUN whose glyphs intersect the edited line's rect, so editing the sentence would
+   * silently DELETE the fill-in from the saved page (and vice versa). For each replace edit, any
+   * same-row segment overlapping its band is re-added as an identical-text edit (redact + redraw at
+   * its own position), transitively. Returns a NEW array — this.edits / undo history are untouched.
+   */
+  _withEntangledPreserves(edits) {
+    try {
+      const isReplace = (e) => e && e.redact !== false && e.kind !== 'erase' && e.baseline != null && e.newText != null;
+      const out = edits.slice();
+      const matches = (a, b) => a.pageIndex === b.pageIndex &&
+        Math.abs(a.x - b.x) < 1.5 && Math.abs(a.baseline - b.baseline) < 1.5;
+      const queue = out.filter(isReplace);
+      while (queue.length) {
+        const e = queue.pop();
+        const pv = (this.pageViews || []).find(v => v && v.pageNum === e.pageIndex);
+        const segs = (pv && pv._segments) || [];
+        const s = this.scale || 1;
+        for (const seg of segs) {
+          if (!seg.text || !seg.text.trim()) continue;
+          const st = seg.top / s, sb = seg.bottom / s, sx = seg.left / s, sr = seg.right / s;
+          // Same ROW only: substantial vertical overlap. Mere band-touching neighbours above/below
+          // are already protected by the redaction clamp and must NOT be redrawn (font drift).
+          const vOv = Math.min(sb, e.bottom) - Math.max(st, e.top);
+          if (vOv < 0.55 * Math.min(sb - st, e.bottom - e.top)) continue;
+          if (sx >= e.right - 0.5 || sr <= e.x + 0.5) continue;   // and horizontal overlap
+          const runs = (seg.styleRuns && seg.styleRuns.length > 1)
+            ? seg.styleRuns.map(r => ({ text: r.text, bold: !!r.bold, italic: !!r.italic,
+                underline: !!r.underline, color: r.color || null, family: r.family || null }))
+            : null;
+          const pe = this.lineToEdit(seg, seg.text, runs);
+          if (out.some(x => isReplace(x) && matches(x, pe))) continue;   // already edited/preserved
+          pe._autoPreserve = true;
+          out.push(pe);
+          queue.push(pe);                                   // transitive closure over chained overlaps
+        }
+      }
+      if (out.length !== edits.length) {
+        console.info(`[QPE] save: re-adding ${out.length - edits.length} run(s) entangled with edited lines`);
+      }
+      return out;
+    } catch (err) {
+      console.warn('entangled-preserve skipped:', err);
+      return edits;
+    }
+  },
   lineToEdit(line, newText, runs) {
     const s = this.scale;
     const edit = {
@@ -477,8 +558,17 @@ export const TextEditingMethods = {
       // never moves, resizes, or re-renders the bullet and the text keeps its original indent.
       const bulletBreak = sameRow && !isSpace && currentLine &&
         /^[•◦▪●‣⁃∙·‧]\s*$/.test(currentLine.text);
+      // A run that starts well INSIDE the span the row has already covered is an OVERLAY — a form
+      // fill-in written ON TOP of a blank (a company name over "____(“Company”)", a date over
+      // "Date: ____"). Concatenating it displaced the value to the END of the line (even off the
+      // page edge); keep it a separate segment at its own x so the editor shows it exactly where
+      // the PDF renders it, and each piece edits independently. Normal flow never overlaps the
+      // accumulated span by more than kerning (≪ 0.6·height), so this only fires on true overlays.
+      const overlayBreak = sameRow && !isSpace &&
+        (currentLine.right - item.left) > Math.min(item.height, currentLine.height) * 0.6 &&
+        item.left > currentLine.left + 1;
 
-      if (!sameRow || columnBreak || bulletBreak) {
+      if (!sameRow || columnBreak || bulletBreak || overlayBreak) {
         if (isSpace) return;            // never start a segment on a stray space
         startSegment(item);
         return;

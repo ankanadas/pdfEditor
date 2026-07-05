@@ -41,10 +41,15 @@ export const SaveServiceMethods = {
     let flattened = false;
 
     const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
+    // Redaction removes whole RUNS: an edited line whose band overlaps another run on the SAME row
+    // (a form fill-in over a blank) would silently delete that run from the save. Expand the edit
+    // list with preserve edits that re-add such runs verbatim (local copy — undo/history untouched).
+    const editsForSave = this._withEntangledPreserves
+      ? this._withEntangledPreserves(this.edits) : this.edits;
     // The in-browser mupdf-wasm edit (no server, true text removal, embedded-font reuse).
     const tryWasm = async () => {
       if (editedPdfBytes || !MupdfService.isSupported()) return;
-      try { editedPdfBytes = await MupdfService.editPDF(this.originalFileData, this.edits, fabricAnnotations); }
+      try { editedPdfBytes = await MupdfService.editPDF(this.originalFileData, editsForSave, fabricAnnotations); }
       catch (e) { console.warn('WASM save unavailable/declined:', e); }
     };
     // WASM-only processing: every tier runs in the browser, nothing is uploaded. When WASM
@@ -54,13 +59,13 @@ export const SaveServiceMethods = {
 
     if (!editedPdfBytes) {
       try {
-        editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, this.edits);
+        editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, editsForSave);
       } catch (e) { console.warn('Client-side (vector) save failed, flattening instead:', e); }
     }
 
     if (!editedPdfBytes) {
       try {
-        editedPdfBytes = await this.flattenToPdfBytes(this.edits);
+        editedPdfBytes = await this.flattenToPdfBytes(editsForSave);
         flattened = true;
       } catch (e) { console.warn('Flatten save failed:', e); }
     }
