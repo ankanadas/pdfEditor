@@ -21,14 +21,17 @@ export const EDIT_LIMIT_MOBILE_MB = 30;     // a phone can't hold a 200 MB doc i
 export const EDIT_LIMIT_PAGES = 1500;
 // Above this page count an EDITABLE doc renders lazily (paint pages near the viewport, evict far
 // ones) instead of eagerly. Eager canvases are ~4.4 MB each at scale 1.5 — a few hundred pages
-// painted up front is already 1-2 GB of native canvas memory. Desktop tolerates that; a touch
-// device (iPad/phone) does NOT — Safari kills the tab. So the threshold is DEVICE-AWARE: touch
-// devices virtualize much sooner. Below the threshold, rendering is eager (unchanged).
-export const LAZY_EDIT_PAGES = 500;
+// painted up front is already 1-2 GB of native canvas memory.
+//
+// UNIFIED across devices (desktop AND touch) — deliberately ONE architecture, not two. It used to be
+// device-split (touch = 50, desktop = 500), which meant the SAME document was edited through DIFFERENT
+// code paths on a laptop vs an iPad; behaviour and bugs drifted between them (e.g. a search/replace or
+// styling issue reproduced on iPad but not desktop, or vice-versa). Virtualizing past the same small
+// page count everywhere means the editor behaves identically and every fix lands once. 50 full canvases
+// (~220 MB) is the safe ceiling before virtualizing; a 466-page book is lazy on desktop and iPad alike.
+export const LAZY_EDIT_PAGES = 50;
 export function lazyRenderThreshold() {
-  // Touch = iPad/phone: a 466-page book eager = ~2 GB of canvases = an instant OOM on iPad. 50 full
-  // canvases (~220 MB) is a safe ceiling before virtualizing; desktop keeps the roomy 500.
-  return isMobileDevice() ? 50 : LAZY_EDIT_PAGES;
+  return LAZY_EDIT_PAGES;
 }
 
 const DESKTOP_CAP_MB = 500;

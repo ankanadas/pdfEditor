@@ -344,7 +344,8 @@ class PDFEditorApp {
           // run (e.g. a baked, rotated "Add text" after a backend save) is non-zero. Used to skip
           // editable line-boxes for rotated text, which can't be represented by a horizontal box and
           // would otherwise paint a phantom second layer over the rotated rendering.
-          const rotated = Math.abs(Math.atan2(tx[1], tx[0])) > 0.05;
+          const angle = Math.atan2(tx[1], tx[0]);
+          const rotated = Math.abs(angle) > 0.05;
           const widthPx = item.width * this.scale;
           const ascent = fontHeightPx * 0.8;
           const descent = fontHeightPx * 0.2;
@@ -372,7 +373,8 @@ class PDFEditorApp {
             bold: bold,
             italic: italic,
             serif: serif,
-            rotated: rotated
+            rotated: rotated,
+            angle: angle          // radians (canvas space); drives the rotated search highlight
           });
         });
     }
