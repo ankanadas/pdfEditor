@@ -99,6 +99,24 @@ export const TextEditingMethods = {
     pv.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
     const cw = pv.canvas.width, ch = pv.canvas.height;
     lines.forEach((line) => {
+      // ROTATED line: the horizontal strip below leaves a HALF-CUT original (it hides a horizontal band
+      // while the glyphs run at an angle). Cover the exact rotated text box instead — translate to the
+      // baseline-left anchor, rotate, fill the em box with the line's background (white by default). Save
+      // uses redaction (keeps art); this is the on-canvas preview so the rotated editable box (and a
+      // moved one — the cover stays at the ORIGINAL anchor) reads as a clean replacement.
+      if (line.rotated && line.angle) {
+        const rad = line.angle;
+        const fs = line.fontSizePx || (line.bottom - line.top) || 12;
+        const L = Math.max(line.right - line.left, fs * 0.6);
+        pv.ctx.save();
+        pv.ctx.translate(line.left, line.baseline);
+        pv.ctx.rotate(rad);
+        const cc = line.bgColor;
+        pv.ctx.fillStyle = cc ? `rgb(${cc[0]},${cc[1]},${cc[2]})` : '#ffffff';
+        pv.ctx.fillRect(-2, -fs - 2, L + 4, fs * 1.35 + 4);
+        pv.ctx.restore();
+        return;
+      }
       // Cursive/script faces (and tall display fonts) draw glyph ink WELL above the cap line and below
       // the baseline — beyond the nominal text bbox. Cover a vertical margin above/below so the baked
       // ink is fully hidden under the edit box; otherwise script ascenders/descenders peek out as the

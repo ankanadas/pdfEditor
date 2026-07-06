@@ -168,7 +168,7 @@
     .tool svg { width: 22px; height: 22px; }
     /* Sticker icons (fun-ui): raster PNGs with transparent backgrounds. */
     .tool .tool-ico { width: 32px; height: 32px; object-fit: contain; display: block; transition: transform .15s ease; }
-    .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 36px; height: 36px; }
+    .tool.featured .tool-ico, .tool.merge-tool .tool-ico, .tool.split-tool .tool-ico { width: 36px; height: 36px; }
     .tool:hover:not(:disabled) .tool-ico { transform: scale(1.08); }
     .tool:disabled .tool-ico { filter: grayscale(.2); }
     .tool:hover:not(:disabled) { background: #e7e2ff; color: var(--ink); }   /* visible on the purple rails */
@@ -1015,7 +1015,32 @@
     .split-thumb-check { position: absolute; right: 6px; top: 6px; width: 20px; height: 20px; border-radius: 50%;
       background: var(--brand, #6d5efc); color: #fff; font-size: 13px; line-height: 20px; text-align: center; display: none; }
     .split-thumb.selected .split-thumb-check { display: block; }
-    .split-tool .tool-ico { width: 24px; height: 24px; color: var(--brand, #6d5efc); }
+    /* Remove watermark — the box reuses .merge-backdrop/.merge-drawer; these style the watermark-only bits. */
+    .wm-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+    .wm-phrase-label { font-weight: 600; font-size: 13px; color: var(--ink, #1c1e2e); flex: 0 0 100%; }
+    .wm-phrase { flex: 1 1 240px; min-width: 160px; padding: 10px 12px; border: 1px solid var(--line, #e3e3ef);
+      border-radius: 9px; font-size: 15px; font-family: inherit; color: var(--ink, #1c1e2e); }
+    .wm-phrase:focus { outline: none; border-color: var(--brand, #6d5efc); box-shadow: 0 0 0 3px rgba(109,94,252,.15); }
+    .wm-case { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink, #1c1e2e); cursor: pointer; }
+    .wm-hint { font-size: 12.5px; color: #6b6f80; margin: 2px 0 8px; line-height: 1.4; }
+    .wm-status { min-height: 18px; margin: 2px 0 8px; }
+    .wm-status.ok { color: #1a7f37; } .wm-status.err { color: #c1121f; } .wm-status.info { color: var(--brand, #6d5efc); }
+    .watermark-tool .tool-ico { width: 26px; height: 26px; }
+    /* Per-line trash affordance shown while a line is selected (move state) — see src/watermark.js. */
+    .wm-line-trash { position: absolute; z-index: 120; width: 22px; height: 22px; padding: 0; border: none;
+      border-radius: 6px; background: var(--danger, #c1121f); color: #fff; font-size: 12px; line-height: 22px;
+      text-align: center; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,.28); }
+    .wm-line-trash:hover { filter: brightness(1.1); }
+    /* Manual pick-to-delete mode (gated by the Watermark tool) — see src/watermark.js. */
+    .wm-selected { outline: 2px solid var(--danger, #c1121f) !important; outline-offset: 1px;
+      background: rgba(193,18,31,.09) !important; }
+    body.wm-picking .editable-text-box { cursor: pointer !important; }
+    .wm-pick-banner { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 3000;
+      display: flex; align-items: center; gap: 12px; background: #1c1e2e; color: #fff; padding: 10px 14px;
+      border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.32); font-size: 13.5px; max-width: 92vw; }
+    .wm-pick-done { border: none; background: var(--brand, #6d5efc); color: #fff; border-radius: 8px;
+      padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .wm-pick-done:hover { filter: brightness(1.1); }
     .merge-head {
       display: flex; align-items: center; gap: 10px; padding: 16px 20px;
       border-bottom: 1px solid var(--line); flex: 0 0 auto;
@@ -1300,7 +1325,7 @@
         padding: 6px 10px; gap: 3px; font-size: 11px;
       }
       .tool-dock .tool .tool-ico { width: 26px; height: 26px; }
-      .tool.featured .tool-ico, .tool.merge-tool .tool-ico { width: 28px; height: 28px; }
+      .tool.featured .tool-ico, .tool.merge-tool .tool-ico, .tool.split-tool .tool-ico { width: 28px; height: 28px; }
       /* Keep the landing clean: only show the (disabled) dock once a PDF is open. */
       body:not(.has-pdf) .tool-dock { display: none; }
 
@@ -1565,8 +1590,12 @@
         Merge
       </button>
       <button class="tool split-tool" id="splitBtn" disabled title="Split PDF: extract a page range into a new PDF, or split into single pages">
-        <svg class="tool-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg>
+        <img class="tool-ico" src="/assets/fun-ui/split.png" alt="" aria-hidden="true">
         Split
+      </button>
+      <button class="tool watermark-tool" id="watermarkBtn" disabled title="Remove Watermark: delete a repeated background phrase (e.g. CONFIDENTIAL) from every page">
+        <svg class="tool-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3s5.5 6 5.5 9.5a5.5 5.5 0 0 1-11 0C6.5 9 12 3 12 3Z"/><path d="M4.5 19.5 19.5 4.5"/></svg>
+        Watermark
       </button>
     </aside>
     </div><!-- /tool-dock -->
@@ -2146,6 +2175,51 @@
           <button class="btn primary" id="splitGo" type="button" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
             Split &amp; download
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Remove watermark — a repeated background phrase deleted from every page (client-side, no OCR). -->
+  <div id="wmBackdrop" class="merge-backdrop">
+    <div class="merge-drawer" id="wmDrawer" role="dialog" aria-modal="true" aria-label="Remove watermark">
+      <div class="merge-head">
+        <span class="merge-heading">
+          <span class="merge-title">Remove watermark</span>
+          <span class="merge-subtitle">Delete a repeated background phrase (e.g. CONFIDENTIAL, DRAFT COPY) from every page — on your device, never uploaded, no OCR</span>
+        </span>
+        <span class="spacer"></span>
+        <button class="icon-btn" id="wmClose" title="Close" aria-label="Close watermark tool">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+
+      <div class="merge-body">
+        <div class="wm-controls">
+          <label class="wm-phrase-label" for="wmPhrase">Watermark text to remove</label>
+          <input id="wmPhrase" class="wm-phrase" type="text" inputmode="text" autocomplete="off" spellcheck="false"
+                 placeholder="e.g. CONFIDENTIAL" aria-label="Watermark phrase to remove" />
+          <label class="wm-case"><input type="checkbox" id="wmCase"> Match case</label>
+        </div>
+        <p class="wm-hint">Every line containing this text is removed across all pages. Matching is by text (not pixels), so use the exact phrase as it appears.</p>
+        <p class="merge-status wm-status" id="wmStatus" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="merge-foot">
+        <div class="merge-progress" id="wmProgress" hidden aria-hidden="true">
+          <div class="merge-progress-bar" id="wmProgressBar"></div>
+        </div>
+        <div class="merge-actions">
+          <button class="btn confirm-danger" id="wmCancel" type="button">Cancel</button>
+          <button class="btn" id="wmManual" type="button" title="Click individual blocks on the page to select and delete them">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+            Pick blocks manually
+          </button>
+          <span class="spacer"></span>
+          <button class="btn primary" id="wmPurge" type="button" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+            Purge all pages
           </button>
         </div>
       </div>
