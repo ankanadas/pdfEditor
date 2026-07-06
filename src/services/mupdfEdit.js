@@ -425,6 +425,25 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     for (const e of pageEdits) {
       if (e.redact === false) continue;
       const x = +(e.x || 0), top = +(e.top || 0), bottom = +(e.bottom || 0), right = +(e.right || x);
+      // ROTATED run: redact the AABB of the ACTUAL rotated glyphs. The horizontal x..right / top..bottom
+      // box below misses steeply-rotated text — at 90° it is a thin horizontal band while the glyphs run
+      // vertically, so the original survived the redaction (and a MOVED rotated line left a half-cut
+      // original behind). Anchor (x, baseline); length (right-x) along the rotation direction; ± the em
+      // box across. No neighbour clamp (rotated runs are isolated; the horizontal clamp would wrongly
+      // shrink this box). Uses e.x/e.baseline = the ORIGINAL position, so a moved line clears its source.
+      if (e.rotation && Math.abs(e.rotation) > 0.5) {
+        const bl0 = +(e.baseline != null ? e.baseline : (top + bottom) / 2);
+        const fs0 = +(e.fontSize || (bottom - top) || 10);
+        const rad = e.rotation * Math.PI / 180;                 // y-down clockwise (CSS), matches the draw
+        const dx = Math.cos(rad), dy = Math.sin(rad), nx = -Math.sin(rad), ny = Math.cos(rad);
+        const L = Math.max(right - x, fs0 * 0.6);
+        const xs = [], ys = [];
+        for (const t of [0, L]) for (const s of [-fs0, fs0 * 0.35]) { xs.push(x + t * dx + s * nx); ys.push(bl0 + t * dy + s * ny); }
+        const rr = [Math.max(0, Math.min(...xs) - 1), Math.max(0, Math.min(...ys) - 1), Math.min(pw, Math.max(...xs) + 1), Math.min(ph, Math.max(...ys) + 1)];
+        page.createAnnotation('Redact').setRect(rr);
+        redactRects.push(rr);
+        continue;
+      }
       const rx0 = Math.max(0, x - 2), rx1 = Math.min(pw, Math.max(right, x + 2) + 2);
       let rTop = Math.max(0, top - 1), rBot = Math.min(ph, bottom + 1);
       const bl = +(e.baseline != null ? e.baseline : (top + bottom) / 2);
