@@ -191,7 +191,7 @@ export const SaveServiceMethods = {
       // one run per line at `size`. Replace edits are always a single line. Text is sanitised for
       // the standard font (pdf-lib can only encode WinAnsi).
       const lineModel = ehasRuns
-        ? edit.runs.map(line => line.map(r => ({ text: this.sanitizeForStandardFont(r.text), size: r.size || size, bold: !!r.bold, italic: !!r.italic })))
+        ? edit.runs.map(line => line.map(r => ({ text: this.sanitizeForStandardFont(r.text), size: r.size || size, bold: !!r.bold, italic: !!r.italic, raise: +(r.raise) || 0 })))
         : ((edit.redact === false)
           ? (edit.newText || '').split(/\r\n?|\n/).map(l => [{ text: this.sanitizeForStandardFont(l), size }])
           : [[{ text: this.sanitizeForStandardFont((edit.newText || '').replace(/[\r\n]+/g, ' ')), size }]]);
@@ -226,7 +226,7 @@ export const SaveServiceMethods = {
         for (const parts of lineModel) w = Math.max(w, lineWidth(parts));
         if (w > avail) {
           const scale = Math.max(0.05, avail / w);
-          lineModel.forEach(parts => parts.forEach(r => { r.size = Math.max(4, r.size * scale); }));
+          lineModel.forEach(parts => parts.forEach(r => { r.size = Math.max(4, r.size * scale); if (r.raise) r.raise *= scale; }));
         }
       }
       // Added text can be rotated to any angle about its origin (x, baseline). pdf-lib rotates
@@ -249,7 +249,9 @@ export const SaveServiceMethods = {
         parts.forEach(r => {
           if (!r.text) return;
           const rf = fontFor(r);
-          const opts = { x: lx + adv * Math.cos(rad), y: ly - adv * Math.sin(rad), size: r.size, font: rf, color: black };
+          // A SUPERSCRIPT run rides its own baseline raise (pts, up = along the rotated up-vector).
+          const raise = r.raise || 0;
+          const opts = { x: lx + adv * Math.cos(rad) + raise * Math.sin(rad), y: ly - adv * Math.sin(rad) + raise * Math.cos(rad), size: r.size, font: rf, color: black };
           if (rot) opts.rotate = degrees(-rot);
           try { page.drawText(r.text, opts); }
           catch (e) { page.drawText(r.text.replace(/[^\x20-\x7E]/g, '?'), opts); }

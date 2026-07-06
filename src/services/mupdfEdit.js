@@ -13,7 +13,7 @@
 // engine-pure and testable in Node — the worker supplies a fetch-based loader (see mupdfFonts.js).
 import { analyzePage, detectSpan, detectAlign } from './mupdfSpans.js';
 import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName, latexProfile, standardFamily } from './mupdfFontEngine.js';
-import { bundledCandidates, stemForName } from './mupdfFonts.js';
+import { bundledCandidates, stemForName, classForName } from './mupdfFonts.js';
 
 /** Normalise editable-box quirks (nbsp, zero-width, soft-hyphen, control chars) without dropping real
  *  Unicode — every font is embedded full-Unicode (Type0), so curly quotes / em-dash / accents / ₹ all
@@ -504,6 +504,16 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         continue;
       }
       if (e.redact === false) continue;
+      // An OCR line's original "text" is ink inside the SCAN IMAGE — redaction removes no image ink,
+      // so an edited / deleted / moved OCR line must COVER the printed original with the line's
+      // sampled background first (else the replacement overlaps the old glyphs on the scan). Uses the
+      // ORIGINAL rect (e.x/top/bottom/right) — a moved line draws at +dx/dy and its source is cleared.
+      if (e.ocr) {
+        const ox = +(e.x || 0), otop = +(e.top || 0), obot = +(e.bottom || 0), orr = +(e.right || ox);
+        const obg = Array.isArray(e.bgColor) && e.bgColor.length >= 3
+          ? [e.bgColor[0] / 255, e.bgColor[1] / 255, e.bgColor[2] / 255] : [1, 1, 1];
+        ops.op(`q ${f2(obg[0])} ${f2(obg[1])} ${f2(obg[2])} rg ${f2(ox - 2)} ${f2(ph - obot - 1)} ${f2((orr - ox) + 4)} ${f2((obot - otop) + 2)} re f Q\n`);
+      }
       const hasUl = !!e.underline || (e.runs || []).some(ln => (ln || []).some(r => r && r.underline));
       if (!hasUl && !e.coverUnderline) continue;
       const ex = +(e.x || 0), er = +(e.right || ex), eb = +(e.baseline || 0), ebot = +(e.bottom || eb);
@@ -536,7 +546,12 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         // If the original embedded font is a family we ship (e.g. Carlito/Caladea), substitute the SAME
         // bundled face when we can't reuse it — visually identical, not a generic Arimo/Tinos.
         const stem = (!isInsert && sp && sp.fontName) ? stemForName(sp.fontName) : null;
-        const family = sp ? sp.family : (e.serif ? 'serif' : 'sans');
+        // Prefer the family implied by the original font's NAME (Geneva->sans, Times->serif) over mupdf's
+        // glyph-shape guess in sp.family, which misreads a broken-cmap subset — the cause of a SANS line
+        // (Geneva) saving in SERIF Tinos and looking smaller than its unedited neighbours. Matches the
+        // editor's display-font resolution; a name we don't recognise keeps the detected family.
+        const nameFam = (!isInsert && sp && sp.fontName) ? classForName(sp.fontName) : null;
+        const family = nameFam || (sp ? sp.family : (e.serif ? 'serif' : 'sans'));
         bundleSpec = lp ? { latex: lp } : stem ? { stem, family } : { family };
       }
       // Size: keep the original's exact size by default (the frontend's geometric guess runs big); an
@@ -574,6 +589,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       const lineModel = hasRuns
         ? e.runs.map(ln => (ln || []).map(r => ({
             text: prep(r.text), size: r.size || boxSize,
+            raise: +(r.raise) || 0,                       // superscript baseline raise (pts, up)
             bold: !!r.bold, italic: !!r.italic, underline: !!r.underline || boxUnderline,
             link: (typeof r.link === 'string' && r.link) ? r.link : null,
             fontFamily: (typeof r.fontFamily === 'string' && r.fontFamily) ? r.fontFamily : null,   // partial font change
@@ -628,15 +644,32 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         r._opts = opts;
       }
 
-      // Per-line widths (used for overflow scaling AND alignment re-anchoring).
-      const lineWidth = (parts) => parts.reduce((w, r) => w + measureRun(r.text, r._opts, r.size), 0);
+      // METRIC MATCH — an UNREUSABLE original font (broken-cmap subset like this doc's Geneva) falls to
+      // a bundled substitute whose advances can differ (Arimo runs ~8% narrower than Geneva), so the
+      // SAME 10pt replacement ends visibly short of the original right edge and reads as "the edited
+      // line shrank". Do what Acrobat's metric-matched substitutes do: horizontally scale the text (Tz)
+      // by originalSpanWidth / substituteWidth(SAME original text) — a pure font-metric ratio,
+      // independent of what the user typed. Gated: replace only, no explicit toolbar family, reuse
+      // unavailable; ~1 ratios (Base-14 re-emits, LaTeX twins) fall in the dead-zone and emit nothing.
+      let tz = 1;
+      if (!isInsert && sp && sp.text && sp.width > 10 && !reused && e.fontFamily == null) {
+        const probeRun = lineModel.flat().find(r => r.text && r._opts);
+        const probe = prep(sp.text);
+        if (probeRun && probe.trim()) {
+          const natural = measureRun(probe, probeRun._opts, sp.size || boxSize);
+          if (natural > 10) tz = Math.min(1.25, Math.max(0.9, sp.width / natural));
+          if (Math.abs(tz - 1) < 0.02) tz = 1;
+        }
+      }
+      // Per-line widths (used for overflow scaling AND alignment re-anchoring) — in DRAWN (Tz-scaled) units.
+      const lineWidth = (parts) => parts.reduce((w, r) => w + measureRun(r.text, r._opts, r.size), 0) * tz;
       let widths = lineModel.map(lineWidth);
       let widest = Math.max(0, ...widths);
       // Overflow: if the widest line exceeds the space to the right margin, scale every run down.
       const availW = pw - x - 4;
       if (availW > 8 && widest > availW) {
         const s = Math.max(0.05, availW / widest);
-        for (const parts of lineModel) for (const r of parts) r.size = Math.max(4, r.size * s);
+        for (const parts of lineModel) for (const r of parts) { r.size = Math.max(4, r.size * s); if (r.raise) r.raise *= s; }
         widths = lineModel.map(lineWidth);
         widest = Math.max(0, ...widths);
       }
@@ -677,14 +710,19 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
             // (adv·cos, adv·sin) in PDF (y-up) space, so in this TOP-origin (y-down) space the run's y
             // moves by -adv·sin. Using +adv·sin scattered the runs ~2·adv·sin apart — a partial-styled
             // ROTATED line (multiple Tj runs) broke into separated words; a single Tj was unaffected.
-            const px = lx + adv * cos, pyTop = lyTop - adv * sin;
+            // A SUPERSCRIPT run additionally rises along the rotated up-vector (top-origin: up = -y).
+            const raise = r.raise || 0;
+            const px = lx + adv * cos + (rot ? raise * Math.sin(rad) : 0);
+            const pyTop = lyTop - adv * sin - (rot ? raise * Math.cos(rad) : raise);
             const py = ph - pyTop;
             const egs = boxOpacity < 1 ? egsFor(boxOpacity) : null;
-            ops.op('q ' + (egs ? '/' + egs.name + ' gs ' : '') + 'BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf ' + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
+            ops.op('q ' + (egs ? '/' + egs.name + ' gs ' : '') + 'BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf '
+              + (tz !== 1 ? f2(tz * 100) + ' Tz ' : '')     // metric-match horizontal scale (see above)
+              + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
             ops.op(rot ? `${f2(cos)} ${f2(sin)} ${f2(-sin)} ${f2(cos)} ${f2(px)} ${f2(py)} Tm ` : `1 0 0 1 ${f2(px)} ${f2(py)} Tm `);
             if (seg.opt.winAnsi) ops.textString(seg.bytes); else ops.glyphString(seg.hex);
             ops.op(' Tj ET Q\n');
-            const w = measureSeg(seg, r.size);
+            const w = measureSeg(seg, r.size) * tz;   // drawn width (Tz-scaled) — advance/underline/link agree
             if (r.underline && !rot) {
               // Stroke a LINE just below the baseline (matches the backend's draw_line: width size*0.055,
               // offset size*0.12) so it's a "line" drawing item, not a filled rect.

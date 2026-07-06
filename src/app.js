@@ -34,6 +34,7 @@ import { TextSanitizeMethods } from './core/textSanitize.js';
 import { PageOpsMethods } from './features/pageOps.js';
 import { MoveLinesMethods } from './features/moveLines.js';
 import { CheckmarkMethods } from './features/checkmark.js';
+import { OcrMethods } from './ocr/ocrService.js';
 import { editLimitMb } from './core/limits.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
@@ -517,7 +518,7 @@ class PDFEditorApp {
 }
 
 
-Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods, MoveLinesMethods, WatermarkMethods, CheckmarkMethods);
+Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods, MoveLinesMethods, WatermarkMethods, CheckmarkMethods, OcrMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {

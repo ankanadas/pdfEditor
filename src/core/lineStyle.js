@@ -146,16 +146,33 @@ export const LineStyleMethods = {
     const append = (text, st) => {
       const last = runs[runs.length - 1];
       if (!st && last) { last.text += text; }        // a blank item joins the current run
-      // Split a new run when ANY of weight/slant/underline, the PDF.js face, OR the ink COLOUR changes —
-      // so a reopened line keeps its per-word font AND colour (a partial edit), not one flattened style.
+      // Split a new run when ANY of weight/slant/underline, the PDF.js face, the ink COLOUR, OR the
+      // superscript flag changes — so a reopened line keeps its per-word font AND colour (a partial
+      // edit) and a raised ordinal ("Jan 19th") keeps its own small, raised run.
       else if (last && last.bold === st.b && last.italic === st.i && last.underline === st.u &&
+               !!last.sup === !!st.sup &&
                (last.font || null) === (st.f || null) && colEq(last.color, st.col)) { last.text += text; if (!last.font && st.f) last.font = st.f; }
       // Carry each run's OWN PDF.js font face (e.g. the line's Calibri-Bold for the bold run, Calibri for
       // the regular run) so the editor paints each run with its real weight — NOT one baked face for the
       // whole box (which made the regular runs look bold) NOR a single faux-bold clone (too light for the
       // bold runs). See _lineRunSpanHTML.
-      else runs.push({ text, bold: st ? st.b : false, italic: st ? st.i : false, underline: st ? st.u : false, font: st ? st.f : null, color: st ? st.col || null : null });
+      else runs.push({ text, bold: st ? st.b : false, italic: st ? st.i : false, underline: st ? st.u : false, font: st ? st.f : null, color: st ? st.col || null : null,
+        sup: st ? !!st.sup : false, supRatio: (st && st.supRatio) || null, supRaise: (st && st.supRaise) || null });
       if (text) endsSpace = /\s$/.test(text);
+    };
+    // SUPERSCRIPT run: an item noticeably SMALLER than the line whose baseline sits ABOVE the line's
+    // (an ordinal "th"/"st", a footnote/exponent marker). Carried per run (ratio of the line's font
+    // size + raise as a ratio) so display, edit round-trip, and BOTH save tiers can reproduce the
+    // raised small glyphs instead of flattening them to inline size. Uniform lines: never true.
+    const lineH = line.fontSizePx || line.height || 0;
+    const supOf = (it) => {
+      if (!lineH) return null;
+      const raise = (line.baseline || 0) - (it.baseline || 0);
+      if (raise > lineH * 0.12 && (it.height || 0) < lineH * 0.85) {
+        return { supRatio: +(Math.max(0.3, Math.min(0.9, it.height / lineH))).toFixed(3),
+                 supRaise: +(Math.max(0.05, Math.min(0.8, raise / lineH))).toFixed(3) };
+      }
+      return null;
     };
     for (const it of items) {
       const t = it.text || '';
@@ -167,12 +184,14 @@ export const LineStyleMethods = {
           (it.left - prevRight) > (it.height || 0) * 0.18) {
         runs[runs.length - 1].text += ' '; endsSpace = true;
       }
-      append(t, { b: !!it.bold, i: !!it.italic, u: !!it.underline, f: it.fontName, col: it.color || null });
+      const sup = supOf(it);
+      append(t, { b: !!it.bold, i: !!it.italic, u: !!it.underline, f: it.fontName, col: it.color || null,
+        sup: !!sup, supRatio: sup && sup.supRatio, supRaise: sup && sup.supRaise });
       prevRight = it.right;
     }
     // Need ≥2 distinct styles to be worth a per-run model (weight/slant/underline, face, OR colour).
     const ckey = (c) => c ? `${c[0] >> 3},${c[1] >> 3},${c[2] >> 3}` : '';   // quantise to ignore AA noise
-    const distinct = new Set(runs.map(r => `${r.bold}|${r.italic}|${r.underline}|${r.font || ''}|${ckey(r.color)}`));
+    const distinct = new Set(runs.map(r => `${r.bold}|${r.italic}|${r.underline}|${r.sup ? 's' : ''}|${r.font || ''}|${ckey(r.color)}`));
     if (runs.length < 2 || distinct.size < 2) return;
     this._dropUnregisteredRunFaces(runs);
     // Safety: the runs must reproduce the line's (normalised) text exactly, else fall back to the
@@ -196,7 +215,16 @@ export const LineStyleMethods = {
     else if (r.font) css.push(`font-family:'${r.font}', ${fb}`);
     if (r.color) css.push(`color:${rgbCss(r.color)}`);             // per-run colour (partial colour change)
     if (r.underline) css.push('text-decoration:underline');
+    // SUPERSCRIPT run: shrink to its ratio of the line size and raise the baseline (vertical-align is
+    // relative to the span's OWN font size, so raise/ratio). Mirrors the PDF ("Jan 19ᵗʰ" keeps the
+    // small raised "th" in the editor instead of flattening to inline size).
+    if (r.sup) {
+      const ratio = r.supRatio || 0.65, raise = r.supRaise || 0.33;
+      css.push(`font-size:${Math.round(ratio * 100)}%`);
+      css.push(`vertical-align:${(raise / ratio).toFixed(3)}em`);
+    }
     const attrs = `data-bold="${r.bold ? 1 : 0}" data-italic="${r.italic ? 1 : 0}"${r.underline ? ' data-underline="1"' : ''}` +
+      `${r.sup ? ` data-sup="1" data-supratio="${r.supRatio || 0.65}" data-supraise="${r.supRaise || 0.33}"` : ''}` +
       `${r.family ? ` data-family="${esc(r.family)}"` : ''}${r.color ? ` data-color="${rgbToHex(r.color)}"` : ''}${r.link ? ` data-link="${esc(r.link)}"` : ''}`;
     const cls = r.link ? ' class="tt-has-link"' : '';
     return `<span${cls} ${attrs} style="${css.join(';')}">${esc(r.text)}</span>`;
@@ -211,12 +239,14 @@ export const LineStyleMethods = {
     if (!div || !div.querySelector('span[data-bold],span[data-italic],span[data-underline]')) return null;
     const runs = [];
     const same = (a, b) => a.bold === b.bold && a.italic === b.italic && a.underline === b.underline &&
+      !!a.sup === !!b.sup &&
       (a.family || null) === (b.family || null) && JSON.stringify(a.color || null) === JSON.stringify(b.color || null) && (a.link || null) === (b.link || null);
     const push = (text, st) => {
       if (!text) return;
       const last = runs[runs.length - 1];
       if (last && same(last, st)) { last.text += text; if (!last.font && st.font) last.font = st.font; }
-      else runs.push({ text, bold: st.bold, italic: st.italic, underline: st.underline, font: st.font || null, family: st.family || null, color: st.color || null, link: st.link || null });
+      else runs.push({ text, bold: st.bold, italic: st.italic, underline: st.underline, font: st.font || null, family: st.family || null, color: st.color || null, link: st.link || null,
+        sup: !!st.sup, supRatio: st.supRatio || null, supRaise: st.supRaise || null });
     };
     const walk = (node, inh) => {
       node.childNodes.forEach((child) => {
@@ -229,6 +259,12 @@ export const LineStyleMethods = {
         else if (child.style && child.style.fontStyle === 'italic') st.italic = true;
         if (child.hasAttribute && child.hasAttribute('data-underline')) st.underline = child.getAttribute('data-underline') === '1';
         else if (child.style && /underline/.test(child.style.textDecoration || '')) st.underline = true;
+        // Carry a SUPERSCRIPT run through an edit (its ratios ride along so the save reproduces it).
+        if (child.hasAttribute && child.hasAttribute('data-sup')) {
+          st.sup = child.getAttribute('data-sup') === '1';
+          st.supRatio = parseFloat(child.getAttribute('data-supratio')) || null;
+          st.supRaise = parseFloat(child.getAttribute('data-supraise')) || null;
+        }
         // Carry the run's OWN face (PDF.js loadedName) through an edit so each run keeps its real weight.
         const ff = child.style && child.style.fontFamily;
         if (ff) { const tok = ff.split(',')[0].replace(/["']/g, '').trim(); if (tok) st.font = tok; }
