@@ -18,11 +18,11 @@ export const TextEditingMethods = {
     // on a rotated render they land garbled/overlapping. Existing-text editing is therefore disabled
     // on rotated pages — Add text, Highlight, Sign, Stamp and Erase still work (they map clicks live).
     if (((pv.page && pv.page.rotate) || 0) % 360 !== 0) return;
-    // Skip ROTATED text runs (e.g. a rotated "Add text" baked into the PDF by a backend save, then
-    // re-extracted on the post-save reload). A horizontal edit box can't represent rotated text, and
-    // drawing one would paint a phantom second layer over the rotated rendering (the "two layers of
-    // add text" bug). Rotated text stays as its baked rendering; other lines remain editable.
-    const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === pv.pageNum && !item.rotated);
+    // Rotated text runs are now EDITABLE too: groupTextItemsByLine keeps each as its own single-run
+    // line (carrying its angle), and the box below mirrors that rotation with a CSS transform. So they
+    // are included here — the old `!item.rotated` skip (which left rotated text uneditable to avoid a
+    // phantom horizontal box) is gone; a rotated line just gets a rotated box.
+    const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === pv.pageNum);
     if (pageTextItems.length === 0) return;
 
     // EXACT per-char ink colours from the PDF itself (mupdf structured text, worker round-trip).
@@ -246,6 +246,15 @@ export const TextEditingMethods = {
       div.style.top = (topCss - 1 + mvY) + 'px';
       div.style.minWidth = Math.max(widthCss, 20) + 'px';   // width:auto -> grows with text
       div.style.height = (lineBoxPx + 2) + 'px';
+      // ROTATED line: overlay the rotated glyphs by pivoting on the baseline-left and rotating to the
+      // run's own angle (same convention as the search highlight + insert overlays). Position at the
+      // baseline (no half-leading offset), then transform-origin + rotate; the save re-emits the
+      // identical matrix from edit.rotation (see lineToEdit).
+      if (line.rotated && line.angle) {
+        div.style.top = (line.baseline * displayScale - ascent - 1 + mvY) + 'px';
+        div.style.transformOrigin = '0px ' + ascent + 'px';
+        div.style.transform = `rotate(${line.angle * 180 / Math.PI}deg)`;
+      }
       div.style.fontSize = fontSizePx + 'px';
       div.style.lineHeight = lineBoxPx + 'px';
       // Live font match: reuse the PDF's OWN embedded font. While rendering this page PDF.js
@@ -500,6 +509,9 @@ export const TextEditingMethods = {
       fontSize: line.fontSizePx / s,
       bold: !!line.bold,
       italic: !!line.italic,
+      // ROTATED existing text: the run's angle (degrees, CSS-clockwise) so the save re-emits the same
+      // text-matrix rotation the original had. Both save engines already draw rotated text from this.
+      ...(line.rotated && line.angle ? { rotation: line.angle * 180 / Math.PI } : {}),
       // The user EXPLICITLY toggled bold/italic in the toolbar → honour it verbatim on save (so a
       // bold/italic line can be turned OFF); without this the engine's missed-bold recovery re-adds it.
       ...(line.boldSet ? { boldSet: true } : {}),
@@ -573,6 +585,10 @@ export const TextEditingMethods = {
         top: item.top, bottom: item.bottom, height: item.height,
         fontSizePx: item.fontSizePx, fontName: item.fontName,
         fontFamilyName: item.fontFamilyName,
+        // ROTATED text carries its own angle (radians, canvas space) so the editable box can mirror the
+        // rotation and the save re-emits the same transform matrix. Each rotated run is its OWN line
+        // (rotatedBreak below), never merged with horizontal body text — that keeps body lines clean.
+        angle: item.angle || 0, rotated: !!item.rotated,
         pageIndex: item.pageIndex, items: [item],
       };
       lines.push(currentLine);
@@ -606,7 +622,10 @@ export const TextEditingMethods = {
         (currentLine.right - item.left) > Math.min(item.height, currentLine.height) * 0.6 &&
         item.left > currentLine.left + 1;
 
-      if (!sameRow || columnBreak || bulletBreak || overlayBreak) {
+      // A ROTATED run never merges with anything: each rotated item is its own single-run line (kept
+      // separate from horizontal text and from other rotated runs, whose baselines march diagonally).
+      const rotatedBreak = !!item.rotated || !!(currentLine && currentLine.rotated);
+      if (!sameRow || columnBreak || bulletBreak || overlayBreak || rotatedBreak) {
         if (isSpace) return;            // never start a segment on a stray space
         startSegment(item);
         return;

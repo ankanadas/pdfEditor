@@ -991,6 +991,31 @@
       transform: scale(.97); opacity: 0; transition: transform .18s ease, opacity .18s ease;
     }
     .merge-backdrop.open .merge-drawer { transform: none; opacity: 1; }
+
+    /* Split PDF — the box itself reuses .merge-backdrop/.merge-drawer; these style the split-only bits. */
+    .split-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+    .split-range-label { font-weight: 600; font-size: 13px; color: var(--ink, #1c1e2e); }
+    .split-range { flex: 1 1 220px; min-width: 150px; padding: 9px 12px; border: 1px solid var(--line, #e3e3ef);
+      border-radius: 9px; font-size: 15px; font-family: inherit; color: var(--ink, #1c1e2e); }
+    .split-range:focus { outline: none; border-color: var(--brand, #6d5efc); box-shadow: 0 0 0 3px rgba(109,94,252,.15); }
+    .split-quick-btn { border: 1px solid var(--line, #e3e3ef); background: #fff; border-radius: 8px; padding: 7px 12px;
+      font-size: 13px; cursor: pointer; color: var(--ink, #1c1e2e); }
+    .split-quick-btn:hover { border-color: var(--brand, #6d5efc); color: var(--brand, #6d5efc); }
+    .split-status { min-height: 18px; margin: 2px 0 8px; }
+    .split-status.ok { color: #1a7f37; } .split-status.err { color: #c1121f; } .split-status.info { color: var(--brand, #6d5efc); }
+    .split-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 12px;
+      overflow: auto; align-content: start; padding: 4px; flex: 1 1 auto; min-height: 0; }
+    .split-thumb { position: relative; border: 2px solid var(--line, #e3e3ef); border-radius: 10px; background: #fff;
+      padding: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; min-height: 118px; }
+    .split-thumb:hover { border-color: #b9b2f7; }
+    .split-thumb.selected { border-color: var(--brand, #6d5efc); box-shadow: 0 0 0 2px rgba(109,94,252,.25); background: #f3f1ff; }
+    .split-thumb-canvas { max-width: 100%; max-height: 190px; height: auto; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+    .split-thumb-num { position: absolute; left: 6px; bottom: 6px; background: rgba(20,22,40,.72); color: #fff;
+      font-size: 11px; padding: 1px 6px; border-radius: 6px; }
+    .split-thumb-check { position: absolute; right: 6px; top: 6px; width: 20px; height: 20px; border-radius: 50%;
+      background: var(--brand, #6d5efc); color: #fff; font-size: 13px; line-height: 20px; text-align: center; display: none; }
+    .split-thumb.selected .split-thumb-check { display: block; }
+    .split-tool .tool-ico { width: 24px; height: 24px; color: var(--brand, #6d5efc); }
     .merge-head {
       display: flex; align-items: center; gap: 10px; padding: 16px 20px;
       border-bottom: 1px solid var(--line); flex: 0 0 auto;
@@ -1539,6 +1564,10 @@
         <img class="tool-ico" src="/assets/fun-ui/merge.png" alt="" aria-hidden="true">
         Merge
       </button>
+      <button class="tool split-tool" id="splitBtn" disabled title="Split PDF: extract a page range into a new PDF, or split into single pages">
+        <svg class="tool-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg>
+        Split
+      </button>
     </aside>
     </div><!-- /tool-dock -->
 
@@ -2067,6 +2096,57 @@
             <button class="btn" id="mergeConfirmStay" type="button">Back to merge</button>
             <button class="btn merge-confirm-close" id="mergeConfirmClose" type="button">Close anyway</button>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Split PDF: centred modal, fully client-side (built by split.js). Reuses the merge-* box styling. -->
+  <div id="splitBackdrop" class="merge-backdrop">
+    <div class="merge-drawer" id="splitDrawer" role="dialog" aria-modal="true" aria-label="Split PDF">
+      <div class="merge-head">
+        <span class="merge-heading">
+          <span class="merge-title">Split PDF</span>
+          <span class="merge-subtitle">Extract a page range into a new PDF, or split into single pages — on your device, never uploaded</span>
+        </span>
+        <span class="spacer"></span>
+        <button class="icon-btn" id="splitClose" title="Close" aria-label="Close split">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+
+      <div class="merge-body">
+        <div class="merge-warn" id="splitWarn" role="status" hidden></div>
+        <div class="split-controls">
+          <label class="split-range-label" for="splitRange">Pages to extract</label>
+          <input id="splitRange" class="split-range" type="text" inputmode="text" autocomplete="off" spellcheck="false"
+                 placeholder="e.g. 1-3, 7, 9-10" aria-label="Page range to extract" />
+          <span class="spacer"></span>
+          <button class="split-quick-btn" id="splitSelectAll" type="button">Select all</button>
+          <button class="split-quick-btn" id="splitClear" type="button">Clear</button>
+        </div>
+        <p class="merge-status split-status" id="splitStatus" role="status" aria-live="polite"></p>
+        <div class="split-grid" id="splitGrid" aria-label="Pages — click to select (Shift = range, Cmd/Ctrl = toggle)"></div>
+      </div>
+
+      <div class="merge-foot">
+        <div class="merge-foot-row">
+          <span class="merge-count" id="splitCount">Pick a range</span>
+        </div>
+        <div class="merge-progress" id="splitProgress" hidden aria-hidden="true">
+          <div class="merge-progress-bar" id="splitProgressBar"></div>
+        </div>
+        <div class="merge-actions">
+          <button class="btn confirm-danger" id="splitCancel" type="button">Cancel</button>
+          <span class="spacer"></span>
+          <button class="btn" id="splitExtractAll" type="button" title="Split every page into its own PDF, downloaded as a ZIP">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+            Extract all pages (ZIP)
+          </button>
+          <button class="btn primary" id="splitGo" type="button" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+            Split &amp; download
+          </button>
         </div>
       </div>
     </div>

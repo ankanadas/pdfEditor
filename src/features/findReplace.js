@@ -224,12 +224,13 @@ export const FindReplaceMethods = {
    *  keep this exact DOM scan. */
   _findEntries() {
     const base = this.lazyEditMode ? this._findVirtualEntries() : this._findBoxEntries();
-    // Added-text overlays (the Add tool's inserts) AND rotated text (diagonal watermarks, and any
-    // added text that was rotated then saved & reopened — now rotated PDF content) are searchable
-    // too, in BOTH modes. Appended OUTSIDE the cached virtual index so a replace that only rewrites
-    // an insert's text is reflected on the very next scan (concat returns a fresh array — the cache
-    // is never mutated).
-    return base.concat(this._findAddedEntries(), this._findRotatedEntries());
+    // Added-text overlays (the Add tool's inserts) are searchable/replaceable too, in BOTH modes.
+    // Appended OUTSIDE the cached virtual index so a replace that only rewrites an insert's text is
+    // reflected on the very next scan (concat returns a fresh array — the cache is never mutated).
+    // NOTE: rotated PDF text is NO LONGER a separate entry here — it's now a first-class editable
+    // rotated LINE (see groupTextItemsByLine rotatedBreak + createEditableTextBoxes), so it flows
+    // through base (box/virtual) entries and is fully replaceable, not just highlightable.
+    return base.concat(this._findAddedEntries());
   },
   /** Eager path: every painted per-line editable box, with its committed text and page. */
   _findBoxEntries() {
@@ -256,23 +257,6 @@ export const FindReplaceMethods = {
       const text = e.newText;
       if (!text || !text.trim()) continue;
       out.push({ el: this._overlayElFor(e), text, pageIndex: e.pageIndex, addEdit: e });
-    }
-    return out;
-  },
-  /** Rotated text runs (diagonal watermarks; and any added text that was rotated, saved, then reopened
-   *  as rotated PDF content) as searchable entries. Each pdf.js item already carries its FULL string,
-   *  so one item = one entry — they are deliberately NOT merged into the horizontal body lines (that
-   *  merge is exactly what scrambled body-line offsets, so the virtual index / editable boxes still
-   *  exclude rotated items). There is no editable box for rotated text, so a rotated match highlights
-   *  from the item's own geometry (see _findGotoRotated) and is not offered for replace. This is what
-   *  makes "add rotated text → save → reopen → search still finds it" work — the reported iPad bug. */
-  _findRotatedEntries() {
-    const out = [];
-    for (const it of (this.extractedTextItems || [])) {
-      if (!it || !it.rotated) continue;
-      const text = it.text;
-      if (!text || !text.trim()) continue;
-      out.push({ el: null, text, pageIndex: it.pageIndex, rotItem: it });
     }
     return out;
   },
@@ -327,13 +311,10 @@ export const FindReplaceMethods = {
     if (this._veCache && this._veSig === sig && this._veDoc === this.originalFileData) return this._veCache;
     const byPage = new Map();
     for (const it of items) {
-      // Skip ROTATED glyphs (diagonal watermarks like "OceanofPDF.com", stamps). The editable line
-      // boxes are built from the same items with `!item.rotated` (see createEditableTextBoxes), so
-      // including them HERE scrambled the index: where a slanted watermark's baseline crosses a body
-      // line, its glyphs merged into that line's text — a match found on the scrambled index then
-      // highlighted/replaced the CLEAN box at a drifted offset (searching "JOIN" removed "J"/"JO"/…
-      // inconsistently per page as the diagonal crossed different lines). Keep the index == the boxes.
-      if (it.rotated) continue;
+      // Rotated glyphs are KEPT now (they're editable rotated lines): groupTextItemsByLine gives each
+      // rotated run its own single-run line (rotatedBreak), so they never merge into — or scramble —
+      // the horizontal body lines, and stay searchable/replaceable like any other line. (This used to
+      // skip rotated items to avoid the watermark-scramble; the separate-line grouping now prevents it.)
       let a = byPage.get(it.pageIndex);
       if (!a) byPage.set(it.pageIndex, a = []);
       a.push(it);
@@ -453,8 +434,8 @@ export const FindReplaceMethods = {
       // NOR a `line` — they use the edit's own baseline/x. WITHOUT this guard `m.line.top` threw on
       // an unpainted added match, silently crashing the whole search (the "added-text search does
       // nothing on iPad/lazy" bug — an added insert on an off-screen page has el=null AND line=undefined).
-      const top = (m) => (m.el ? m.el.offsetTop : (m.line ? m.line.top : (m.rotItem ? m.rotItem.top : (m.addEdit ? m.addEdit.baseline : 0))));
-      const left = (m) => (m.el ? m.el.offsetLeft : (m.line ? m.line.left : (m.rotItem ? m.rotItem.left : (m.addEdit ? m.addEdit.x : 0))));
+      const top = (m) => (m.el ? m.el.offsetTop : (m.line ? m.line.top : (m.addEdit ? m.addEdit.baseline : 0)));
+      const left = (m) => (m.el ? m.el.offsetLeft : (m.line ? m.line.left : (m.addEdit ? m.addEdit.x : 0)));
       f.matches.sort((a, b) => a.pageIndex - b.pageIndex || top(a) - top(b)
         || left(a) - left(b) || a.start - b.start);
       // Lazy docs: make sure the background index is building; the rescan below converges the
@@ -605,9 +586,6 @@ export const FindReplaceMethods = {
     if (!m) return;
     f.idx = i;
     this._findCount();
-    // Rotated text (watermark / reopened rotated add-text) has no editable box — highlight it from
-    // its own geometry instead of a DOM range.
-    if (m.rotItem) return this._findGotoRotated(m, i, scroll);
     if (!m.el || !m.el.isConnected) {
       if (!scroll) {   // rescan: don't hydrate/scroll an off-screen match, just sync the list/toolbar
         (f.cards || []).forEach((c, ci) => c.classList.toggle('active', ci === i));
@@ -644,46 +622,6 @@ export const FindReplaceMethods = {
     (f.cards || []).forEach((c, ci) => c.classList.toggle('active', ci === i));
     if (scroll && f.cards && f.cards[i]) f.cards[i].scrollIntoView({ block: 'nearest' });
     this._findToolbarOn(m);
-  },
-
-  /** Highlight a ROTATED match (watermark / reopened rotated add-text). No editable box exists, so the
-   *  highlight is positioned + rotated from the text item's OWN geometry (canvas px → CSS px via the
-   *  canvas display scale), pivoting on the baseline-left exactly like a rotated insert overlay. On a
-   *  lazy doc the page is painted first so the canvas has its display size. Rotated text isn't offered
-   *  for replace (there is no horizontal box to redraw through), so the docked style toolbar stays off. */
-  async _findGotoRotated(m, i, scroll) {
-    const f = this._find;
-    const pv = (this.pageViews || [])[m.pageIndex];
-    if (!pv || !pv.wrapper) return;
-    if (scroll) pv.wrapper.scrollIntoView({ block: 'center' });
-    if (this.lazyEditMode && this._lePaint && !pv._lePainted) {
-      this._lePaint(pv);
-      for (let t = 0; t < 20 && !pv._lePainted; t++) await new Promise((r) => setTimeout(r, 100));
-    }
-    const it = m.rotItem;
-    const ds = (pv.canvas.clientWidth || pv.canvas.width) / (pv.canvas.width || 1);
-    const h = Math.max(6, (it.height || 12) * ds);
-    const ascent = h * 0.8;
-    const w = Math.max(6, ((it.width != null ? it.width : (it.right - it.left)) || h) * ds);
-    const deg = (it.angle || 0) * 180 / Math.PI;
-    let hl = f.hl;
-    if (!hl || !hl.isConnected || hl.parentElement !== pv.wrapper) {
-      hl?.remove();
-      hl = document.createElement('div');
-      hl.className = 'find-hl';
-      pv.wrapper.appendChild(hl);
-      f.hl = hl;
-    }
-    hl.style.left = (it.left * ds) + 'px';
-    hl.style.top = (it.baseline * ds - ascent) + 'px';
-    hl.style.width = w + 'px';
-    hl.style.height = h + 'px';
-    hl.style.transformOrigin = '0px ' + ascent + 'px';   // pivot on the baseline-left (like insert rotation)
-    hl.style.transform = `rotate(${deg}deg)`;
-    if (scroll) hl.scrollIntoView({ block: 'center' });
-    (f.cards || []).forEach((c, ci) => c.classList.toggle('active', ci === i));
-    if (scroll && f.cards && f.cards[i]) f.cards[i].scrollIntoView({ block: 'nearest' });
-    this._findToolbarOff();                          // no editable box → no docked style toolbar
   },
 
   /** Focus the current match's box and select the matched range — the text toolbar shows via the
@@ -820,9 +758,6 @@ export const FindReplaceMethods = {
     if (!m) return;
     // Added-text insert: data replace (no editable box / execCommand path).
     if (m.addEdit) return this._findReplaceAddedCurrent(m);
-    // Rotated text (watermark / reopened rotated add-text): searchable/highlightable, but there is no
-    // horizontal box to redraw through, so it can't be replaced. Say so instead of silently no-op-ing.
-    if (m.rotItem) { if (this.showStatus) this.showStatus('Rotated text can be found but not replaced.', 'info'); return; }
     if (m.el && !m.el.isConnected) {
       // Stale text layer (a mode round-trip or re-render rebuilt the boxes): rescan and CONTINUE
       // with the fresh match — returning here made the first Replace click a silent no-op.

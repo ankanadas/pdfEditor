@@ -1,5 +1,6 @@
 import { EditorController } from './core/EditorController.js';
 import { initMerge } from './merge.js';
+import { initSplit } from './split.js';
 import { PDFDocument, StandardFonts, rgb, degrees, BlendMode } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { AnnotationManager } from './annotationManager.js';
@@ -503,6 +504,7 @@ Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMe
 document.addEventListener('DOMContentLoaded', () => {
   window.pdfEditorApp = new PDFEditorApp();   // exposed so Merge can clear the open doc
   initMerge();   // wire up the client-side "Merge PDF" feature (self-contained)
+  initSplit();   // wire up the client-side "Split PDF" feature (self-contained)
   // Register the offline service worker (caches the app shell + mupdf .wasm + edit-fonts) so editing works
   // offline across sessions. Best-effort — a failure here must never block the app.
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
