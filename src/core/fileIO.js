@@ -10,7 +10,7 @@ import {
 // View-only controls stay enabled even for large (non-editable) files; edit controls are gated.
 const VIEW_CONTROLS = ['prevPageBtn', 'nextPageBtn', 'pagesPanelBtn', 'splitBtn', 'watermarkBtn'];
 const EDIT_CONTROLS = ['saveBtn', 'textInput', 'editModeBtn', 'textModeBtn',
-  'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'annotateModeBtn', 'searchToolBtn', 'clearSignatureBtn'];
+  'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'annotateModeBtn', 'checkModeBtn', 'searchToolBtn', 'clearSignatureBtn'];
 
 export const FileIOMethods = {
   /**
@@ -44,6 +44,8 @@ export const FileIOMethods = {
     if (fileInput) fileInput.value = '';
     const pageInfo = document.getElementById('pageInfo');
     if (pageInfo) pageInfo.textContent = 'No PDF loaded';
+    const pageNumInput = document.getElementById('pageNumInput');
+    if (pageNumInput) { pageNumInput.value = ''; pageNumInput.disabled = true; }
     const modeIndicator = document.getElementById('modeIndicator');
     if (modeIndicator) modeIndicator.textContent = 'No PDF loaded';
     this.annotationManager.unmountAll();
