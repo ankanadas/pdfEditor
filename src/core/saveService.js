@@ -17,58 +17,9 @@ export const SaveServiceMethods = {
       return;
     }
 
-    // Bake any rotations the user previewed in the Rotate/Reorder panel but hasn't committed yet
-    // (rotation is deferred for speed) into the bytes we're about to save.
-    if (this._pendingRot && Object.keys(this._pendingRot).length) {
-      const n = this.pdfJsDoc.numPages;
-      const order = [];
-      for (let i = 0; i < n; i++) order.push({ src: i, rot: this._pendingRot[i] || 0 });
-      try { this.originalFileData = await this.applyPageOrder(order); this._pendingRot = {}; }
-      catch (e) { console.warn('Could not bake pending rotation before save:', e); }
-    }
-
-    // Produce the edited bytes with a fallback chain, best fidelity first. Each step is
-    // guarded so a failure cleanly tries the next; a real "Failed to save" is shown only
-    // when every path fails and no file is produced.
-    //  1) PyMuPDF backend  - truly removes replaced text (clean for copy/paste & ATS).
-    //  2) mupdf-wasm (client) - same engine in the browser; redaction true-removal, no server. Only
-    //     runs when the backend is unavailable, and DECLINES (falls through) on edits it can't yet do
-    //     faithfully, so it never regresses the pdf-lib result.
-    //  3) pdf-lib (client) - covers the original and redraws (works offline / static host).
-    //  4) Flatten to image - last resort for PDFs pdf-lib can't traverse (odd page trees,
-    //     encryption, etc.). This is what handles "Pages tree contains circular reference".
-    let editedPdfBytes = null;
-    let flattened = false;
-
-    const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
-    // Redaction removes whole RUNS: an edited line whose band overlaps another run on the SAME row
-    // (a form fill-in over a blank) would silently delete that run from the save. Expand the edit
-    // list with preserve edits that re-add such runs verbatim (local copy — undo/history untouched).
-    const editsForSave = this._withEntangledPreserves
-      ? this._withEntangledPreserves(this.edits) : this.edits;
-    // The in-browser mupdf-wasm edit (no server, true text removal, embedded-font reuse).
-    const tryWasm = async () => {
-      if (editedPdfBytes || !MupdfService.isSupported()) return;
-      try { editedPdfBytes = await MupdfService.editPDF(this.originalFileData, editsForSave, fabricAnnotations); }
-      catch (e) { console.warn('WASM save unavailable/declined:', e); }
-    };
-    // WASM-only processing: every tier runs in the browser, nothing is uploaded. When WASM
-    // declines an edit set it can't do faithfully (or isn't supported), the local pdf-lib tier
-    // below takes over, then the flatten-to-image last resort.
-    await tryWasm();
-
-    if (!editedPdfBytes) {
-      try {
-        editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, editsForSave);
-      } catch (e) { console.warn('Client-side (vector) save failed, flattening instead:', e); }
-    }
-
-    if (!editedPdfBytes) {
-      try {
-        editedPdfBytes = await this.flattenToPdfBytes(editsForSave);
-        flattened = true;
-      } catch (e) { console.warn('Flatten save failed:', e); }
-    }
+    // Produce the fully-edited bytes (bakes previewed rotation + applies this.edits via the fidelity
+    // fallback chain). Shared with Split so both bake edits identically.
+    const { bytes: editedPdfBytes, flattened } = await this._produceEditedBytes();
 
     if (!editedPdfBytes) {
       this.showStatus('Failed to save. Please reload the page and try again.', 'error');
@@ -107,6 +58,54 @@ export const SaveServiceMethods = {
 
     // Keep the document loaded after saving so the user can continue editing. (Previously the
     // page reloaded ~1.6s after save, wiping the document back to the upload screen.)
+  },
+
+  /**
+   * Produce the fully-edited PDF bytes WITHOUT downloading — bakes previewed-but-uncommitted
+   * rotations, then applies this.edits through the same fidelity fallback chain savePDF uses
+   * (mupdf-wasm true-removal → pdf-lib cover+redraw → flatten-to-image). Returns
+   * { bytes: Uint8Array|null, flattened: boolean }. Shared by savePDF() and the Split feature so a
+   * split carries the user's edits (replaced/added text, font/style changes) exactly like a save.
+   */
+  async _produceEditedBytes() {
+    if (!this.originalFileData) return { bytes: null, flattened: false };
+
+    // Bake any rotations previewed in the Rotate/Reorder panel but not yet committed (deferred for
+    // speed) into originalFileData first, so they ride into whatever we produce below.
+    if (this._pendingRot && Object.keys(this._pendingRot).length) {
+      const n = this.pdfJsDoc.numPages;
+      const order = [];
+      for (let i = 0; i < n; i++) order.push({ src: i, rot: this._pendingRot[i] || 0 });
+      try { this.originalFileData = await this.applyPageOrder(order); this._pendingRot = {}; }
+      catch (e) { console.warn('Could not bake pending rotation before producing bytes:', e); }
+    }
+
+    let editedPdfBytes = null;
+    let flattened = false;
+    const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
+    // Redaction removes whole RUNS: an edited line whose band overlaps another run on the SAME row
+    // (a form fill-in over a blank) would silently delete that run. Expand with preserve edits that
+    // re-add such runs verbatim (local copy — undo/history untouched).
+    const editsForSave = this._withEntangledPreserves
+      ? this._withEntangledPreserves(this.edits) : this.edits;
+
+    // Tier 1: in-browser mupdf-wasm (true text removal, embedded-font reuse); DECLINES to the next
+    // tier on edits it can't do faithfully, so it never regresses the pdf-lib result.
+    if (MupdfService.isSupported()) {
+      try { editedPdfBytes = await MupdfService.editPDF(this.originalFileData, editsForSave, fabricAnnotations); }
+      catch (e) { console.warn('WASM save unavailable/declined:', e); }
+    }
+    // Tier 2: pdf-lib cover-and-redraw (offline / static host).
+    if (!editedPdfBytes) {
+      try { editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, editsForSave); }
+      catch (e) { console.warn('Client-side (vector) save failed, flattening instead:', e); }
+    }
+    // Tier 3: flatten-to-image last resort (odd page trees / protected PDFs pdf-lib can't traverse).
+    if (!editedPdfBytes) {
+      try { editedPdfBytes = await this.flattenToPdfBytes(editsForSave); flattened = true; }
+      catch (e) { console.warn('Flatten save failed:', e); }
+    }
+    return { bytes: editedPdfBytes, flattened };
   },
   /**
    * Apply all edits to the PDF in the browser using pdf-lib and return the new bytes.

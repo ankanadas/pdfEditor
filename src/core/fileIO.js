@@ -8,7 +8,7 @@ import {
 } from './limits.js';
 
 // View-only controls stay enabled even for large (non-editable) files; edit controls are gated.
-const VIEW_CONTROLS = ['prevPageBtn', 'nextPageBtn', 'pagesPanelBtn'];
+const VIEW_CONTROLS = ['prevPageBtn', 'nextPageBtn', 'pagesPanelBtn', 'splitBtn'];
 const EDIT_CONTROLS = ['saveBtn', 'textInput', 'editModeBtn', 'textModeBtn',
   'signatureModeBtn', 'eraseModeBtn', 'stampModeBtn', 'annotateModeBtn', 'searchToolBtn', 'clearSignatureBtn'];
 
