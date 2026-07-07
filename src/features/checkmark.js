@@ -13,7 +13,9 @@ export const CheckmarkMethods = {
   /** Wire the Check tool button + the mark picker. Called once from the constructor. */
   initCheckTool() {
     if (!this.activeMark) this.activeMark = 'check';
-    document.getElementById('checkModeBtn')?.addEventListener('click', () => this.setMode('check'));
+    // The Check tool button TOGGLES: click to select (enter check mode), click again to unselect
+    // (back to the default auto edit/add mode — the button loses its active highlight).
+    document.getElementById('checkModeBtn')?.addEventListener('click', () => this.setMode(this.mode === 'check' ? 'auto' : 'check'));
     document.querySelectorAll('#checkPicker .check-mark-opt').forEach((opt) => {
       opt.addEventListener('click', () => this.selectCheckMark(opt.dataset.mark));
     });
@@ -97,7 +99,7 @@ export const CheckmarkMethods = {
     if (ratio >= 1) { hPt = maxPt; wPt = maxPt / ratio; }
     else { wPt = maxPt; hPt = maxPt * ratio; }
     const pageWpt = pv.canvas.width / this.scale;
-    this.edits.push({
+    const edit = {
       pageIndex: pv.pageNum,
       redact: false,
       kind: 'image',
@@ -107,9 +109,14 @@ export const CheckmarkMethods = {
       top: Math.max(0, topPt - hPt / 2),
       width: wPt,
       height: hPt,
-    });
+    };
+    this.edits.push(edit);
     this.commitHistory();
-    this.refresh();
-    this.showStatus(`${MARK_GLYPH[kind]} placed — drag to move, resize with the corner, delete with ✕`, 'success');
+    // Focus the just-placed mark (shows its move/resize/delete handles), like a dropped signature. A
+    // subsequent click on blank canvas then DESELECTS it instead of dropping another mark (see the
+    // 'check' branch in handleCanvasClick) — so consecutive taps don't rain marks.
+    this.selectedInsert = edit;
+    this.refreshPageOverlays(pv);
+    this.showStatus(`${MARK_GLYPH[kind]} placed — drag to move / resize / ✕ to delete. Click elsewhere, then tap again for another.`, 'success');
   },
 };

@@ -162,7 +162,11 @@ export const ModeManagerMethods = {
       if (!this.activeStamp) { this.showStatus('Pick a stamp (Approved, Reject, …) first', 'error'); return; }
       this.placeStamp(xPt, clickYPt, pv);
     } else if (this.mode === 'check') {
-      this.placeMark(xPt, clickYPt, pv);      // drop the selected ✓ / ✗ / ☑ / ● at the tapped point
+      // Add-text-style rhythm: a just-placed mark is SELECTED (focused). A click while any mark is
+      // selected only DESELECTS it (out of focus) — it does NOT drop a second mark; the NEXT click
+      // (nothing selected) places another. So consecutive taps don't rain marks.
+      if (this.selectedInsert) { this.selectInsert(null); this.refresh(); return; }
+      this.placeMark(xPt, clickYPt, pv);      // nothing selected → drop the active ✓ / ✗ / ☑ / ● here
     }
     // Signatures are added via the Sign dialog (drawn/typed/image), not by clicking.
   },
