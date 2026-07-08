@@ -48,6 +48,7 @@ export function analyzePage(page) {
         bbox: ln.bbox,                            // {x,y,w,h} top-left
         size: +ln.font.size || 0,
         fontName: ln.font.name || '',             // for embedded-font reuse lookup
+        text,                                     // original text — metric-matching an unreusable font's substitute
         hasText: text.trim().length > 0,
         ...st,
       });
@@ -134,5 +135,8 @@ export function detectSpan(analysis, x, baseline) {
   // Use the walk size only when it's meaningfully LARGER than the JSON size (the truncation case); never
   // let a stray mis-matched char shrink a correctly-detected size.
   const size = (charSize > best.size + 0.2) ? charSize : best.size;
-  return { size, family: best.family, bold: best.bold, italic: best.italic, color, fontName: best.fontName };
+  return { size, family: best.family, bold: best.bold, italic: best.italic, color, fontName: best.fontName,
+    // Original text + drawn width, so a SUBSTITUTE font (unreusable original) can be horizontally
+    // scaled to occupy the same footprint the original font did (see mupdfEdit metric match).
+    text: best.text || '', width: (best.bbox && +best.bbox.w) || 0 };
 }

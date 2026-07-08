@@ -51,7 +51,7 @@ export function familyKeyFromFont(name) {
     ['consolas', 'consolas'], ['trebuchet', 'trebuchet'], ['tahoma', 'tahoma'], ['palatino', 'palatino'],
     ['comic neue', 'comicneue'], ['comicneue', 'comicneue'], ['comic', 'comicsans'],
     ['pacifico', 'pacifico'], ['brush script', 'brushscript'], ['brushscript', 'brushscript'],
-    ['arimo', 'arial'], ['arial', 'arial'], ['helvetica', 'helvetica'], ['verdana', 'verdana'],
+    ['arimo', 'arial'], ['arial', 'arial'], ['geneva', 'arial'], ['helvetica', 'helvetica'], ['verdana', 'verdana'],
     ['tinos', 'times'], ['times', 'times'], ['cousine', 'courier'], ['courier', 'courier'],
     ['gelasio', 'georgia'], ['georgia', 'georgia'], ['roboto', 'roboto'],
     ['open sans', 'opensans'], ['opensans', 'opensans'], ['montserrat', 'montserrat'],

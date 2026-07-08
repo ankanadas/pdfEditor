@@ -23,6 +23,10 @@ export const TextEditingMethods = {
     // are included here — the old `!item.rotated` skip (which left rotated text uneditable to avoid a
     // phantom horizontal box) is gone; a rotated line just gets a rotated box.
     const pageTextItems = this.extractedTextItems.filter(item => item.pageIndex === pv.pageNum);
+    // OCR (lazy): an image-only / scanned page has NO extractable text, so trigger background OCR for it
+    // HERE — BEFORE the empty-page early return below (that return is exactly why an end-of-function hook
+    // never fired for scans). Re-entrant-safe; a no-op unless the OCR module is loaded and the page is a scan.
+    if (this.ocrMaybePage) this.ocrMaybePage(pv);
     if (pageTextItems.length === 0) return;
 
     // EXACT per-char ink colours from the PDF itself (mupdf structured text, worker round-trip).
@@ -99,6 +103,9 @@ export const TextEditingMethods = {
     pv.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
     const cw = pv.canvas.width, ch = pv.canvas.height;
     lines.forEach((line) => {
+      // OCR overlay lines sit over a SCANNED image — there is no original text to hide, so never paint a
+      // cover strip (it would white out the scan). The transparent box still selects / searches / edits.
+      if (line.ocr) return;
       // ROTATED line: the horizontal strip below leaves a HALF-CUT original (it hides a horizontal band
       // while the glyphs run at an angle). Cover the exact rotated text box instead — translate to the
       // baseline-left anchor, rotate, fill the em box with the line's background (white by default). Save
@@ -189,11 +196,21 @@ export const TextEditingMethods = {
       const div = document.createElement('div');
       div.contentEditable = 'true';
       div.className = 'editable-text-box';
+      // OCR overlay: transparent text (the scan itself shows the glyphs) but a fully interactive box.
+      if (line.ocr) div.classList.add('ocr-text');
       // Back-reference for the Search panel: it builds the docked text-toolbar target for a found
       // match ({kind:'line', el, line}) without waiting for the box to be focused.
       div.__line = line;
       // If this line was already edited, show the edited text (so edits persist on re-render).
       const pending = this.findLineEdit(line);
+      // An EDITED OCR line shows its replacement VISIBLY on a solid cover — the display twin of the
+      // save-side cover (the original is ink in the scan image; transparent replacement text over it
+      // would read as both at once). Typing gets the same treatment via the .ocr-text:focus CSS.
+      if (line.ocr && pending) {
+        div.classList.add('ocr-edited');
+        const obg = line.bgColor;
+        div.style.background = obg ? `rgb(${obg[0]},${obg[1]},${obg[2]})` : '#fff';
+      }
       const shownText = pending ? pending.newText : line.text;
       div.dataset.originalText = shownText;
       div.textContent = shownText;
@@ -292,13 +309,24 @@ export const TextEditingMethods = {
       // is known, else a generic sans/serif stack, so each run's own weight/slant renders.
       const mixed = !!(line.styleRuns && line.styleRuns.length);
       const mixedKey = mixed ? this._displayFontKey(line.fontFamily, this._realFontName(line)) : '';
+      // An EMBEDDED subset font (line.fontName = a PDF.js loadedName like "g_d0_f4") sometimes ships a
+      // BROKEN Unicode->glyph cmap, so drawing the correct text through it garbles the glyphs (lowercase
+      // s->S, l->I, ff->"fu", stray accents) even though the underlying text is right — Chrome's viewer
+      // dodges this by drawing by glyph-id. When we can identify the font's REAL family (Times New Roman,
+      // Arial, Geneva...), render the box through the bundled metric-compatible substitute (pf-tinos /
+      // pf-arimo...) instead: correct glyphs, near-identical metrics, and it matches what the SAVE path
+      // already emits (more WYSIWYG, not less). Truly-custom embedded fonts (no known family) keep their
+      // own face. Non-embedded standard fonts already carry a real @font-face in line.fontCss (unchanged).
+      const realKey = mixed ? '' : this._displayFontKey(line.fontFamily, this._realFontName(line));
       div.style.fontFamily = line.fontFamily
         ? this._familyCss(line.fontFamily)
         : mixed
           ? (mixedKey ? this._familyCss(mixedKey) : fallbackFamily)
           : (line.fontCss
             ? `${line.fontCss}, ${fallbackFamily}`
-            : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily));
+            : (realKey
+              ? this._familyCss(realKey)
+              : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily)));
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
       // Show the editable text in the line's REAL colour so the box blends into the page (e.g.
@@ -358,6 +386,15 @@ export const TextEditingMethods = {
         if (newText !== div.dataset.originalText) {
           this.trackEdit(this.lineToEdit(line, newText, this._readLineRuns(div)));
           div.dataset.originalText = newText;
+        }
+        // An OCR line carrying a committed edit stays VISIBLE on a solid cover after blur — the
+        // generic background reset above would make the replacement transparent again over the scan
+        // (which still shows the ORIGINAL printed glyphs → old and new would read at once). Mirrors
+        // the save-side cover; findLineEdit also re-arms it when an edited box blurs unchanged.
+        if (line.ocr && this.findLineEdit(line)) {
+          div.classList.add('ocr-edited');
+          const obg = line.bgColor;
+          div.style.background = obg ? `rgb(${obg[0]},${obg[1]},${obg[2]})` : '#fff';
         }
         // Drop any lingering text selection so it can't leak into the next mode (Add-text or another
         // line). Partial styling restores the selection WHILE editing; once the box blurs we clear it.
@@ -517,6 +554,17 @@ export const TextEditingMethods = {
   },
   lineToEdit(line, newText, runs) {
     const s = this.scale;
+    // Keep the SAVE's substitute font consistent with the EDITOR's display. When the line's real font
+    // resolves to a known family, take serif-ness from THAT (Arial/Geneva -> sans, Times -> serif)
+    // instead of the glyph-shape guess in line.serif — which misreads a broken-cmap subset: a sans
+    // Geneva line was flagged serif, so an edit saved in Times (serif) while its unedited neighbours
+    // stayed sans, making the edited line look wrong / smaller. No toolbar override and no resolvable
+    // family -> keep the detected flag (unchanged behaviour).
+    let editSerif = !!line.serif;
+    if (!line.fontFamily) {
+      const fk = this._displayFontKey(null, this._realFontName(line));
+      if (fk) { const css = this._familyCss(fk); editSerif = css.includes('serif') && !css.includes('sans-serif'); }
+    }
     const edit = {
       pageIndex: line.pageIndex,
       x: line.left / s,
@@ -534,7 +582,11 @@ export const TextEditingMethods = {
       // bold/italic line can be turned OFF); without this the engine's missed-bold recovery re-adds it.
       ...(line.boldSet ? { boldSet: true } : {}),
       ...(line.italicSet ? { italicSet: true } : {}),
-      serif: !!line.serif,
+      serif: editSerif,
+      // OCR line: its "original text" is INK IN THE SCAN IMAGE (nothing to redact) — the save must
+      // COVER the printed area with the background before drawing the replacement (or nothing, for a
+      // deletion), else the old and new text overlap on the image.
+      ...(line.ocr ? { ocr: true } : {}),
       bgColor: line.bgColor || null,   // [r,g,b] cell background (so a cover box matches, not white)
       newText: newText,
       // Floating-toolbar styling applied to this line (all optional; absent == unchanged).
@@ -551,6 +603,20 @@ export const TextEditingMethods = {
       ...(line.link ? { link: line.link } : {}),
       ...(line.linkRemoved ? { linkRemoved: true } : {}),
     };
+    // SUPERSCRIPT retype: the line HAD a raised ordinal ("Jan 19ᵗʰ") but the edited content came back
+    // flat (select-all + retype destroys the spans). If the new text still contains an ordinal, re-split
+    // it so the suffix keeps the original superscript geometry — otherwise editing a date silently
+    // flattens its "th" to full-size text. Partial edits keep their spans and never reach this.
+    if (!line.linkRange && line.styleRuns && line.styleRuns.some(r => r.sup) &&
+        (!runs || !runs.some(r => r.sup))) {
+      const m = /^([\s\S]*?\d)(st|nd|rd|th)(?![A-Za-z])([\s\S]*)$/i.exec(newText || '');
+      if (m) {
+        const meta = line.styleRuns.find(r => r.sup) || {};
+        runs = [{ text: m[1] },
+          { text: m[2], sup: true, supRatio: meta.supRatio || 0.65, supRaise: meta.supRaise || 0.33 },
+          ...(m[3] ? [{ text: m[3] }] : [])];
+      }
+    }
     // MIXED style: a per-run model [{text,bold,italic,underline}] (a bold label + a regular tail, a
     // partial underline) so each run keeps its style on save. Sent only when there's real text and
     // >1 run; the linkRange path below (a partial hyperlink) builds its own runs and takes priority.
@@ -559,6 +625,10 @@ export const TextEditingMethods = {
         ...(r.underline ? { underline: true } : {}),
         ...(r.color ? { color: r.color } : {}),                 // partial colour change (per-run)
         ...(r.family ? { fontFamily: r.family } : {}),          // partial font change (per-run, catalogue key)
+        // SUPERSCRIPT run → concrete save units: its own font size (pts) + baseline raise (pts, up).
+        ...(r.sup ? { sup: true,
+          size: +(((line.fontSizePx / s) || 12) * (r.supRatio || 0.65)).toFixed(2),
+          raise: +(((line.fontSizePx / s) || 12) * (r.supRaise || 0.33)).toFixed(2) } : {}),
         ...(r.link ? { link: r.link } : {}) }))];               // partial hyperlink (per-run)
     }
     // PARTIAL hyperlink: split the line into runs so only the selected range is linked + blue/underlined.
@@ -588,8 +658,13 @@ export const TextEditingMethods = {
     // (max(3, height*0.4)); a smaller sort threshold (the old hard-coded 3px) ordered items 3–4px
     // apart in baseline by baseline instead of by x, so a right-column value could sort AHEAD of a
     // left-column one — the row then built right-to-left and the column split (below) missed it.
+    // Use the LARGER of the two heights (not the smaller): a SUPERSCRIPT ordinal ("Jan 19ᵗʰ, 2023")
+    // is a small, RAISED run — "th" (h≈9.75) sits ~5.7px above the "Jan 19" baseline (h15). With the
+    // smaller height the tol was 9.75·0.4≈3.9 < 5.7, so "th" counted as a different row and sorted
+    // AHEAD of "Jan 19" → the box read "thJan 19". Sizing the tol by the larger run (15·0.4=6 ≥ 5.7)
+    // keeps the superscript on its base row, ordered by x. Identical for uniform rows (min == max).
     const sorted = [...textItems].sort((a, b) => {
-      const tol = Math.max(3, Math.min(a.height, b.height) * 0.4);
+      const tol = Math.max(3, Math.max(a.height, b.height) * 0.4);
       if (Math.abs(a.baseline - b.baseline) <= tol) return a.left - b.left;  // same row: left to right
       return a.baseline - b.baseline;                                        // else top to bottom
     });
@@ -607,6 +682,7 @@ export const TextEditingMethods = {
         // rotation and the save re-emits the same transform matrix. Each rotated run is its OWN line
         // (rotatedBreak below), never merged with horizontal body text — that keeps body lines clean.
         angle: item.angle || 0, rotated: !!item.rotated,
+        ocr: !!item.ocr,                                  // OCR overlay line (transparent, no cover strip)
         pageIndex: item.pageIndex, items: [item],
       };
       lines.push(currentLine);
@@ -614,7 +690,10 @@ export const TextEditingMethods = {
 
     sorted.forEach(item => {
       const isSpace = !item.text.trim();
-      const tol = Math.max(3, item.height * 0.4);
+      // Size the same-row tolerance by the TALLER of the item and the row it might join, so a small
+      // raised SUPERSCRIPT ordinal (the "th" in "Jan 19th") stays on its base row instead of breaking
+      // into its own segment. Identical to the old item.height·0.4 when the row and item match height.
+      const tol = Math.max(3, (currentLine ? Math.max(item.height, currentLine.height) : item.height) * 0.4);
       const sameRow = currentLine && Math.abs(item.baseline - currentLine.baseline) <= tol;
       const gap = sameRow ? item.left - currentLine.right : 0;
       // A gap far wider than the text is a COLUMN separator (e.g. a right-aligned date or
@@ -625,7 +704,12 @@ export const TextEditingMethods = {
       // test missed that and concatenated the columns (address "NH - 03060" + Work-State "NH" ->
       // "NHNH - 03060"). max(forward, backward) catches the reversed order too.
       const hGap = sameRow ? Math.max(item.left - currentLine.right, currentLine.left - item.right) : 0;
-      const columnBreak = sameRow && !isSpace && hGap > item.height * 1.8;
+      // Measure the column gap against the SMALLER of the two text scales (identical for uniform rows).
+      // Against the incoming item's own height alone, a much TALLER intruder set a huge threshold and
+      // swallowed the row: an OCR'd diagonal banner glyph ("4th" read as a 44px "KZ") merged into a
+      // 13px text line 40px away — then EDITING that line covered the banner too (the "4th" vanished).
+      const colH = currentLine ? Math.min(item.height, currentLine.height || item.height) : item.height;
+      const columnBreak = sameRow && !isSpace && hGap > colH * 1.8;
       // A leading bullet glyph (its own fragment) stays a SEPARATE segment, so editing the text
       // never moves, resizes, or re-renders the bullet and the text keeps its original indent.
       const bulletBreak = sameRow && !isSpace && currentLine &&

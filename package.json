@@ -10,7 +10,7 @@
     "test:backend": "backend/venv/bin/python backend/tests/run.py",
     "test:pages": "jest tests/site",
     "test:routes": "node scripts/smoke-routes.mjs",
-    "copy:static": "cp robots.txt sitemap.xml google*.html about.html privacy.html terms.html contact.html pages.css fonts.css favicon.svg og-image.png _headers _redirects sw.js dist/ && mkdir -p dist/.well-known && cp .well-known/security.txt dist/.well-known/ && cp .well-known/security.txt dist/security.txt && mkdir -p dist/assets/fun-ui && cp assets/fun-ui/*.png dist/assets/fun-ui/ && mkdir -p dist/assets/fonts && cp assets/fonts/*.woff2 dist/assets/fonts/ && mkdir -p dist/assets/edit-fonts && cp backend/fonts/*.ttf backend/fonts/*.otf dist/assets/edit-fonts/",
+    "copy:static": "cp robots.txt sitemap.xml google*.html about.html privacy.html terms.html contact.html pages.css fonts.css favicon.svg og-image.png _headers _redirects sw.js dist/ && mkdir -p dist/.well-known && cp .well-known/security.txt dist/.well-known/ && cp .well-known/security.txt dist/security.txt && mkdir -p dist/assets/fun-ui && cp assets/fun-ui/*.png dist/assets/fun-ui/ && mkdir -p dist/assets/fonts && cp assets/fonts/*.woff2 dist/assets/fonts/ && mkdir -p dist/assets/edit-fonts && cp backend/fonts/*.ttf backend/fonts/*.otf dist/assets/edit-fonts/ && mkdir -p dist/assets/tesseract && cp assets/tesseract/* dist/assets/tesseract/",
     "build": "npm run test:backend && webpack --mode production && npm run copy:static && node scripts/sw-precache.cjs",
     "dev": "webpack serve --mode development",
     "serve": "python3 scripts/serve-nocache.py dist 9000",
@@ -28,7 +28,8 @@
     "mupdf": "^1.27.0",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
-    "pdfjs-dist": "^3.11.174"
+    "pdfjs-dist": "^3.11.174",
+    "tesseract.js": "^5.1.1"
   },
   "devDependencies": {
     "@babel/core": "^7.23.0",

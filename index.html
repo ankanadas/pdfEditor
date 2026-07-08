@@ -560,6 +560,22 @@
 
     /* Editable line boxes (positioned/styled inline by app.js) */
     .editable-text-box { font-family: inherit; }
+    /* OCR (scanned-page recognition, src/ocr/): recognised words become a TRANSPARENT, interactive
+       overlay over the scan (select / search / edit / drag via the normal text engine); a small
+       non-blocking spinner shows while a page is being read. */
+    .editable-text-box.ocr-text { color: transparent !important; -webkit-text-fill-color: transparent; caret-color: #2050ff; }
+    /* While TYPING into an OCR line, or once it carries a committed edit, the replacement must be
+       READABLE on a solid cover over the printed original (which is ink in the scan image) — the
+       display twin of the save-side cover. .ocr-edited's inline background (the line's sampled
+       colour) overrides the white default. */
+    .editable-text-box.ocr-text:focus,
+    .editable-text-box.ocr-text.ocr-edited { color: #111 !important; -webkit-text-fill-color: #111; background: #fff; }
+    .ocr-spinner { position: absolute; top: 8px; left: 8px; z-index: 140; display: inline-flex; align-items: center;
+      gap: 8px; padding: 5px 11px; border-radius: 999px; background: rgba(20,22,40,.82); color: #fff; font-size: 12.5px;
+      font-weight: 600; pointer-events: none; box-shadow: 0 3px 12px rgba(0,0,0,.28); }
+    .ocr-spin { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255,255,255,.35);
+      border-top-color: #fff; animation: ocr-spin .8s linear infinite; }
+    @keyframes ocr-spin { to { transform: rotate(360deg); } }
     .editable-text-box:focus { outline: none; }
     /* Smart-click affordance: a subtle highlight on hover over existing editable text
        (Edit / auto mode). !important beats the inline border/box-shadow app.js sets. */

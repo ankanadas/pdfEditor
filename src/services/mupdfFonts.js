@@ -3,8 +3,24 @@
 // legally-distributable open clones), and the LaTeX/TeX fallback faces. Each TTF/OTF is fetched once
 // from /assets/edit-fonts/ (only the families an edit needs) and cached as a mupdf.Font.
 
+import { familyKeyFromFont } from '../util/fonts.js';
+
 // Generic family → bundled stem (metric-compatible: Arial/Helvetica, Times, Courier).
 const GENERIC = { sans: 'Arimo', serif: 'Tinos', mono: 'Cousine' };
+
+// Catalogue keys that are SERIF / MONO; everything else classForName resolves is sans. Used to pick a
+// substitute family from a font's NAME when the glyph-shape guess is unreliable (a broken-cmap subset
+// like "Geneva" was mis-detected as serif, so an edited sans line saved in Times).
+const SERIF_KEYS = new Set(['times', 'georgia', 'cambria', 'garamond', 'baskerville', 'librebaskerville',
+  'palatino', 'merriweather', 'playfair', 'notoserif']);
+const MONO_KEYS = new Set(['courier', 'consolas', 'firacode', 'jetbrainsmono', 'ibmplexmono', 'sourcecodepro']);
+/** Generic family ('sans'|'serif'|'mono') for a font NAME via the shared catalogue map, or null when the
+ *  name isn't a family we recognise (caller keeps its own detection). Mirrors the editor's display font. */
+export function classForName(fontName) {
+  const k = familyKeyFromFont(fontName);
+  if (!k) return null;
+  return SERIF_KEYS.has(k) ? 'serif' : MONO_KEYS.has(k) ? 'mono' : 'sans';
+}
 
 // Toolbar family key → [bundled stem, generic family]. Open clones of proprietary faces (originals
 // never bundled) + open fonts under their real names. The generic family is the last-ditch fallback.
