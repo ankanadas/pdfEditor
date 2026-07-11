@@ -219,6 +219,32 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     return simpleCache.get(key);
   }
 
+  // ── CJK (Chinese/Japanese/Korean) — real selectable non-Latin SAVE (Phase 3, NON-SHAPING scripts only) ──
+  // The bundled substitutes are Latin(+Cyrillic/Greek), so a CJK glyph tripped the flatten guard. CJK is
+  // 1 char = 1 glyph (no shaping), so we load Noto Sans SC / JP / KR (Han / kana / Hangul) ON DEMAND and
+  // offer them as extra Type0 options BEFORE the Latin catch-all: a CJK edit then embeds as REAL selectable
+  // text (encodeCharacter 1:1 → GID). Indic/Arabic are deliberately NOT handled here — their conjunct/joining
+  // shaping the 1:1 path can't produce, so they still flatten (correct appearance).
+  const CJK_FILES = ['NotoSansSC.ttf', 'NotoSansJP.ttf', 'NotoSansKR.ttf'];
+  const isCjkCp = (cp) => (cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0x3130 && cp <= 0x318F)
+    || (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0x4E00 && cp <= 0x9FFF)
+    || (cp >= 0xAC00 && cp <= 0xD7AF) || (cp >= 0xF900 && cp <= 0xFAFF);
+  const hasCjk = (text) => { for (const ch of text || '') if (isCjkCp(ch.codePointAt(0))) return true; return false; };
+  let _cjkOpts = null;
+  async function cjkOptions() {
+    if (_cjkOpts) return _cjkOpts;
+    _cjkOpts = [];
+    for (const file of CJK_FILES) {
+      try {
+        const mfont = await loadFont([file]);
+        // only keep a font that really covers CJK (a Latin offline-fallback would just waste a slot)
+        let ok = false; try { ok = mfont.encodeCharacter(0x4E16) !== 0 || mfont.encodeCharacter(0x3053) !== 0 || mfont.encodeCharacter(0xAC00) !== 0; } catch (_) {}
+        if (ok) _cjkOpts.push({ name: 'CJK' + (seq++), ref: null, simple: false, cjk: true, mfont, charset: null });
+      } catch (_) {}
+    }
+    return _cjkOpts;
+  }
+
   /** A SIMPLE WinAnsi sibling of a bundled option (shares its loaded face). Drawn for the WinAnsi-encodable
    *  glyphs of re-inserted text so Chrome/PDFium rasterises them like a simple font — NOT the faint
    *  Type0/CIDFontType2 the bundled catch-all produces (the "edited line looks lighter" bug, present on any
@@ -315,6 +341,8 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
     for (const o of opts) {
       if (o.charset !== null) {                                            // reused embedded (has a charset)
         if (o.charset.has(ch)) { try { if (o.mfont.encodeCharacter(cp) !== 0) return o; } catch (_) {} }
+      } else if (o.cjk) {                                                 // CJK Noto (Han/kana/Hangul) — has-glyph
+        try { if (o.mfont.encodeCharacter(cp) !== 0) return o; } catch (_) {}
       } else if (o.winAnsi) {                                             // Base-14 (WinAnsi only)
         if (cp === 0x3F || winAnsiByte(cp) !== 0x3F) return o;
       } else {
@@ -668,6 +696,9 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         if (runReused) opts.push(runReused);
         else if (rB14) opts.push(base14Option(rB14, r.bold, r.italic));
         opts.push(bundledSimpleOption(bundled));   // WinAnsi-encodable glyphs → simple WinAnsi (Chrome-identical)
+        // CJK edit → offer the loaded Han/kana/Hangul Noto faces BEFORE the Latin catch-all so those glyphs
+        // embed as REAL selectable text (Phase 3) instead of tripping the flatten guard below.
+        if (hasCjk(r.text)) { for (const c of await cjkOptions()) opts.push(c); }
         opts.push(bundled);                         // genuinely non-WinAnsi → Type0 full-Unicode catch-all
         r._opts = opts;
         // UN-EMBEDDABLE TEXT GUARD: the bundled substitutes are LATIN faces (+ Cyrillic/Greek), and a
