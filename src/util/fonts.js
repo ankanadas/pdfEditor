@@ -23,7 +23,10 @@ export function fontStyleFromPdfjs(pv, fontName) {
     // weight/slant from that name too, so an embedded bold/italic face is recognised. Mirrors the
     // item-level name heuristic (incl. the LaTeX cmbx/cmti/cmsl hints).
     const nm = String(f.name || '').toLowerCase();
-    const bold = !!(f.black || f.bold) || /bold|black|heavy|semibold|cmbx/.test(nm);
+    // Treat MEDIUM / SEMIBOLD / DEMIBOLD as bold too: many forms (e.g. the I-94) set their labels in a
+    // "-Medium" face (weight 500) against a Regular body — visually bold, but the name has no "Bold". A
+    // binary bold model reads that as emphasis, so the label previews + saves bold like the user expects.
+    const bold = !!(f.black || f.bold) || /bold|black|heavy|semi.?bold|demi.?bold|medium|cmbx/.test(nm);
     const italic = !!f.italic || /italic|oblique|cmti|cmsl/.test(nm);
     return { bold, italic, css };
   } catch (e) {

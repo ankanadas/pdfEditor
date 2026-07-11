@@ -575,6 +575,41 @@ export const FindReplaceMethods = {
     return null;
   },
 
+  /** EXACT highlight rect for a match on an OCR line, in VIEWPORT coordinates (drop-in for the
+   *  range rect). The overlay text is TRANSPARENT over the scan and its generic font's advances
+   *  differ from the printed glyphs, so a DOM-range-measured highlight drifts onto neighbouring
+   *  words. The recognised WORD ITEMS carry the exact printed pixel boxes — map the match's char
+   *  span through them instead (sub-word positions interpolated by character fraction). */
+  _ocrMatchRect(m) {
+    // box matches carry the live line on el.__line; virtual (unpainted-page) matches carry m.line
+    const line = m && ((m.el && m.el.__line) || m.line);
+    if (!line || !line.ocr || !Array.isArray(line.items) || !line.items.length) return null;
+    const pv = (this.pageViews || [])[m.pageIndex];
+    if (!pv || !pv.canvas) return null;
+    const text = line.text || '';
+    const s = m.start, e = m.end;
+    let cursor = 0, x0 = null, x1 = null, top = null, bottom = null;
+    for (const it of line.items) {
+      const t = (it.text || '').trim();
+      if (!t) continue;
+      const idx = text.indexOf(t, cursor);
+      if (idx < 0) continue;
+      cursor = idx + t.length;
+      if (idx + t.length <= s || idx >= e) continue;          // item entirely outside the match
+      const w = it.right - it.left, L = t.length || 1;
+      const fs = Math.max(s, idx) - idx, fe = Math.min(e, idx + t.length) - idx;
+      const ix0 = it.left + w * (fs / L), ix1 = it.left + w * (fe / L);
+      x0 = x0 == null ? ix0 : Math.min(x0, ix0);
+      x1 = x1 == null ? ix1 : Math.max(x1, ix1);
+      top = top == null ? it.top : Math.min(top, it.top);
+      bottom = bottom == null ? it.bottom : Math.max(bottom, it.bottom);
+    }
+    if (x0 == null || x1 <= x0) return null;
+    const cr = pv.canvas.getBoundingClientRect();
+    const k = cr.width / pv.canvas.width;                     // canvas px → on-screen css px
+    return { left: cr.left + x0 * k, top: cr.top + top * k, width: (x1 - x0) * k, height: (bottom - top) * k };
+  },
+
   /** Highlight match i (does NOT focus the box — navigation stays calm). With scroll=true also
    *  bring it into view; a lazy match on an UNPAINTED page is hydrated (jump the viewport, let the
    *  windowed painter build it) — but ONLY when scrolling is allowed. With scroll=false (a rescan)
@@ -598,7 +633,8 @@ export const FindReplaceMethods = {
     }
     const range = this._matchRange(m);
     if (!range) return;
-    const rect = range.getBoundingClientRect();
+    // OCR line → position from the printed word boxes (exact); else from the DOM range as before.
+    const rect = this._ocrMatchRect(m) || range.getBoundingClientRect();
     const wrap = m.el.offsetParent || m.el.parentElement;
     if (!wrap) return;
     const wr = wrap.getBoundingClientRect();

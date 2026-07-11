@@ -19,11 +19,21 @@ export const SaveServiceMethods = {
 
     // Produce the fully-edited bytes (bakes previewed rotation + applies this.edits via the fidelity
     // fallback chain). Shared with Split so both bake edits identically.
-    const { bytes: editedPdfBytes, flattened } = await this._produceEditedBytes();
+    let { bytes: editedPdfBytes, flattened, flattenReason } = await this._produceEditedBytes();
 
     if (!editedPdfBytes) {
       this.showStatus('Failed to save. Please reload the page and try again.', 'error');
       return;
+    }
+
+    // ALWAYS-ON "Searchable PDF" (scanned docs): bake the recognised words as an invisible text layer so
+    // the saved file is selectable/searchable in ANY viewer. No toggle, no prompt — it just happens for
+    // any doc that has OCR items. Skipped when flattened (that copy is an image); a bake failure falls
+    // back to the plain save and never blocks the download.
+    const hasOcr = (this.extractedTextItems || []).some((t) => t && t.ocr);
+    if (hasOcr && !flattened && this.ocrBakeSearchable) {
+      const baked = await this.ocrBakeSearchable(editedPdfBytes);
+      if (baked) editedPdfBytes = baked;
     }
 
     // Download it. The save has succeeded the moment this completes.
@@ -46,7 +56,9 @@ export const SaveServiceMethods = {
     // Post-save housekeeping. The file is ALREADY saved, so any error here is non-fatal
     // and must never turn a successful save into a "Failed to save" message.
     try {
-      if (flattened) {
+      if (flattened && flattenReason === 'unembeddable') {
+        this.showStatus('Saved as a flattened image so your edited text is preserved and prints correctly. Some of it uses a script (e.g. Chinese, Arabic) we can\'t yet embed as selectable text, so this copy isn\'t text-selectable.', 'info');
+      } else if (flattened) {
         this.showStatus('Saved a flattened copy. This PDF is protected, so text-level editing wasn\'t possible. To keep selectable text, remove the PDF\'s protection first.', 'info');
       } else {
         this.showStatus('Saved! Your edited PDF has been downloaded.', 'success');
@@ -82,6 +94,7 @@ export const SaveServiceMethods = {
 
     let editedPdfBytes = null;
     let flattened = false;
+    let flattenReason = null;    // 'unembeddable' (non-Latin text) | 'protected' | null
     const fabricAnnotations = this.annotationManager ? this.annotationManager.serialize() : [];
     // Redaction removes whole RUNS: an edited line whose band overlaps another run on the SAME row
     // (a form fill-in over a blank) would silently delete that run. Expand with preserve edits that
@@ -93,19 +106,25 @@ export const SaveServiceMethods = {
     // tier on edits it can't do faithfully, so it never regresses the pdf-lib result.
     if (MupdfService.isSupported()) {
       try { editedPdfBytes = await MupdfService.editPDF(this.originalFileData, editsForSave, fabricAnnotations); }
-      catch (e) { console.warn('WASM save unavailable/declined:', e); }
+      catch (e) {
+        // Non-Latin edited text can't be embedded as vector glyphs → go STRAIGHT to flatten (which
+        // rasterises via the browser's own fonts, preserving the text as an image). Skipping pdf-lib
+        // avoids it silently re-producing the same .notdef boxes.
+        if (/QPE_NEEDS_FLATTEN/.test((e && e.message) || '')) flattenReason = 'unembeddable';
+        console.warn('WASM save unavailable/declined:', e);
+      }
     }
-    // Tier 2: pdf-lib cover-and-redraw (offline / static host).
-    if (!editedPdfBytes) {
+    // Tier 2: pdf-lib cover-and-redraw (offline / static host) — skipped when tier 1 asked to flatten.
+    if (!editedPdfBytes && flattenReason !== 'unembeddable') {
       try { editedPdfBytes = await this.applyEditsWithPdfLib(this.originalFileData, editsForSave); }
       catch (e) { console.warn('Client-side (vector) save failed, flattening instead:', e); }
     }
-    // Tier 3: flatten-to-image last resort (odd page trees / protected PDFs pdf-lib can't traverse).
+    // Tier 3: flatten-to-image last resort (un-embeddable non-Latin text / odd page trees / protected).
     if (!editedPdfBytes) {
-      try { editedPdfBytes = await this.flattenToPdfBytes(editsForSave); flattened = true; }
+      try { editedPdfBytes = await this.flattenToPdfBytes(editsForSave); flattened = true; if (!flattenReason) flattenReason = 'protected'; }
       catch (e) { console.warn('Flatten save failed:', e); }
     }
-    return { bytes: editedPdfBytes, flattened };
+    return { bytes: editedPdfBytes, flattened, flattenReason };
   },
   /**
    * Apply all edits to the PDF in the browser using pdf-lib and return the new bytes.

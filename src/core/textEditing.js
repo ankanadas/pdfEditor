@@ -6,6 +6,8 @@ import { rgbCss } from '../util/color.js';
 import { fontStyleFromPdfjs } from '../util/fonts.js';
 import { LINK_BLUE } from '../util/fontCatalog.js';
 import { MupdfService } from '../services/mupdfService.js';
+import { orderLinesForReading } from '../util/readingOrder.js';
+import { isLegacyGarbledPage } from '../util/legacyFont.js';
 
 export const TextEditingMethods = {
   /**
@@ -28,6 +30,13 @@ export const TextEditingMethods = {
     // never fired for scans). Re-entrant-safe; a no-op unless the OCR module is loaded and the page is a scan.
     if (this.ocrMaybePage) this.ocrMaybePage(pv);
     if (pageTextItems.length === 0) return;
+    // LEGACY non-Unicode Indic font (Kruti Dev / APS / DevLys …): the font DRAWS correct Devanagari on the
+    // canvas, but its text EXTRACTS as mis-mapped accented-Latin garbage ("ÙetLe keâe@efchšerMeve"). Editable
+    // boxes would render that garbage (or fall back inconsistently) OVER the perfectly-rendered page. So on
+    // such a page, skip the boxes + cover strips entirely — the canvas render is correct, leaving it
+    // fully viewable (Add/Highlight/Sign/Stamp still work; the existing text just isn't editable, which it
+    // couldn't be anyway without a font-specific Unicode remap). Marked so callers can surface it.
+    if (isLegacyGarbledPage(pageTextItems)) { pv._legacyGarbled = true; return; }
 
     // EXACT per-char ink colours from the PDF itself (mupdf structured text, worker round-trip).
     // Canvas pixel sampling drifts on WebKit (its rasteriser blends small glyphs so much that no
@@ -42,12 +51,27 @@ export const TextEditingMethods = {
     // over them: a signature/initials image stamped onto a form line otherwise gets chopped (its ink
     // inside the line's band erased) or hidden entirely — editor-display damage the save never had.
     pv._pageImages = (inkRes && !Array.isArray(inkRes) && inkRes.images) || [];
+    // Re-check OCR now that raster content is KNOWN: the early call at line ~30 (before this ink pass)
+    // deliberately skips a sparse-text page whose images were still unknown, so a genuine scan carrying
+    // a few stray real chars (e.g. a scanner-stamped page number) is caught here instead. Idempotent —
+    // a no-op if the page was already queued/recognised, or is a normal text page.
+    if (this.ocrMaybePage && pv._pageImages.length) this.ocrMaybePage(pv);
+    // The re-check just dropped this page's JUNK embedded OCR text layer (a searchable scan) — abort now,
+    // BEFORE painting cover strips or building the misaligned boxes, so the scan stays clean and fresh OCR
+    // provides aligned boxes + the readable option instead.
+    if (pv._ocrJunkScanDropped) { pv._ocrJunkScanDropped = false; return; }
 
     const canvasWrapper = pv.wrapper;
     // The canvas may be displayed smaller than its intrinsic pixels (max-width:100%).
     const displayScale = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
 
-    const lines = this.groupTextItemsByLine(pageTextItems);
+    let lines = this.groupTextItemsByLine(pageTextItems);
+    // SCAN pages read in COLUMN order: a multi-column scanned page (paper / notice) would otherwise
+    // interleave its columns row-by-row in the box order (selection/copy jump across the gutter).
+    // OCR overlays only — a normal text PDF keeps its existing row order untouched.
+    if (lines.length > 2 && lines.some((l) => l.ocr)) {
+      lines = orderLinesForReading(lines, pv.canvas.width);
+    }
     // Kept for save-time: an edit whose redaction band overlaps ANOTHER segment on the same row
     // (an overlay fill-in and the blank under it) must re-add that segment, or mupdf's run-drop
     // removes it from the saved page. savePDF walks these via _withEntangledPreserves().
@@ -103,9 +127,15 @@ export const TextEditingMethods = {
     pv.ctx.setTransform(1, 0, 0, 1, 0, 0);   // device pixels, regardless of render state
     const cw = pv.canvas.width, ch = pv.canvas.height;
     lines.forEach((line) => {
-      // OCR overlay lines sit over a SCANNED image — there is no original text to hide, so never paint a
-      // cover strip (it would white out the scan). The transparent box still selects / searches / edits.
-      if (line.ocr) return;
+      // OCR overlay lines sit over a SCANNED image — normally there is no original text to hide (the scan
+      // itself shows the glyphs), so no cover strip. BUT a MOVED OCR line has been relocated: its box is
+      // drawn VISIBLY at the new spot (.ocr-edited), so the scan's ORIGINAL glyphs must be hidden at the
+      // OLD anchor (line.left/top, from the rebuilt spans) or the text reads twice. Edited-in-place OCR
+      // lines don't need this (the box's own solid bg covers them); an unmoved OCR line still skips.
+      if (line.ocr) {
+        const pe = this.findLineEdit(line);
+        if (!(pe && ((+pe.dx) || (+pe.dy)))) return;
+      }
       // ROTATED line: the horizontal strip below leaves a HALF-CUT original (it hides a horizontal band
       // while the glyphs run at an angle). Cover the exact rotated text box instead — translate to the
       // baseline-left anchor, rotate, fill the em box with the line's background (white by default). Save
@@ -334,14 +364,18 @@ export const TextEditingMethods = {
       // failed, fall back to a readable contrast vs the background. (The saved file uses the exact
       // colour regardless.)
       const tc = line.textColor;
+      // An OCR-edited/moved box is visible over a solid cover (.ocr-edited), whose CSS forces
+      // `color:#111 !important` — set the REAL colour with !important so a coloured OCR line (a brown
+      // subtitle) keeps its colour instead of going black. Non-OCR lines set it plainly as before.
+      const setCol = (v) => { if (line.ocr && pending) div.style.setProperty('color', v, 'important'); else div.style.color = v; };
       if (line.color) {
-        div.style.color = `rgb(${line.color[0]},${line.color[1]},${line.color[2]})`;
+        setCol(`rgb(${line.color[0]},${line.color[1]},${line.color[2]})`);
       } else if (tc) {
-        div.style.color = `rgb(${tc[0]},${tc[1]},${tc[2]})`;
+        setCol(`rgb(${tc[0]},${tc[1]},${tc[2]})`);
       } else {
         const bg = line.bgColor;
         const lum = bg ? (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) : 255;
-        div.style.color = lum < 140 ? '#fff' : '#000';
+        setCol(lum < 140 ? '#fff' : '#000');
       }
       if (line.underline) div.style.textDecoration = 'underline';
       if (line.opacity != null) div.style.opacity = line.opacity;
@@ -552,8 +586,25 @@ export const TextEditingMethods = {
       return edits;
     }
   },
+  /** A SCANNED page whose visible text is baked into a near-full-page background IMAGE, with a (usually
+   *  invisible) text layer on top — e.g. a "searchable scan". Editing such a line redacts the text-layer
+   *  run but NOT the image ink (mupdf redaction is REDACT_IMAGE_NONE), so the scan's ORIGINAL glyphs bleed
+   *  through the replacement and overlap it. True when an image covers most of the page → the save must
+   *  COVER the original line area first (same as an OCR edit). */
+  _isScanBackdropPage(pv) {
+    if (!pv || !pv.canvas || !Array.isArray(pv._pageImages) || !pv._pageImages.length) return false;
+    const s = this.scale || 1;
+    const area = pv.canvas.width * pv.canvas.height;
+    if (area <= 0) return false;
+    return pv._pageImages.some((im) => ((im.x1 - im.x0) * s) * ((im.y1 - im.y0) * s) > 0.5 * area);
+  },
   lineToEdit(line, newText, runs) {
     const s = this.scale;
+    // SCANNED-HYBRID cover: if this line sits over a full-page scan image, its printed glyphs live in the
+    // image and survive redaction — mark the edit so the save covers the original area (see mupdfEdit
+    // `e.coverScan`), else edit + scan text overlap. Skipped for OCR lines (already covered via `ocr`).
+    const _cpv = (this.pageViews || []).find((v) => v.pageNum === line.pageIndex);
+    const coverScan = !line.ocr && this._isScanBackdropPage(_cpv);
     // Keep the SAVE's substitute font consistent with the EDITOR's display. When the line's real font
     // resolves to a known family, take serif-ness from THAT (Arial/Geneva -> sans, Times -> serif)
     // instead of the glyph-shape guess in line.serif — which misreads a broken-cmap subset: a sans
@@ -587,6 +638,8 @@ export const TextEditingMethods = {
       // COVER the printed area with the background before drawing the replacement (or nothing, for a
       // deletion), else the old and new text overlap on the image.
       ...(line.ocr ? { ocr: true } : {}),
+      // Scanned-hybrid page: cover the baked scan glyphs before drawing the replacement (see coverScan above).
+      ...(coverScan ? { coverScan: true } : {}),
       bgColor: line.bgColor || null,   // [r,g,b] cell background (so a cover box matches, not white)
       newText: newText,
       // Floating-toolbar styling applied to this line (all optional; absent == unchanged).
@@ -594,7 +647,12 @@ export const TextEditingMethods = {
       // Removing an underline: tell the backend to cover the previously-baked rule even though no
       // fresh underline is drawn (else the old line-art survives redaction -> underline won't clear).
       ...(line._coverUnderline ? { coverUnderline: true } : {}),
-      ...(line.color ? { color: line.color } : {}),
+      // Colour: an explicit toolbar override wins; otherwise an OCR line must fall back to its SAMPLED
+      // ink colour (line.textColor). A normal edited line recovers its colour from the PDF's own text run
+      // at save time, but an OCR overlay has NO real text under it (the glyphs live in the scan image), so
+      // without this the edit draws BLACK over the cover — the brown/coloured line loses its colour.
+      // Gated on line.ocr so non-OCR docs are completely unchanged.
+      ...((line.color || (line.ocr && line.textColor)) ? { color: line.color || line.textColor } : {}),
       ...(line.opacity != null && line.opacity < 1 ? { opacity: line.opacity } : {}),
       ...(line.align ? { align: line.align } : {}),
       ...(line.fontFamily ? { fontFamily: line.fontFamily } : {}),

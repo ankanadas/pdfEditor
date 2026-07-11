@@ -167,6 +167,11 @@ export const LineStyleMethods = {
     const lineH = line.fontSizePx || line.height || 0;
     const supOf = (it) => {
       if (!lineH) return null;
+      // OCR overlay words carry NOISY per-word bbox heights/baselines (Tesseract rounds each glyph box
+      // independently), so a normal word like "Search" gets a slightly smaller/raised box and is falsely
+      // read as SUPERSCRIPT → rendered at 0.65× (shrunken) when the line is edited/moved. Real scans
+      // almost never need per-word superscript; skip the detection for OCR lines so words stay uniform.
+      if (line.ocr) return null;
       const raise = (line.baseline || 0) - (it.baseline || 0);
       if (raise > lineH * 0.12 && (it.height || 0) < lineH * 0.85) {
         return { supRatio: +(Math.max(0.3, Math.min(0.9, it.height / lineH))).toFixed(3),

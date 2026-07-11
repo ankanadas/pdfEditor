@@ -80,7 +80,12 @@ export const MoveLinesMethods = {
         app._clearSnapGuides(wrapper);
         if (moved) {
           app._commitLineMove(div, line, pv, displayScale);
-          app._enterMoveState(div, line, pv, displayScale);       // arrows nudge right after a drag
+          // An OCR overlay line is transparent (the scan shows the glyphs); once MOVED it must re-render
+          // so the scan's original glyphs get COVERED at the old spot and the relocated text is drawn
+          // VISIBLY at the new spot (buildTextLayer handles both). Plain text lines keep the in-place
+          // nudge flow untouched.
+          if (line.ocr && app.refresh) { app._exitMoveMode(); app.refresh({ only: pv.pageNum }); }
+          else app._enterMoveState(div, line, pv, displayScale);   // arrows nudge right after a drag
         } else {
           // Plain click: ALWAYS falls through to editing — focus the box and put the caret where
           // the user actually clicked (preventDefault above suppressed the native caret).
