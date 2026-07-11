@@ -39,3 +39,21 @@
 @font-face{font-family:'pf-source-sans-3';src:url('/assets/fonts/source-sans-3.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
 @font-face{font-family:'pf-tinos';src:url('/assets/fonts/tinos.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
 @font-face{font-family:'pf-ubuntu';src:url('/assets/fonts/ubuntu.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+
+/* ── Noto faces for non-Latin scripts (Phase 1 multi-language editing) ────────────────────────────
+   Each editable line whose text is a non-Latin script gets the matching family (see util/script.js →
+   fontStackForScript); the browser LAZY-FETCHES the woff2 only when a box actually uses it, so an
+   English session downloads none of these. font-display:swap shows a system fallback until it lands. */
+@font-face{font-family:'pf-noto-devanagari';src:url('/assets/fonts/noto-devanagari.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-bengali';src:url('/assets/fonts/noto-bengali.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-gujarati';src:url('/assets/fonts/noto-gujarati.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-gurmukhi';src:url('/assets/fonts/noto-gurmukhi.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-tamil';src:url('/assets/fonts/noto-tamil.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-telugu';src:url('/assets/fonts/noto-telugu.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-kannada';src:url('/assets/fonts/noto-kannada.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-malayalam';src:url('/assets/fonts/noto-malayalam.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-oriya';src:url('/assets/fonts/noto-oriya.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-arabic';src:url('/assets/fonts/noto-arabic.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-hebrew';src:url('/assets/fonts/noto-hebrew.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-thai';src:url('/assets/fonts/noto-thai.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-noto-cjk';src:url('/assets/fonts/noto-cjk.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}

@@ -811,7 +811,8 @@ export const OcrMethods = {
       // UPSCALE the text region ~2× (bicubic). This is the biggest recall win: the interpolation SMOOTHS
       // scanner/JPEG noise and crisps glyph edges, so Tesseract reads a row it garbled at native size — even
       // when the text is already large (a 2× blow-up of an 80 px line recovered a whole address row the raw
-      // crop dropped). 3× for genuinely small text. Capped at ~24 MP processed so a block never OOMs.
+      // crop dropped). 3× for genuinely small text. (2.5× recovered one extra body word but jittered the
+      // saved font sizes and slowed the pass — not worth it.) Capped at ~24 MP so a big block never OOMs.
       let us = 1;
       if (!r.margin) {
         us = (r.lineH > 0 && r.lineH < 26) ? 3 : 2;
@@ -917,7 +918,10 @@ export const OcrMethods = {
           .filter((l) => { const t = (l.text || '').trim(); return t && !isNoiseLine(t); });
         const isVisible = (l) => realWords(l.text) >= 1 && lineConf(l) >= VIS_CONF;
         const lines = allLines.filter(isVisible);                                        // confident PRINTED text → redrawn
-        const searchOnly = allLines.filter((l) => !isVisible(l) && realWords(l.text) >= 1); // handwriting/low-conf → invisible, searchable only, scan kept
+        // Invisible searchable-only: a low-confidence line that still carries a real word OR a digit run (a
+        // ZIP / id / number like "03060" that has no ≥3-letter word would otherwise fall out and be
+        // searchable in the editor but NOT in the saved file — the two must match).
+        const searchOnly = allLines.filter((l) => !isVisible(l) && (realWords(l.text) >= 1 || /\d{3,}/.test(l.text))); // handwriting/low-conf → invisible, searchable only, scan kept
         // Invisible searchable layer for the low-confidence lines — keeps "End Date" & co findable without
         // painting uncertain glyphs over the scan (same insert path as ocrBakeSearchable, invisible:true).
         // PER WORD, not per line: grouping tucks tight neighbours together ("End"+"Date" → "EndDate"), which

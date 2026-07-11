@@ -69,6 +69,7 @@ export function isNoiseLine(text) {
   if (!tokens.length) return true;
   const realWords = tokens.filter((w) => (w.match(/[A-Za-z]/g) || []).length >= 3).length;
   if (realWords >= 1) return false;
+  if (/\d{3,}/.test(text || '')) return false;   // a contiguous digit RUN = ZIP / id / year / number, not speckle
   const letters = ((text || '').match(/[A-Za-z]/g) || []).length;
   if (tokens.length >= 4 && letters >= tokens.length) return false;   // several short word-tokens = text
   return true;

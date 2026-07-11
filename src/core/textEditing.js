@@ -8,6 +8,7 @@ import { LINK_BLUE } from '../util/fontCatalog.js';
 import { MupdfService } from '../services/mupdfService.js';
 import { orderLinesForReading } from '../util/readingOrder.js';
 import { isLegacyGarbledPage } from '../util/legacyFont.js';
+import { detectScript, fontStackForScript, isRtlScript } from '../util/script.js';
 
 export const TextEditingMethods = {
   /**
@@ -357,6 +358,17 @@ export const TextEditingMethods = {
             : (realKey
               ? this._familyCss(realKey)
               : (line.fontName ? `"${line.fontName}", ${fallbackFamily}` : fallbackFamily)));
+      // MULTI-LANGUAGE DISPLAY (Phase 1): a line in a NON-LATIN script (Devanagari, Arabic, CJK, Hebrew, Thai,
+      // Tamil…) needs a font that covers it — the Latin editor faces render tofu boxes. Prepend the matching
+      // bundled Noto face so the script shows and can be typed; the browser lazy-fetches the woff2 only for
+      // scripts actually on the page (font-display:swap). Latin lines return '' and are left untouched.
+      const boxScript = detectScript(div.textContent || line.text || '');
+      const scriptStack = fontStackForScript(boxScript);
+      if (scriptStack) div.style.fontFamily = `${scriptStack}, ${div.style.fontFamily}`;
+      // Phase 2 bidi: a RIGHT-TO-LEFT line (Arabic/Hebrew) needs dir="rtl" so the caret, character ordering
+      // and alignment behave while typing; the browser's bidi algorithm then lays out any embedded Latin/
+      // digits correctly. LTR lines (Latin, Indic, CJK) are left untouched.
+      if (isRtlScript(boxScript)) { div.dir = 'rtl'; div.style.textAlign = 'right'; }
       div.style.fontWeight = line.bold ? 'bold' : 'normal';
       div.style.fontStyle = line.italic ? 'italic' : 'normal';
       // Show the editable text in the line's REAL colour so the box blends into the page (e.g.
