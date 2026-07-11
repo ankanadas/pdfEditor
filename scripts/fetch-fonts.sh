@@ -62,4 +62,19 @@ for id in carlito caladea; do
     if dl "$CDN/$id@latest/latin-$ws.woff2" "$out"; then echo "  $id-$sfx.woff2"; else rm -f "$out"; echo "  !! $id-$sfx MISSING"; fi
   done
 done
+
+# Noto script faces for NON-LATIN editor display (multi-language editing) — each lazy-loaded via @font-face
+# only when a page carries that script. id:subset:out-stem. CJK uses noto-sans-jp (covers kana + kanji).
+echo "== Noto script woff2 (non-Latin display) =="
+for e in \
+  "noto-sans-devanagari:devanagari:noto-devanagari" "noto-sans-bengali:bengali:noto-bengali" \
+  "noto-sans-gujarati:gujarati:noto-gujarati" "noto-sans-gurmukhi:gurmukhi:noto-gurmukhi" \
+  "noto-sans-tamil:tamil:noto-tamil" "noto-sans-telugu:telugu:noto-telugu" \
+  "noto-sans-kannada:kannada:noto-kannada" "noto-sans-malayalam:malayalam:noto-malayalam" \
+  "noto-sans-oriya:oriya:noto-oriya" "noto-sans-arabic:arabic:noto-arabic" \
+  "noto-sans-hebrew:hebrew:noto-hebrew" "noto-sans-thai:thai:noto-thai" \
+  "noto-sans-jp:japanese:noto-cjk"; do
+  id="${e%%:*}"; rest="${e#*:}"; sub="${rest%%:*}"; stem="${rest##*:}"
+  if dl "$CDN/$id@latest/$sub-400-normal.woff2" "$W2_DIR/$stem.woff2"; then echo "  $stem.woff2"; else echo "  !! $stem MISSING"; fi
+done
 echo "done"
