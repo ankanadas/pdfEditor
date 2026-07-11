@@ -7,7 +7,7 @@
 //     build changes the hashed URL, so it can't serve a stale bundle);
 //   • the HTML shell → network-first, so a new deploy is picked up, with the cache as the offline fallback.
 // Same-origin only — the PyMuPDF backend stays network-only (it's the online fallback in the save chain).
-const CACHE = 'qpe-cache-v2';
+const CACHE = 'qpe-cache-v3';
 // Shell to pre-cache on install (index.html + content-hashed bundles + .wasm + css). Injected at build
 // time by scripts/sw-precache.cjs — the FIRST page load happens before this SW is active, so those assets
 // would otherwise never get cached and an offline reload couldn't boot the app. Best-effort per file.
@@ -40,6 +40,21 @@ self.addEventListener('fetch', (e) => {
       } catch (_) {
         return (await caches.match('/index.html')) || (await caches.match(req)) || Response.error();
       }
+    })());
+    return;
+  }
+
+  // CSS (fonts.css, pages.css) → NETWORK-FIRST. These have STABLE urls but CHANGE across releases (a new
+  // @font-face, a style tweak), so cache-first served them STALE forever — a Calibri-Bold heading kept
+  // rendering NOT-bold because the SW returned an old fonts.css after the real bold face was added. Cache
+  // fallback still boots offline. (Hashed bundles/.wasm/fonts below are content-addressed → safe cache-first.)
+  if (url.pathname.endsWith('.css')) {
+    e.respondWith((async () => {
+      try {
+        const r = await fetch(req);
+        if (r && r.ok) (await caches.open(CACHE)).put(req, r.clone());
+        return r;
+      } catch (_) { return (await caches.match(req)) || Response.error(); }
     })());
     return;
   }

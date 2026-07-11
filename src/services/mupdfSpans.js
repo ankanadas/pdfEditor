@@ -26,7 +26,7 @@ function styleOf(font) {
   const nameSans = hit(nm, SANS_HINTS), nameSerif = hit(nm, SERIF_HINTS), nameMono = hit(nm, MONO_HINTS);
   const mono = nameMono || fam === 'monospace';
   const serif = !mono && (nameSerif || (fam === 'serif' && !nameSans));
-  const bold = weight === 'bold' || /bold|black|heavy|semibold/.test(nm);
+  const bold = weight === 'bold' || /bold|black|heavy|semi.?bold|demi.?bold|medium/.test(nm);   // Medium/Semibold → bold on save (I-94 labels)
   const italic = style.includes('italic') || /italic|oblique/.test(nm);
   return { family: mono ? 'mono' : serif ? 'serif' : 'sans', bold, italic };
 }

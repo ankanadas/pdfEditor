@@ -49,4 +49,17 @@ for id in "${PREVIEW[@]}"; do
   out="$W2_DIR/$id.woff2"
   if dl "$CDN/$id@latest/latin-400-normal.woff2" "$out"; then echo "  $id.woff2"; else rm -f "$out"; echo "  !! $id MISSING"; fi
 done
+
+# Bold / italic / bold-italic woff2 for editor DISPLAY of substitutes that have NO system font on
+# macOS/Linux (Calibri->carlito, Cambria->caladea): without a real bold face a *-Bold heading previewed as
+# LIGHT synthetic bold while the save stayed bold. Registered in fonts.css; guarded by the headingbold
+# test. Named <id>-bold / -italic / -bolditalic.woff2. (Arial/Times/Georgia have system faces — not needed.)
+echo "== editor bold/italic woff2 =="
+for id in carlito caladea; do
+  for wv in "700-normal:bold" "400-italic:italic" "700-italic:bolditalic"; do
+    ws="${wv%%:*}"; sfx="${wv##*:}"
+    out="$W2_DIR/$id-$sfx.woff2"
+    if dl "$CDN/$id@latest/latin-$ws.woff2" "$out"; then echo "  $id-$sfx.woff2"; else rm -f "$out"; echo "  !! $id-$sfx MISSING"; fi
+  done
+done
 echo "done"

@@ -420,6 +420,12 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         },
       });
     } catch (_) { /* clamp is best-effort */ }
+    // Median glyph size on the page — the TYPICAL line height. A searchable scan's hidden OCR boxes are
+    // unreliable: one word can carry a box ~2× the real height, and once edited its coverScan cover then
+    // balloons over the line BELOW and hides it (a bottom URL got clipped this way). Used to clamp such an
+    // outlier cover back to a normal line height.
+    const _gsz = pageGlyphs.map((g) => g.sz).filter((s) => s > 0).sort((a, b) => a - b);
+    const medGlyph = _gsz.length ? _gsz[_gsz.length >> 1] : 0;
 
     const redactRects = [];
     for (const e of pageEdits) {
@@ -508,11 +514,25 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // so an edited / deleted / moved OCR line must COVER the printed original with the line's
       // sampled background first (else the replacement overlaps the old glyphs on the scan). Uses the
       // ORIGINAL rect (e.x/top/bottom/right) — a moved line draws at +dx/dy and its source is cleared.
-      if (e.ocr) {
-        const ox = +(e.x || 0), otop = +(e.top || 0), obot = +(e.bottom || 0), orr = +(e.right || ox);
+      // `coverScan` is the same need on a SCANNED-HYBRID page (native text layer over a full-page scan):
+      // redaction clears the text-layer run but the baked scan glyphs remain, so cover them the same way.
+      if (e.ocr || e.coverScan) {
+        const ox = +(e.x || 0); let otop = +(e.top || 0), obot = +(e.bottom || 0); const orr = +(e.right || ox);
+        // Clamp an OUTLIER scan box (a bad hidden-OCR box ~2× the real line height, whose BOTTOM often
+        // drifts down onto the next line) to a normal height measured from its TOP — the printed glyph
+        // sits near the top of such a box, so top-anchoring keeps the cover on this line and off the line
+        // BELOW (a bottom URL got hidden this way). The baseline can't be trusted here (it drifts too).
+        if (e.coverScan && medGlyph > 0 && (obot - otop) > medGlyph * 1.7) obot = otop + medGlyph * 1.35;
         const obg = Array.isArray(e.bgColor) && e.bgColor.length >= 3
           ? [e.bgColor[0] / 255, e.bgColor[1] / 255, e.bgColor[2] / 255] : [1, 1, 1];
-        ops.op(`q ${f2(obg[0])} ${f2(obg[1])} ${f2(obg[2])} rg ${f2(ox - 2)} ${f2(ph - obot - 1)} ${f2((orr - ox) + 4)} ${f2((obot - otop) + 2)} re f Q\n`);
+        // A SCANNED text-layer's hidden boxes tend to UNDER-cover the printed ink (the OCR box runs a
+        // touch narrower/shorter than the glyphs), so a tight cover leaves a sliver of the original
+        // showing — the trailing glyph + its link underline. Pad the coverScan rect by a fraction of the
+        // line height (bounded, so it can't reach a neighbour); a real OCR overlay box is tight → 2px.
+        const lh = Math.abs(obot - otop) || 12;
+        const hp = e.coverScan ? Math.max(2, lh * 0.5) : 2;
+        const vp = e.coverScan ? Math.max(1, lh * 0.12) : 1;
+        ops.op(`q ${f2(obg[0])} ${f2(obg[1])} ${f2(obg[2])} rg ${f2(ox - hp)} ${f2(ph - obot - vp)} ${f2((orr - ox) + hp * 2)} ${f2((obot - otop) + vp * 2)} re f Q\n`);
       }
       const hasUl = !!e.underline || (e.runs || []).some(ln => (ln || []).some(r => r && r.underline));
       if (!hasUl && !e.coverUnderline) continue;
@@ -533,7 +553,11 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // but every drawn artefact — text runs, underline, link rects — originates from (x, baseline),
       // so offsetting them here places the whole line at its new spot in the output.
       const mdx = +(e.dx) || 0, mdy = +(e.dy) || 0;
-      const x = +(e.x || 0) + mdx, baseline = +(e.baseline || 0) + mdy;
+      const x = +(e.x || 0) + mdx;
+      let baseline = +(e.baseline || 0) + mdy;
+      // An OUTLIER scan box's stored baseline drifts DOWN onto the next line; re-seat the replacement a
+      // cap-height below the box TOP so it lands on THIS line (matches the top-anchored cover above).
+      if (e.coverScan && medGlyph > 0 && (+(e.bottom || 0) - +(e.top || 0)) > medGlyph * 1.7) baseline = +(e.top || 0) + medGlyph * 0.82 + mdy;
       const sp = e._span;   // detected original style (replace edits only)
       // Bundled-font selection: an explicit toolbar family (Arial/Calibri/Georgia/…) wins; else a LaTeX
       // original blends with the matching open LaTeX face (Latin Modern / TeX Gyre); else the generic
@@ -558,6 +582,10 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
       // explicit toolbar size change (sizeOverride) or added text uses the frontend size.
       let boxSize = +(e.fontSize || 12) || 12;
       if (sp && sp.size && !e.sizeOverride && !isInsert) boxSize = sp.size;
+      // A searchable scan's hidden text run can report a WRONG (oversized ~2×) font size — clamp only a
+      // clear outlier on a scan-backdrop edit so the replacement doesn't render huge; normal / heading-
+      // sized lines (≤ 1.7× the page's typical glyph) keep their exact size.
+      if (e.coverScan && medGlyph > 0 && boxSize > medGlyph * 1.7) boxSize = medGlyph * 1.2;
       // Weight/slant: union the frontend flag with the detected original (only ADDS — never un-bolds a
       // correct line), recovering a bold heading on a non-embedded standard font the frontend missed.
       let wantBold = !!e.bold, wantItalic = !!e.italic;
@@ -642,6 +670,21 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
         opts.push(bundledSimpleOption(bundled));   // WinAnsi-encodable glyphs → simple WinAnsi (Chrome-identical)
         opts.push(bundled);                         // genuinely non-WinAnsi → Type0 full-Unicode catch-all
         r._opts = opts;
+        // UN-EMBEDDABLE TEXT GUARD: the bundled substitutes are LATIN faces (+ Cyrillic/Greek), and a
+        // document's own CID/CJK font can't be re-encoded by codepoint — so non-Latin edited text
+        // (Chinese/Japanese/Arabic/Indic/Thai…) would resolve to the catch-all's .notdef glyph and save
+        // as "tofu" boxes (□) in every viewer. Detect that here and DECLINE, so the save chain drops to
+        // the flatten tier, which rasterises the page through the browser's OWN fonts (full script
+        // coverage) — the user's text survives as a printable image instead of boxes.
+        for (const ch of r.text || '') {
+          const cp = ch.codePointAt(0);
+          if (cp <= 0x20) continue;
+          const o = pickOption(cp, opts);
+          if (o.charset === null && !o.winAnsi) {          // fell through to the bundled Type0 catch-all
+            let g = 0; try { g = o.mfont.encodeCharacter(cp); } catch (_) {}
+            if (!g) throw new Error('QPE_NEEDS_FLATTEN: edited text has glyphs no embeddable font covers (U+' + cp.toString(16).toUpperCase() + ')');
+          }
+        }
       }
 
       // METRIC MATCH — an UNREUSABLE original font (broken-cmap subset like this doc's Geneva) falls to
@@ -718,6 +761,7 @@ export async function applyEdits(mupdf, doc, data, loadFont) {
             const egs = boxOpacity < 1 ? egsFor(boxOpacity) : null;
             ops.op('q ' + (egs ? '/' + egs.name + ' gs ' : '') + 'BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf '
               + (tz !== 1 ? f2(tz * 100) + ' Tz ' : '')     // metric-match horizontal scale (see above)
+              + (e.invisible ? '3 Tr ' : '')                // searchable-PDF layer: glyphs select/search but paint nothing
               + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
             ops.op(rot ? `${f2(cos)} ${f2(sin)} ${f2(-sin)} ${f2(cos)} ${f2(px)} ${f2(py)} Tm ` : `1 0 0 1 ${f2(px)} ${f2(py)} Tm `);
             if (seg.opt.winAnsi) ops.textString(seg.bytes); else ops.glyphString(seg.hex);

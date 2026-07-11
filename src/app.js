@@ -34,7 +34,8 @@ import { TextSanitizeMethods } from './core/textSanitize.js';
 import { PageOpsMethods } from './features/pageOps.js';
 import { MoveLinesMethods } from './features/moveLines.js';
 import { CheckmarkMethods } from './features/checkmark.js';
-import { OcrMethods } from './ocr/ocrService.js';
+// OcrMethods is loaded LAZILY (dynamic import at idle, below) so Tesseract/OCR code + its deps stay
+// OUT of the initial bundle — a text-PDF session never pays for it.
 import { editLimitMb } from './core/limits.js';
 
 // Self-host the PDF.js worker (bundled by webpack) instead of loading it from a CDN.
@@ -189,9 +190,24 @@ class PDFEditorApp {
       else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); this.redo(); }
     });
 
-    // Save button
+    // Save button. A scanned / OCR'd doc offers a choice on Save — "Save as Readable PDF" (the recognised
+    // text becomes real selectable text; the DEFAULT, highlighted) vs "Save Original PDF" (the scan
+    // unchanged). A normal document saves straight away. (Replaces the old always-on top "readable" button.)
+    const saveChoice = document.getElementById('saveChoiceModal');
+    const closeSaveChoice = () => saveChoice && saveChoice.classList.remove('open');
+    document.getElementById('saveChoiceReadable')?.addEventListener('click', () => { closeSaveChoice(); this.ocrSaveReadable(); });
+    document.getElementById('saveChoiceOriginal')?.addEventListener('click', () => { closeSaveChoice(); this.savePDF(); });
+    document.getElementById('saveChoiceClose')?.addEventListener('click', closeSaveChoice);
+    saveChoice?.addEventListener('click', (e) => { if (e.target === saveChoice) closeSaveChoice(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && saveChoice?.classList.contains('open')) closeSaveChoice(); });
     document.getElementById('saveBtn').addEventListener('click', () => {
-      this.savePDF();
+      const isOcr = (this.extractedTextItems || []).some((t) => t && t.ocr);
+      if (isOcr && saveChoice) {
+        saveChoice.classList.add('open');
+        document.getElementById('saveChoiceReadable')?.focus();   // Readable = default/highlighted choice
+      } else {
+        this.savePDF();
+      }
     });
 
     // Page navigation
@@ -373,7 +389,7 @@ class PDFEditorApp {
 
           // Best-effort weight/style/family detection from the font name + family.
           const fam = (((styles[item.fontName] || {}).fontFamily || '') + ' ' + (item.fontName || '')).toLowerCase();
-          const bold = /bold|black|heavy|semibold|cmbx/.test(fam);
+          const bold = /bold|black|heavy|semi.?bold|demi.?bold|medium|cmbx/.test(fam);   // Medium/Semibold read as bold (e.g. I-94 labels)
           const italic = /italic|oblique|cmti|cmsl/.test(fam);
           const isSans = /sans|helvetica|arial|verdana|calibri|segoe|roboto|tahoma|cmss/.test(fam);
           const serif = !isSans && /serif|times|roman|georgia|garamond|cmr|cmbx|cmti|cmsl|charter|minion/.test(fam);
@@ -518,7 +534,7 @@ class PDFEditorApp {
 }
 
 
-Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods, MoveLinesMethods, WatermarkMethods, CheckmarkMethods, OcrMethods);
+Object.assign(PDFEditorApp.prototype, NavigationMethods, HistoryMethods, StampMethods, EraseMethods, PagesPanelMethods, SignatureMethods, InsertEditorMethods, SaveServiceMethods, PageRendererMethods, TextEditingMethods, FileIOMethods, TextToolbarMethods, ModeManagerMethods, AnnotateToolbarMethods, RestrictionMethods, LineStyleMethods, PageOpsMethods, FontPickerMethods, TextSanitizeMethods, FindReplaceMethods, MoveLinesMethods, WatermarkMethods, CheckmarkMethods);
 
 // Initialize the app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
@@ -526,6 +542,20 @@ document.addEventListener('DOMContentLoaded', () => {
   initMerge();   // wire up the client-side "Merge PDF" feature (self-contained)
   initSplit();   // wire up the client-side "Split PDF" feature (self-contained)
   initWatermark();   // wire up the client-side "Remove Watermark" feature (self-contained)
+  // OCR is fully LAZY. The small OCR-methods chunk loads at idle (so a scanned page can be DETECTED),
+  // but the heavy engine (worker + ~7 MB wasm core + language pack) is NOT loaded here — it loads
+  // ON DEMAND only when an image-only page is actually recognized (_ocrEnsureWorker). A text-PDF
+  // session therefore downloads ZERO of the OCR engine; the ~10 MB is paid once, only by scan users,
+  // and cached (IndexedDB + service worker) for every session after. A scan already painted before the
+  // chunk arrived is caught up here.
+  const idleLoad = (fn) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 4000 }) : setTimeout(fn, 1500));
+  idleLoad(() => {
+    import('./ocr/ocrService.js').then((m) => {
+      Object.assign(PDFEditorApp.prototype, m.OcrMethods);
+      const app = window.pdfEditorApp;
+      (app.pageViews || []).forEach((pv) => { try { app.ocrMaybePage && app.ocrMaybePage(pv); } catch (_) {} });
+    }).catch(() => { /* OCR is optional — a load failure just means no scan support this session */ });
+  });
   // Register the offline service worker (caches the app shell + mupdf .wasm + edit-fonts) so editing works
   // offline across sessions. Best-effort — a failure here must never block the app.
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

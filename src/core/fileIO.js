@@ -130,6 +130,9 @@ export const FileIOMethods = {
       this.originalFile = file;
       this.edits = [];
       this.resetHistory();
+      // Reset per-document OCR state (keeps the warm worker) so a SECOND scanned upload re-OCRs and
+      // the Searchable/Text-export UI doesn't linger onto the next (maybe non-scanned) document.
+      if (this.ocrResetForNewDoc) this.ocrResetForNewDoc();
 
       // Read file as ArrayBuffer and clone it to prevent detachment
       const arrayBuffer = await file.arrayBuffer();

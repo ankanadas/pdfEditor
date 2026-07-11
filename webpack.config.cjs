@@ -46,6 +46,26 @@ module.exports = {
   },
   // mupdf.js uses top-level await to initialise the WASM module.
   experiments: { topLevelAwait: true },
+  // Code-splitting: pull the heavy render/PDF vendors and other node_modules into their OWN
+  // content-hashed chunks. App-code edits then no longer invalidate the (large, rarely-changing)
+  // vendor bundle in the browser cache, and the dynamic import('./ocr/ocrService.js') gives OCR its
+  // own on-demand chunk — so the INITIAL bundle a text-PDF user downloads is smaller. HtmlWebpackPlugin
+  // injects every emitted chunk automatically.
+  optimization: {
+    splitChunks: {
+      chunks: 'all',
+      cacheGroups: {
+        pdfvendor: {
+          test: /[\\/]node_modules[\\/](pdfjs-dist|pdf-lib|mupdf|fabric)[\\/]/,
+          name: 'pdfvendor', priority: 20, reuseExistingChunk: true,
+        },
+        vendors: {
+          test: /[\\/]node_modules[\\/]/,
+          name: 'vendors', priority: 10, reuseExistingChunk: true,
+        },
+      },
+    },
+  },
   plugins: [
     // Drop mupdf's node-only `await import("node:fs")` (guarded, never reached in the browser) so the
     // web/worker build doesn't choke on the unhandled `node:` scheme.

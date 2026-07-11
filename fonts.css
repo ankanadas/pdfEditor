@@ -4,7 +4,17 @@
    full TTFs in backend/fonts/ — see backend/fonts/NOTICE.md. No proprietary fonts here. */
 @font-face{font-family:'pf-arimo';src:url('/assets/fonts/arimo.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
 @font-face{font-family:'pf-caladea';src:url('/assets/fonts/caladea.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+/* Caladea (Cambria substitute) BOLD/ITALIC — same no-system-font case as Carlito (see below). */
+@font-face{font-family:'pf-caladea';src:url('/assets/fonts/caladea-bold.woff2') format('woff2');font-weight:700;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-caladea';src:url('/assets/fonts/caladea-italic.woff2') format('woff2');font-weight:400;font-style:italic;font-display:swap;}
+@font-face{font-family:'pf-caladea';src:url('/assets/fonts/caladea-bolditalic.woff2') format('woff2');font-weight:700;font-style:italic;font-display:swap;}
 @font-face{font-family:'pf-carlito';src:url('/assets/fonts/carlito.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
+/* Carlito BOLD/ITALIC faces — the editable box maps Calibri-Bold to `pf-carlito` weight 700; without a real
+   bold face a no-Calibri platform (macOS/Linux) rendered a heading as LIGHT synthetic bold instead of bold,
+   so the editor didn't match the (bold) save. Real faces so weight 700 / italic display truly bold. */
+@font-face{font-family:'pf-carlito';src:url('/assets/fonts/carlito-bold.woff2') format('woff2');font-weight:700;font-style:normal;font-display:swap;}
+@font-face{font-family:'pf-carlito';src:url('/assets/fonts/carlito-italic.woff2') format('woff2');font-weight:400;font-style:italic;font-display:swap;}
+@font-face{font-family:'pf-carlito';src:url('/assets/fonts/carlito-bolditalic.woff2') format('woff2');font-weight:700;font-style:italic;font-display:swap;}
 @font-face{font-family:'pf-comic-neue';src:url('/assets/fonts/comic-neue.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
 @font-face{font-family:'pf-cousine';src:url('/assets/fonts/cousine.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}
 @font-face{font-family:'pf-eb-garamond';src:url('/assets/fonts/eb-garamond.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap;}

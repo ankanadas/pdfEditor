@@ -48,6 +48,23 @@ export function sampleLineColors(pv, line) {
     let bg = null, bgN = -1;
     for (const [k, n] of padC) { if (n > bgN) { bgN = n; bg = padRep.get(k); } }
     if (!bg) { for (const [k, n] of inC) { if (n > bgN) { bgN = n; bg = inRep.get(k); } } }
+    // Prefer a light TINTED shade over a NEUTRAL modal: when a line sits at the EDGE of a shaded cell
+    // (a paystub's blue band with a white margin on one side), the padding modal picked the white
+    // margin and the editor covered the shade with a white "hole". If the modal is near-neutral but a
+    // light coloured shade (tinted, not dark ink) holds a real share of the padding, that tint is the
+    // cell's own background — use it. A genuinely white cell has no such tint and stays white.
+    if (bg) {
+      const neutral = (c) => Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2]) < 10;
+      if (neutral(bg)) {
+        let padTotal = 0; for (const n of padC.values()) padTotal += n;
+        let tint = null, tintN = 0;
+        for (const [k, n] of padC) {
+          const c = padRep.get(k);
+          if (!neutral(c) && Math.min(c[0], c[1], c[2]) > 150 && n > tintN) { tintN = n; tint = c; }
+        }
+        if (tint && tintN >= 0.22 * padTotal) bg = tint;
+      }
+    }
 
     // Text = the inside-box colour most distinct from the background. The plain MODAL far-colour
     // skews to the anti-aliased grey EDGES of thin glyphs (Computer Modern / LaTeX body text),

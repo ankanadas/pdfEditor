@@ -569,7 +569,23 @@
        display twin of the save-side cover. .ocr-edited's inline background (the line's sampled
        colour) overrides the white default. */
     .editable-text-box.ocr-text:focus,
-    .editable-text-box.ocr-text.ocr-edited { color: #111 !important; -webkit-text-fill-color: #111; background: #fff; }
+    .editable-text-box.ocr-text.ocr-edited { color: #111 !important; -webkit-text-fill-color: currentColor; background: #fff; }
+    /* Make each RUN paint with its OWN colour (a coloured OCR line — e.g. a brown subtitle — keeps its
+       colour when edited/moved). Without this, the box's fill-colour inherits down and forces every
+       run black. currentColor resolves to each element's own `color` (the run spans set theirs inline). */
+    .editable-text-box.ocr-text:focus *,
+    .editable-text-box.ocr-text.ocr-edited * { -webkit-text-fill-color: currentColor; }
+    /* Recognition progress shimmer: a soft veil + a sweeping highlight bar whose position tracks
+       tesseract's native progress (0..1) — live feedback while a page is being read. */
+    .ocr-shimmer { position: absolute; inset: 0; z-index: 130; pointer-events: none;
+      background: rgba(240, 244, 255, 0.28); transition: opacity .18s linear; }
+    .ocr-shimmer-bar { position: absolute; left: 0; right: 0; height: 8%; top: 0;
+      background: linear-gradient(180deg, rgba(32,80,255,0) 0%, rgba(32,80,255,.16) 50%, rgba(32,80,255,0) 100%);
+      transition: top .22s ease; }
+    /* Searchable-PDF progress pill (recognize-all + bake, during Save) */
+    #searchableProgress { position: fixed; left: 50%; top: 18px; transform: translateX(-50%); z-index: 4000;
+      background: rgba(20,22,40,.9); color: #fff; font-size: 13px; font-weight: 600;
+      padding: 8px 16px; border-radius: 999px; box-shadow: 0 4px 16px rgba(0,0,0,.3); pointer-events: none; }
     .ocr-spinner { position: absolute; top: 8px; left: 8px; z-index: 140; display: inline-flex; align-items: center;
       gap: 8px; padding: 5px 11px; border-radius: 999px; background: rgba(20,22,40,.82); color: #fff; font-size: 12.5px;
       font-weight: 600; pointer-events: none; box-shadow: 0 3px 12px rgba(0,0,0,.28); }
@@ -861,6 +877,10 @@
       background: rgba(20, 22, 40, .45); align-items: center; justify-content: center;
     }
     .confirm-backdrop.open { display: flex; }
+    /* Save-choice (scanned doc): Readable is the primary/highlighted action, Original secondary. */
+    .save-choice-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 22px; }
+    .save-choice-actions .btn { width: 100%; justify-content: center; padding: 12px 16px; font-size: 15px; font-weight: 600; }
+    .save-choice-actions .btn:not(.primary) { background: #f1f2f7; color: #2a2d43; }
     /* Styled to match the Merge cancel warning (centred, orange warning icon). */
     .confirm-box {
       background: #fff; border-radius: 18px; padding: 32px 28px; width: 420px; max-width: 92vw;
@@ -1715,6 +1735,13 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h11l3 3v15H5Z"/><path d="M8 3v5h7"/><path d="M8 21v-7h8v7"/></svg>
           Save
         </button>
+        <!-- Searchable PDF is ALWAYS ON for scanned docs (no toggle, no prompt): Save automatically bakes
+             the recognised words invisibly under the scan so ANY viewer can select/search the file. -->
+        <!-- Text export for scanned docs: full .txt / .rtf with headers, footers & page numbers
+             auto-stripped. Revealed once a scanned page is recognised. -->
+        <span id="textExportWrap" hidden>
+          <button class="btn" id="saveReadableBtn" title="Save a readable PDF: the scanned text becomes real, selectable text in place (same colours, sizes &amp; background); images and handwriting are kept exactly as they are">Save as readable PDF</button>
+        </span>
 
         <!-- Search toggle (TOP bar, right after Save): opens the Search & Replace side panel. -->
         <button class="btn" id="searchToolBtn" disabled aria-pressed="false" title="Search: find text in the document (close matches too) and replace it — styled or as-is">
@@ -2040,6 +2067,21 @@
         <button class="lf-action" id="largeFileMerge" type="button">
           <img src="/assets/fun-ui/merge.png" alt="" aria-hidden="true"> Merge
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Save-choice dialog for a scanned / OCR'd doc: Readable (default, highlighted) vs the original scan. -->
+  <div id="saveChoiceModal" class="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="saveChoiceTitle">
+    <div class="confirm-box save-choice-box">
+      <button class="lf-close" id="saveChoiceClose" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+      <div class="confirm-title" id="saveChoiceTitle">Save this scanned PDF</div>
+      <div class="confirm-msg">A <strong>Readable PDF</strong> turns the scanned text into real, selectable text in place (same colours, sizes &amp; background); images &amp; handwriting are kept as-is. Or keep the original scan unchanged.</div>
+      <div class="save-choice-actions">
+        <button class="btn primary" id="saveChoiceReadable" type="button">Save as Readable PDF</button>
+        <button class="btn" id="saveChoiceOriginal" type="button">Save Original PDF</button>
       </div>
     </div>
   </div>
