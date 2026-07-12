@@ -965,6 +965,33 @@ export const OcrMethods = {
       const pageLines = {};      // pageNum -> detected table/grid rules (canvas px) for the vector overlay
       for (const pv of this.pageViews || []) {
         if (!pv || !pv.canvas) continue;
+        // NON-ENGLISH page (legacy Devanagari page, or a Phase-5 detected-language scan): the stored OCR is
+        // already in the correct language and the page's OWN pixels render the script — so add an INVISIBLE
+        // searchable layer (OCRmyPDF principle) and keep the original render, exactly like the always-on
+        // searchable bake. The English readable pass below MUST be skipped for these: it re-OCRs with the
+        // ENGLISH worker and its Latin-only sanitize()/realWords()/isVisible gates (`/[A-Za-z0-9]/`, 3+ Latin
+        // letters) strip every Devanagari/CJK token — 0 of N lines survive, producing a blank-text PDF. We
+        // don't re-draw the text visibly (would double the already-rendered glyphs, and drawing OCR-guessed
+        // shaped glyphs risks the wrong ones); the invisible layer makes it selectable/searchable in any viewer.
+        if (pv._ocrLang && pv._ocrLang !== 'eng') {
+          const stored = (this.extractedTextItems || []).filter((t) => t.ocr && t.pageIndex === pv.pageNum && (t.text || '').trim());
+          for (const it of stored) {
+            // Skip words the user already EDITED — the edit path bakes those visibly; a second invisible copy
+            // would double them for search.
+            const consumed = (this.edits || []).some((e) => e.pageIndex === it.pageIndex && e.redact !== false &&
+              Math.min(e.right * s, it.right) - Math.max(e.x * s, it.left) > 0 &&
+              Math.min(e.bottom * s, it.bottom) - Math.max(e.top * s, it.top) > 0);
+            if (consumed) continue;
+            const ih = Math.max(1, it.bottom - it.top);
+            edits.push({
+              redact: false, invisible: true, pageIndex: pv.pageNum,
+              x: it.left / s, right: it.right / s, top: it.top / s, bottom: it.bottom / s,
+              baseline: (it.baseline || it.bottom) / s, fontSize: Math.max(4, (ih / s) * 0.85),
+              newText: it.text,
+            });
+          }
+          continue;   // no visible redraw / cover strips / table vectorisation for a non-English page
+        }
         // REGION-BOUNDED re-OCR (readable ≠ search overlay): the full-page overlay is what stays
         // searchable, but the readable PDF re-reads only the TEXT regions in isolation (contrast-boosted,
         // single-column PSM 4 + whitened margin bands) — that lifts recall ~79 %→~90 % on a poor scan AND
