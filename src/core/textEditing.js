@@ -37,7 +37,13 @@ export const TextEditingMethods = {
     // such a page, skip the boxes + cover strips entirely — the canvas render is correct, leaving it
     // fully viewable (Add/Highlight/Sign/Stamp still work; the existing text just isn't editable, which it
     // couldn't be anyway without a font-specific Unicode remap). Marked so callers can surface it.
-    if (isLegacyGarbledPage(pageTextItems)) { pv._legacyGarbled = true; return; }
+    if (isLegacyGarbledPage(pageTextItems)) {
+      pv._legacyGarbled = true;
+      // Phase 4: the font DRAWS correct Devanagari — OCR the render with Hindi so the text becomes correct,
+      // selectable, EDITABLE Unicode. View-only (no garbage boxes) until the OCR overlay lands.
+      if (this.ocrMaybePageLegacy) this.ocrMaybePageLegacy(pv);
+      return;
+    }
 
     // EXACT per-char ink colours from the PDF itself (mupdf structured text, worker round-trip).
     // Canvas pixel sampling drifts on WebKit (its rasteriser blends small glyphs so much that no

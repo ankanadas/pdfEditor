@@ -57,7 +57,7 @@ export const OcrMethods = {
   /** Construct ONE tesseract worker. `withLogger` wires the progress spinner (used by the primary
    *  worker only — extra pool workers stay silent; a big page's progress is driven by tile COMPLETIONS
    *  in _ocrPump, and several loggers writing the same spinner would just fight each other). */
-  async _ocrNewWorker(withLogger) {
+  async _ocrNewWorker(withLogger, lang) {
     const base = '/assets/tesseract/';
     const T = await this._ocrLoadLib();
     const opts = {
@@ -79,7 +79,8 @@ export const OcrMethods = {
     // NOTE: page-segmentation mode (PSM) is set PER RECOGNITION (see _ocrRecognize), not here — a normal
     // doc scan wants the full layout analysis (PSM 3) for accuracy, while a big noisy MAP tile wants
     // sparse mode (PSM 11) for speed. Setting it globally here regressed doc-scan accuracy.
-    return T.createWorker('eng', 1, opts);
+    // `lang` defaults to eng; 'hin' (or others) fetches that traineddata for a legacy/non-English page.
+    return T.createWorker(lang || 'eng', 1, opts);
   },
 
   /** Recognise one image with an explicit PSM. PSM 3 (AUTO, full layout analysis) = accurate on a normal
@@ -101,16 +102,26 @@ export const OcrMethods = {
     } finally { release(); }
   },
 
-  async _ocrEnsureWorker() {
+  async _ocrEnsureWorker(lang) {
     const o = this._ocr;
-    if (o.tw) return o.tw;
-    // Cache the in-flight PROMISE, not just the result: several pages (or the pump + a searchable pass)
-    // can call this before the first worker resolves, and without this each would spawn its OWN worker
-    // → duplicate ~7 MB core + traineddata downloads and memory. One worker, shared.
-    if (o.twPromise) return o.twPromise;
-    o.twPromise = this._ocrNewWorker(true).then((tw) => { o.tw = tw; return tw; });
-    o.twPromise.catch(() => { o.twPromise = null; });   // a failed load can be retried on the next scan
-    return o.twPromise;
+    // ENGLISH (default) — the primary worker `o.tw`, shared with the tile pool. Unchanged.
+    if (!lang || lang === 'eng') {
+      if (o.tw) return o.tw;
+      // Cache the in-flight PROMISE, not just the result: several pages (or the pump + a searchable pass)
+      // can call this before the first worker resolves, and without this each would spawn its OWN worker
+      // → duplicate ~7 MB core + traineddata downloads and memory. One worker, shared.
+      if (o.twPromise) return o.twPromise;
+      o.twPromise = this._ocrNewWorker(true, 'eng').then((tw) => { o.tw = tw; return tw; });
+      o.twPromise.catch(() => { o.twPromise = null; });   // a failed load can be retried on the next scan
+      return o.twPromise;
+    }
+    // OTHER LANGUAGE (e.g. 'hin' for a legacy Devanagari page) — its own cached worker, single-shot use.
+    o.langW = o.langW || {}; o.langWP = o.langWP || {};
+    if (o.langW[lang]) return o.langW[lang];
+    if (o.langWP[lang]) return o.langWP[lang];
+    o.langWP[lang] = this._ocrNewWorker(true, lang).then((tw) => { o.langW[lang] = tw; return tw; });
+    o.langWP[lang].catch(() => { o.langWP[lang] = null; });
+    return o.langWP[lang];
   },
 
   /** A POOL of `n` workers for parallel TILE recognition on a big scan (a 20 MP poster is 12 serial
@@ -172,6 +183,23 @@ export const OcrMethods = {
     if (pv._pageImages && pv._pageImages.length && this._ocrIsImageOnly(pv)) this._ocrRevealTextExport();
     if (o.done.has(pi) || o.pending.has(pi)) return;
     if (!this._ocrIsImageOnly(pv)) return;
+    o.pending.add(pi);
+    o.queue.push(pi);
+    this._ocrPump();
+  },
+
+  /** LEGACY non-Unicode Devanagari page (Kruti/APS/DevLys — the font DRAWS correct Hindi but the text
+   *  extracts as accented-Latin garbage). Called by the box builder when isLegacyGarbledPage fires. The page
+   *  renders crisp vector Devanagari, so we OCR that RENDER with HINDI → the text becomes correct, selectable,
+   *  copyable, EDITABLE Unicode (Phase 4) — general across legacy fonts (no per-font remap table needed). The
+   *  garbage text layer is dropped so the OCR'd Unicode replaces it; the page stays VIEW-ONLY until OCR lands. */
+  ocrMaybePageLegacy(pv) {
+    if (!pv || !pv.canvas) return;
+    this.ocrInit();
+    const pi = pv.pageNum, o = this._ocr;
+    if (o.done.has(pi) || o.pending.has(pi)) return;
+    pv._ocrLang = 'hin';
+    this.extractedTextItems = (this.extractedTextItems || []).filter((t) => !(t.pageIndex === pi && !t.ocr));
     o.pending.add(pi);
     o.queue.push(pi);
     this._ocrPump();
@@ -293,7 +321,8 @@ export const OcrMethods = {
     o.busy = true; o.curPv = pv;
     this._ocrShowSpinner(pv, 'Loading OCR…', 0);
     try {
-      const tw = await this._ocrEnsureWorker();
+      const lang = pv._ocrLang || 'eng';          // 'hin' for a legacy Devanagari page (see ocrMaybePage)
+      const tw = await this._ocrEnsureWorker(lang);
       // TILED recognition (Lege-style region fan-out): a canvas bigger than one tile is recognised as a
       // grid of tiles (overlapped so no word is cut at a seam; seam-touching words dropped — the
       // neighbouring tile sees them whole; the overlap zone deduped by IoU), the tiles fanned across a
@@ -340,7 +369,9 @@ export const OcrMethods = {
         .map((w) => ({ text: w.text, conf: typeof w.confidence === 'number' ? w.confidence : 100,
           bbox: { x0: w.bbox.x0 + ox, y0: w.bbox.y0 + oy, x1: w.bbox.x1 + ox, y1: w.bbox.y1 + oy } }));
       let words = [];
-      if (px <= SINGLE_MAX * 1.25) {
+      // A non-English page (legacy → 'hin') uses its own single worker, so keep it SINGLE-SHOT — the tile
+      // pool is the English primary. A rendered legacy book page is crisp + letter-sized, so no tiling need.
+      if (lang !== 'eng' || px <= SINGLE_MAX * 1.25) {
         // Binarization pre-pass (Otsu): a DIRTY document scan reads far better as crisp black-on-
         // white. Gated inside binarizeForOcr — photos and already-crisp scans pass through untouched.
         const bin = binarizeForOcr(src);
