@@ -102,6 +102,42 @@ export const OcrMethods = {
     } finally { release(); }
   },
 
+  // ── Phase 5: MULTI-LANGUAGE scan OCR ─────────────────────────────────────────────────────────────────
+  /** The English pass read this page with LOW mean confidence — it may be the wrong script. (A "few Latin
+   *  words" test is unreliable: English OCR of Devanagari coins Latin-LOOKING garbage like "TINT"/"ASTUTE".)
+   *  Low confidence is the robust trigger; the detection below only SWITCHES when a candidate BEATS English,
+   *  so a merely-blurry English page harmlessly stays English. */
+  _ocrLooksNonLatin(words) {
+    if (!words || words.length < 3) return false;
+    const cs = words.map((w) => w.conf).filter((c) => typeof c === 'number');
+    const meanConf = cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : 100;
+    return meanConf < 50;
+  },
+
+  /** Detect a non-English scan's language by re-recognising a small DOWNSCALED copy with English AND each
+   *  candidate script's traineddata (lazy), keeping the best mean confidence. Returns the winning NON-English
+   *  language (hin/ara/chi_sim) only when it clearly reads better than English (conf ≥ 55 and highest); else
+   *  null → stay English. One cheap pass per language, detection-only. */
+  async _ocrDetectLang(src) {
+    const cap = 1200000, px = src.width * src.height;
+    let img = src;
+    if (px > cap) {
+      const s = Math.sqrt(cap / px);
+      const c = document.createElement('canvas'); c.width = Math.max(8, Math.round(src.width * s)); c.height = Math.max(8, Math.round(src.height * s));
+      c.getContext('2d').drawImage(src, 0, 0, c.width, c.height); img = c;
+    }
+    let best = { lang: 'eng', conf: -1 };
+    for (const lang of ['eng', 'hin', 'ara', 'chi_sim']) {
+      try {
+        const w = await this._ocrEnsureWorker(lang);
+        const { data } = await this._ocrRecognize(w, img, 6);   // PSM 6 = a uniform text block
+        const conf = typeof data.confidence === 'number' ? data.confidence : 0;
+        if (conf > best.conf) best = { lang, conf };
+      } catch (_) {}
+    }
+    return (best.lang !== 'eng' && best.conf >= 55) ? best.lang : null;
+  },
+
   async _ocrEnsureWorker(lang) {
     const o = this._ocr;
     // ENGLISH (default) — the primary worker `o.tw`, shared with the tile pool. Unchanged.
@@ -454,6 +490,19 @@ export const OcrMethods = {
           x0: w.bbox.x0 * s, y0: w.bbox.y0 * s, x1: w.bbox.x1 * s, y1: w.bbox.y1 * s } }));
       }
       o.tileProg = null;
+      // Phase 5 — MULTI-LANGUAGE scan: English read this page as NON-LATIN garbage → detect the script's
+      // language and RE-OCR the page with it. Only a fresh English scan (not the legacy 'hin' path, not
+      // already tried). Re-queues the page; the finally pumps it again with the detected language.
+      if (lang === 'eng' && !pv._ocrLangTried && this._ocrLooksNonLatin(words)) {
+        pv._ocrLangTried = true;
+        const detected = await this._ocrDetectLang(src);
+        if (detected && detected !== 'eng') {
+          pv._ocrLang = detected;
+          o.queue.unshift(pi);            // re-recognise this page (still pending) with `detected`
+          this._ocrHideSpinner(pv);
+          return;
+        }
+      }
       o.done.add(pi); o.pending.delete(pi);
       this._ocrHideSpinner(pv);
       this._ocrApplyOverlay(pv, words);
