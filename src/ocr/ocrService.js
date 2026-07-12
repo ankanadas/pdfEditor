@@ -508,7 +508,12 @@ export const OcrMethods = {
       this._ocrApplyOverlay(pv, words);
       // Queue the background searchability upgrade (skip phones — the region upscale is memory-heavy there,
       // and the fast overlay + "Save as Readable" already cover them). Runs when the recognise queue idles.
-      if (!isPhoneDevice() && words && words.length && !pv._ocrUpgraded && o.upgradeQueue && !o.upgradeQueue.includes(pi)) o.upgradeQueue.push(pi);
+      // ONLY for English pages: the readable pass re-OCRs with the ENGLISH worker (its region seeding /
+      // PSM 6-7 tuning is English-specific), so on a page recognised in another language (a legacy Hindi
+      // page, or a Phase-5 detected-language scan) it reads Devanagari/CJK as sparse Latin garbage and
+      // _ocrApplyOverlay would REPLACE the good non-Latin items with it — gutting the page's editable text.
+      const engPage = !pv._ocrLang || pv._ocrLang === 'eng';
+      if (engPage && !isPhoneDevice() && words && words.length && !pv._ocrUpgraded && o.upgradeQueue && !o.upgradeQueue.includes(pi)) o.upgradeQueue.push(pi);
     } catch (e) {
       console.warn('[OCR] page', pi, 'failed:', e && e.message);
       o.tileProg = null;
@@ -597,6 +602,9 @@ export const OcrMethods = {
    */
   async _ocrUpgradeSearchable(pv) {
     if (!pv || pv._ocrUpgraded || !pv.canvas) return;
+    // Never upgrade a non-English page: the readable pass uses the ENGLISH worker and would replace this
+    // page's good Devanagari/CJK OCR with Latin garbage (belt-and-suspenders — the queue push is gated too).
+    if (pv._ocrLang && pv._ocrLang !== 'eng') return;
     pv._ocrUpgraded = true;                       // once per page — never loops even if it yields nothing
     // Don't yank the layer out from under an OPEN editor (would drop the user's focus / in-flight text).
     if (pv.wrapper && pv.wrapper.querySelector('.editable-text-box:focus-within, .editable-text-box.editing')) return;
