@@ -45,7 +45,7 @@ async function edit(bytes, edits, annotations) {
     const loadFont = (candidates) => loadBundledFont(mupdf, candidates, self.location.origin);
     // MUST await: applyEdits is async (font fetch), so returning the bare promise would let the
     // `finally` destroy the doc mid-operation. await keeps it alive until the work completes.
-    return await applyEdits(mupdf, doc, { edits, annotations }, loadFont);
+    return await applyEdits(mupdf, doc, { edits, annotations }, loadFont, self.location.origin);
   } finally {
     try { doc.destroy(); } catch (_) {}
   }

@@ -25,6 +25,7 @@
   "license": "AGPL-3.0-or-later",
   "dependencies": {
     "fabric": "^7.1.0",
+    "harfbuzzjs": "^1.4.0",
     "mupdf": "^1.27.0",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
