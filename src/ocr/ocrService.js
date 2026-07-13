@@ -765,7 +765,12 @@ export const OcrMethods = {
     if (!MupdfService.isSupported()) return null;
     const overlay = this._ocrProgressOverlay('Making the PDF searchable…');
     try {
-      await this.ocrRecognizeAllPages((d, t) => overlay.set(`Reading page ${Math.min(d + 1, t)} of ${t}…`));
+      // Force-OCRing EVERY page to make the whole document searchable is right for a normal scan (a few
+      // pages), but this bake is ALWAYS-ON and UNPROMPTED on save — on a LAZY (huge) book (e.g. 1072 pages)
+      // it would OCR ~1000 more pages at ~6 s each (>1 hour) just because the user saved their edits. Skip it
+      // for a lazy doc: bake the pages already recognised (the ones viewed/edited), which is what the user
+      // actually changed; un-viewed pages keep their original render. Explicit "Save as Readable" is separate.
+      if (!this.lazyEditMode) await this.ocrRecognizeAllPages((d, t) => overlay.set(`Reading page ${Math.min(d + 1, t)} of ${t}…`));
       const s = this.scale || 1;
       const edits = [];
       for (const it of this.extractedTextItems || []) {
