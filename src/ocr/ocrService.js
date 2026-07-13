@@ -165,32 +165,38 @@ export const OcrMethods = {
    *  worker holds a ~100 MB wasm heap; the extra copies would OOM a tablet). The primary worker is
    *  reused as pool member 0; extras load from the now-warm core/traineddata cache. Built once and
    *  reused within a document; torn down in ocrResetForNewDoc. */
-  async _ocrEnsurePool(n) {
+  async _ocrEnsurePool(n, lang) {
     const o = this._ocr;
-    const first = await this._ocrEnsureWorker();
+    const key = (!lang || lang === 'eng') ? 'eng' : lang;   // one pool PER language (a legacy book = 'hin+eng')
+    o.pools = o.pools || {}; o.poolPromises = o.poolPromises || {};
+    const first = await this._ocrEnsureWorker(key === 'eng' ? undefined : key);
     if (n <= 1) return [first];
-    if (!o.pool) o.pool = [first];
-    if (o.pool.length >= n) return o.pool.slice(0, n);
-    if (!o.poolPromise) {
-      o.poolPromise = (async () => {
+    if (!o.pools[key]) o.pools[key] = [first];
+    if (o.pools[key].length >= n) return o.pools[key].slice(0, n);
+    if (!o.poolPromises[key]) {
+      o.poolPromises[key] = (async () => {
         const need = [];
-        for (let i = o.pool.length; i < n; i++) need.push(this._ocrNewWorker(false));
-        const extra = await Promise.all(need);   // parallel: extras share the warm core cache
-        o.pool.push(...extra);
-        return o.pool;
+        for (let i = o.pools[key].length; i < n; i++) need.push(this._ocrNewWorker(false, key === 'eng' ? undefined : key));
+        const extra = await Promise.all(need);   // parallel: extras share the now-warm core + traineddata cache
+        o.pools[key].push(...extra);
+        return o.pools[key];
       })();
-      o.poolPromise.catch(() => { o.poolPromise = null; });
+      o.poolPromises[key].catch(() => { o.poolPromises[key] = null; });
     }
-    try { return await o.poolPromise; } catch (_) { return [first]; }   // any failure → just use worker 0
+    try { return await o.poolPromises[key]; } catch (_) { return [first]; }   // any failure → just use worker 0
   },
 
-  /** Terminate the EXTRA pool workers, keeping the primary alive. Frees ~100 MB per extra worker once a
-   *  big scan is done / a new doc opens, without paying to re-create the always-on primary. */
+  /** Terminate the EXTRA pool workers (all languages), keeping each language's PRIMARY worker alive. Frees
+   *  ~100 MB per extra worker once a big scan is done / a new doc opens, without re-creating the always-on
+   *  primaries (eng = o.tw, others = o.langW[lang]). */
   _ocrTeardownPool() {
     const o = this._ocr;
-    if (!o || !o.pool) return;
-    for (const w of o.pool) { if (w && w !== o.tw) { try { w.terminate(); } catch (_) {} } }
-    o.pool = null; o.poolPromise = null;
+    if (!o || !o.pools) return;
+    const primaries = new Set([o.tw, ...Object.values(o.langW || {})]);
+    for (const key of Object.keys(o.pools)) {
+      for (const w of o.pools[key]) { if (w && !primaries.has(w)) { try { w.terminate(); } catch (_) {} } }
+    }
+    o.pools = null; o.poolPromises = null;
   },
 
   /** Lazy hook: called when page `pv` paints. OCR it only if it's a scanned / image-only page. */
@@ -441,6 +447,16 @@ export const OcrMethods = {
       const POOL_N = isPhoneDevice() ? 1 : Math.max(1, Math.min(8, navigator.hardwareConcurrency || 4));
       const MAX_TILE = isPhoneDevice() ? 1_600_000 : 4_000_000;
       const SINGLE_MAX = isPhoneDevice() ? 1_600_000 : 2_600_000;
+      // NON-English pages are now TILED too (were single-shot only): a dense legacy/bilingual book page
+      // (~1 MP, 700 words) took ~14-18 s whole-page on ONE hin+eng worker. Tiling it across a LANGUAGE-AWARE
+      // pool cuts that to ~one parallel round. Fewer, LARGER tiles than the English poster path (≤4) because
+      // book text is structured — big tiles keep each column/line intact and read with PSM 3 (layout), not
+      // the sparse PSM 11 tuned for noisy map/poster tiles. Phones stay single-shot (one worker, memory).
+      const isEng = lang === 'eng';
+      const NONENG_TILE_MIN = 800_000;                          // a book page tiles; a small page stays 1-shot
+      const poolNForLang = isEng ? POOL_N : Math.min(POOL_N, 4);
+      const tilePsm = isEng ? 11 : 3;
+      const tileMin = isEng ? SINGLE_MAX * 1.25 : NONENG_TILE_MIN;
       // Confidence gate: rotated banners / decorations / specks come back as junk words ("KZ" for a
       // diagonal "4th") — Tesseract scores them low. Keep words it's ≥45% sure about. BUT also keep a
       // LOW-confidence word that is clearly WORD-LIKE (≥4 letters, almost all alphabetic): a stylised
@@ -460,9 +476,8 @@ export const OcrMethods = {
         .map((w) => ({ text: w.text, conf: typeof w.confidence === 'number' ? w.confidence : 100,
           bbox: { x0: w.bbox.x0 + ox, y0: w.bbox.y0 + oy, x1: w.bbox.x1 + ox, y1: w.bbox.y1 + oy } }));
       let words = [];
-      // A non-English page (legacy → 'hin') uses its own single worker, so keep it SINGLE-SHOT — the tile
-      // pool is the English primary. A rendered legacy book page is crisp + letter-sized, so no tiling need.
-      if (lang !== 'eng' || px <= SINGLE_MAX * 1.25) {
+      // Single-shot for a small page (or any page on a phone); tile a big one across the pool (below).
+      if (isPhoneDevice() || px <= tileMin) {
         // Binarization pre-pass (Otsu): a DIRTY document scan reads far better as crisp black-on-
         // white. Gated inside binarizeForOcr — photos and already-crisp scans pass through untouched.
         const bin = binarizeForOcr(src);
@@ -472,12 +487,12 @@ export const OcrMethods = {
       } else {
         // Grid sized to ~POOL_N tiles (one parallel round) while each stays ≤ MAX_TILE. Cols/rows from
         // the page aspect so tiles are squareish rather than thin slivers.
-        let cols = Math.max(1, Math.round(Math.sqrt(POOL_N * W / H)));
-        let rows = Math.max(1, Math.ceil(POOL_N / cols));
+        let cols = Math.max(1, Math.round(Math.sqrt(poolNForLang * W / H)));
+        let rows = Math.max(1, Math.ceil(poolNForLang / cols));
         while ((W / cols) * (H / rows) > MAX_TILE) { if (W / cols >= H / rows) cols++; else rows++; }
         const tileW = Math.ceil(W / cols), tileH = Math.ceil(H / rows);
         const total = cols * rows;
-        o.lastTiles = { page: pi, tiles: total };                                                     // test observability
+        o.lastTiles = { page: pi, tiles: total }; o.tiledPages = (o.tiledPages || 0) + 1;              // test observability (+ a guard that tiling still engages)
         // Tile geometry list — workers pull from it in parallel.
         const jobs = [];
         for (let ry = 0; ry < rows; ry++) {
@@ -492,7 +507,7 @@ export const OcrMethods = {
         // one round of ~POOL_N). Each tile crops to its OWN canvas (a shared scratch canvas can't be
         // recognised concurrently). next++/done++/push are safe: JS is single-threaded, so they never
         // interleave mid-statement — only the recognises overlap.
-        const pool = await this._ocrEnsurePool(Math.min(POOL_N, total));
+        const pool = await this._ocrEnsurePool(Math.min(poolNForLang, total), lang);
         let next = 0, done = 0;
         o.tileProg = { done: 0, total };                                   // progress = completed tiles / total
         this._ocrShowSpinner(pv, `Reading page… (0/${total})`, 0);
@@ -504,7 +519,7 @@ export const OcrMethods = {
             tc.getContext('2d').drawImage(src, j.x0, j.y0, tc.width, tc.height, 0, 0, tc.width, tc.height);
             const bin = binarizeForOcr(tc);
             if (idx === 0) o.lastBin = { page: pi, applied: bin.applied, threshold: bin.stats && bin.stats.threshold };
-            const { data } = await this._ocrRecognize(worker, bin.applied ? bin.canvas : tc, 11);   // PSM 11 (sparse) — fast on a big noisy tile; canvas direct (no PNG)
+            const { data } = await this._ocrRecognize(worker, bin.applied ? bin.canvas : tc, tilePsm);   // eng poster tile = PSM 11 (sparse); non-eng book tile = PSM 3 (layout)
             // Drop words touching an INNER tile edge (not a page edge): they may be cut mid-word here
             // and the neighbouring tile's overlap sees them whole.
             const inner = collect(data, j.x0, j.y0).filter((wd) => {
