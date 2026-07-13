@@ -401,7 +401,12 @@ export const TextEditingMethods = {
       div.style.padding = '0';
       div.style.margin = '0';
       div.style.border = '1px solid transparent';
-      div.style.background = 'transparent';
+      // Keep the SOLID cover an edited OCR line set above (line.ocr && pending → white/bgColor): it hides the
+      // ORIGINAL glyphs baked into the scan/legacy render so the replacement doesn't read as both at once.
+      // Resetting to transparent here undid it on any box built WITHOUT a focus/blur — i.e. the lazy
+      // Replace-All repaint (refresh), where the replaced text then doubled over the original (a table on the
+      // legacy Hindi book broke this way). Every other line stays transparent so the crisp canvas shows through.
+      if (!(line.ocr && pending)) div.style.background = 'transparent';
       div.style.zIndex = '100';
       // Cursor comes from CSS: `move` while unfocused (hover-drag repositions the line, a plain
       // click edits), `text` once focused — an inline value here would override both states.
