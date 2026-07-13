@@ -232,6 +232,7 @@ export const OcrMethods = {
     }
     o.pending.add(pi);
     o.queue.push(pi);
+    this._ocrShowPending(pv, 'Reading text…');   // feedback while it waits its turn (not "broken")
     this._ocrPump();
   },
 
@@ -255,6 +256,7 @@ export const OcrMethods = {
     this.extractedTextItems = (this.extractedTextItems || []).filter((t) => !(t.pageIndex === pi && !t.ocr));
     o.pending.add(pi);
     o.queue.push(pi);
+    this._ocrShowPending(pv, 'Reading text…');   // feedback: a queued legacy page shows it's working, not broken
     this._ocrPump();
   },
 
@@ -397,6 +399,16 @@ export const OcrMethods = {
     const pi = o.queue.splice(qi, 1)[0];
     const pv = (this.pageViews || [])[pi];
     if (!pv || !pv.canvas) { o.pending.delete(pi); this._ocrPump(); return; }
+    // The page was EVICTED (the lazy memory cap shrinks a scrolled-away page's canvas to 1×1) while it waited
+    // its turn in the queue. Reading that 1-pixel image yields 0 words and then MARKS THE PAGE DONE — leaving
+    // it PERMANENTLY blank / uneditable even after the user scrolls back (repaint re-detects it, but
+    // ocrMaybePage*/Legacy early-return on `done`). Skip it WITHOUT marking done and drop it from pending, so
+    // the next repaint (which is exactly when the page is visible + full-res again) re-queues it cleanly.
+    // Detect eviction by the SHRUNK canvas only — NOT pv._lePainted, which is still false for a page that is
+    // queued MID-paint (createEditableTextBoxes runs before _lePainted=true) yet has a full-res canvas.
+    if (pv.canvas.width <= 2 || pv.canvas.height <= 2) {
+      o.pending.delete(pi); this._ocrHideSpinner(pv); this._ocrPump(); return;
+    }
     o.busy = true; o.curPv = pv;
     this._ocrShowSpinner(pv, 'Loading OCR…', 0);
     try {
@@ -572,6 +584,22 @@ export const OcrMethods = {
     if (/recogniz/i.test(status)) return 'Reading page…';
     if (/load|initial/i.test(status)) return 'Loading OCR…';
     return 'Reading page…';
+  },
+
+  /** PENDING badge for a page that is QUEUED for OCR but not yet being recognised (visible-priority still has
+   *  to finish the page ahead of it). Without this a legacy/scan page the user scrolls to shows a blank canvas
+   *  with no boxes and NO indicator for several seconds — it reads as "this page is broken / not editable".
+   *  Just the small label badge (NO shimmer veil, so the already-rendered page stays readable while it waits);
+   *  _ocrShowSpinner reuses the same `.ocr-spinner` node once recognition actually starts, and _ocrHideSpinner
+   *  clears it when the overlay lands. */
+  _ocrShowPending(pv, label) {
+    if (!pv || !pv.wrapper) return;
+    if (pv.wrapper.querySelector('.ocr-spinner')) return;   // already showing (pending or recognising)
+    const el = document.createElement('div');
+    el.className = 'ocr-spinner';
+    el.innerHTML = '<span class="ocr-spin" aria-hidden="true"></span><span class="ocr-label"></span>';
+    el.querySelector('.ocr-label').textContent = label;
+    pv.wrapper.appendChild(el);
   },
 
   // ---- spinner + progress shimmer overlay (pure, non-blocking) ----
