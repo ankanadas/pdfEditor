@@ -218,11 +218,23 @@ export const OcrMethods = {
     // the speculative imgs-unknown/empty path stays silent until _ocrApplyOverlay confirms real words.
     if (pv._pageImages && pv._pageImages.length && this._ocrIsImageOnly(pv)) this._ocrRevealTextExport();
     if (o.done.has(pi) || o.pending.has(pi)) return;
-    if (!this._ocrIsImageOnly(pv)) return;
+    if (!this._ocrIsImageOnly(pv)) {
+      // Not a pure scan — but a CHART / FIGURE page (image-dominant + a sparse native heading) still hides
+      // text inside its graphic. OCR it ADDITIVELY so those baked labels become selectable/searchable; the
+      // native heading is kept (never dropped) and _ocrApplyOverlay dedups the OCR against it. hin+eng because
+      // these charts are bilingual. SCOPED to a doc that is ALREADY an OCR context (has a legacy or scanned
+      // page) — so a scanned/legacy BOOK's chart pages are caught, but a normal presentation or images/vectors
+      // PDF is never spuriously OCR'd. Any other normal text page falls through untouched.
+      if (!o.docHasOcrContext || !this._ocrIsImageHeavyMixed(pv)) return;
+      pv._ocrLang = 'hin+eng';
+    } else {
+      o.docHasOcrContext = true;   // a scan → this document is an OCR context (unlocks chart/figure OCR above)
+    }
     o.pending.add(pi);
     o.queue.push(pi);
     this._ocrPump();
   },
+
 
   /** LEGACY non-Unicode Devanagari page (Kruti/APS/DevLys — the font DRAWS correct Hindi but the text
    *  extracts as accented-Latin garbage). Called by the box builder when isLegacyGarbledPage fires. The page
@@ -239,6 +251,7 @@ export const OcrMethods = {
     const pi = pv.pageNum, o = this._ocr;
     if (o.done.has(pi) || o.pending.has(pi)) return;
     pv._ocrLang = 'hin+eng';
+    o.docHasOcrContext = true;   // a legacy page → this document is an OCR context (unlocks chart/figure OCR)
     this.extractedTextItems = (this.extractedTextItems || []).filter((t) => !(t.pageIndex === pi && !t.ocr));
     o.pending.add(pi);
     o.queue.push(pi);
@@ -253,6 +266,7 @@ export const OcrMethods = {
     const o = this._ocr;
     if (o) {
       o.queue.length = 0; o.pending.clear(); o.done.clear();
+      o.docHasOcrContext = false;   // reset the legacy/scan "OCR context" gate for chart/figure OCR
       if (o.upgradeQueue) o.upgradeQueue.length = 0;
       // If a background upgrade currently HOLDS the worker, leave busy set so the new doc's OCR waits for it
       // to drain (it self-cancels via the gen check) rather than racing it on the shared worker's PSM.
@@ -295,6 +309,25 @@ export const OcrMethods = {
     // NO extractable text at all → a scan candidate even before the image pass (imgs unknown): the
     // empty-page early-return in createEditableTextBoxes would otherwise skip its only OCR trigger.
     return !imgs || imgs.length > 0;
+  },
+
+  /** An IMAGE-HEAVY "mixed" page: a chart / figure / graph whose text (category labels, numbers, a legend) is
+   *  baked INTO the raster, alongside a SPARSE native heading/footer. It isn't a pure scan (_ocrIsImageOnly —
+   *  it has a little real text) and it isn't legacy-garbled, so nothing OCRs it and the baked-in text stays
+   *  unselectable / unsearchable (the user's page-7 pie-chart & bar-graph). True when raster images cover a
+   *  large fraction of the page AND the native text is sparse. OCR then runs ADDITIVELY (keeps the native
+   *  heading, adds the image's text, deduped in _ocrApplyOverlay) — a dense prose page (many text items) or a
+   *  text page with only a small logo is excluded so we never double normal text or OCR a real page needlessly. */
+  _ocrIsImageHeavyMixed(pv) {
+    if (!pv || !pv.canvas || !Array.isArray(pv._pageImages) || !pv._pageImages.length) return false;
+    const pi = pv.pageNum;
+    const real = (this.extractedTextItems || []).filter((t) => t.pageIndex === pi && !t.ocr && (t.text || '').trim());
+    if (real.length === 0 || real.length > 40) return false;   // 0 → pure image (_ocrIsImageOnly); many → real text page
+    const area = pv.canvas.width * pv.canvas.height;
+    if (area <= 0) return false;
+    const s = this.scale || 1;
+    const imgArea = pv._pageImages.reduce((a, im) => a + Math.max(0, im.x1 - im.x0) * Math.max(0, im.y1 - im.y0), 0) * s * s;
+    return imgArea > 0.35 * area;
   },
 
   /** A "searchable SCAN carrying a JUNK embedded OCR text layer" (e.g. a scanned SSA-89): the visible page
