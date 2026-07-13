@@ -228,13 +228,17 @@ export const OcrMethods = {
    *  extracts as accented-Latin garbage). Called by the box builder when isLegacyGarbledPage fires. The page
    *  renders crisp vector Devanagari, so we OCR that RENDER with HINDI → the text becomes correct, selectable,
    *  copyable, EDITABLE Unicode (Phase 4) — general across legacy fonts (no per-font remap table needed). The
-   *  garbage text layer is dropped so the OCR'd Unicode replaces it; the page stays VIEW-ONLY until OCR lands. */
+   *  garbage text layer is dropped so the OCR'd Unicode replaces it; the page stays VIEW-ONLY until OCR lands.
+   *  Language is 'hin+eng' (NOT bare 'hin'): these are bilingual study books — English words (terms, dates,
+   *  "YCT", question numbers) are interspersed with the Devanagari, and a Hindi-only model misses/garbles
+   *  them, so the English became uneditable and unsearchable. Both traineddata are self-hosted; Tesseract
+   *  reads each script in its own region. */
   ocrMaybePageLegacy(pv) {
     if (!pv || !pv.canvas) return;
     this.ocrInit();
     const pi = pv.pageNum, o = this._ocr;
     if (o.done.has(pi) || o.pending.has(pi)) return;
-    pv._ocrLang = 'hin';
+    pv._ocrLang = 'hin+eng';
     this.extractedTextItems = (this.extractedTextItems || []).filter((t) => !(t.pageIndex === pi && !t.ocr));
     o.pending.add(pi);
     o.queue.push(pi);
@@ -351,7 +355,13 @@ export const OcrMethods = {
       }
       this._ocrTeardownPool(); return;   // queue drained → free the extra pool workers
     }
-    const pi = o.queue.shift();
+    // VISIBLE-PAGE PRIORITY: OCR the page the user is actually looking at first. The queue fills in PAINT
+    // order, but on a long book the reader jumps ahead — strict FIFO then makes them wait ~6-8 s × every
+    // page they scrolled past before their current page becomes editable ("page 5 isn't editable" while 0-4
+    // OCR first). Pick the queued page nearest the current viewport instead. O(n) over a short queue.
+    let qi = 0; const cur = this.currentPage || 0;
+    for (let k = 1; k < o.queue.length; k++) { if (Math.abs(o.queue[k] - cur) < Math.abs(o.queue[qi] - cur)) qi = k; }
+    const pi = o.queue.splice(qi, 1)[0];
     const pv = (this.pageViews || [])[pi];
     if (!pv || !pv.canvas) { o.pending.delete(pi); this._ocrPump(); return; }
     o.busy = true; o.curPv = pv;
