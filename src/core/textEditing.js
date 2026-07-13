@@ -11,6 +11,29 @@ import { isLegacyGarbledPage } from '../util/legacyFont.js';
 import { detectScript, fontStackForScript, isRtlScript } from '../util/script.js';
 
 export const TextEditingMethods = {
+  /** Shrink an edited OCR line's font so a LONGER replacement fits the ORIGINAL line's footprint (its OCR
+   *  bbox width, = the region the save redacts). An OCR overlay sits on a FIXED rendered page — editing a
+   *  line cannot reflow what is drawn beside it, so a replacement wider than the original spills over the
+   *  next cell or the rendered text right after it. A table on the OCR'd book broke this way: "Officer"→
+   *  "Superintendent" ran over the rendered "2019" beside it (the "2019" is baked into the page image, not a
+   *  separate editable box — so a neighbour-gap measure can't see it; the original footprint can). Scoped to
+   *  OCR lines; normal text lines keep extending into their margin. Updates line.fontSizePx (display) AND the
+   *  tracked edit's fontSize (so Save draws the same fitted size). Idempotent — once fitted it measures in. */
+  _fitOcrEditWidth(line, shownText) {
+    if (!line.ocr || !shownText || !(line.fontSizePx > 0)) return;
+    const avail = line.right - line.left;                                        // original footprint = redacted region
+    if (avail <= 4) return;
+    const ctx = this._measCtx || (this._measCtx = document.createElement('canvas').getContext('2d'));
+    ctx.font = `${line.italic ? 'italic ' : ''}${line.bold ? '700 ' : ''}${line.fontSizePx}px sans-serif`;
+    const w = ctx.measureText(shownText).width;
+    if (w <= avail) return;                                                      // already fits → no shrink
+    const fit = Math.max(line.fontSizePx * (avail / w) * 0.98, line.fontSizePx * 0.35);   // shrink to fit (floor 35%)
+    line.fontSizePx = fit;
+    const pend = this.findLineEdit(line);
+    if (pend) { pend.fontSize = fit / (this.scale || 1); pend.sizeOverride = true; }   // sizeOverride: the save
+    // engine (mupdfEdit) otherwise re-uses the ORIGINAL span's size (the legacy glyphs behind this line) and
+    // ignores e.fontSize — so without this flag the SAVE keeps the full size and still overflows.
+  },
   /**
    * Overlay an editable box on EACH line of text. Every box sits exactly on its original
    * line (same left, baseline and size) and edits that line in place. Only the lines the
@@ -280,6 +303,11 @@ export const TextEditingMethods = {
           ? pending.runs[0].map(r => ({ ...r, family: r.family || r.fontFamily || null }))
           : null;
       }
+      // SHRINK-TO-FIT an edited OCR line whose replacement is wider than the gap to the next box on its row,
+      // so a longer replacement can't overflow into the adjacent cell/word (a table on the OCR'd book
+      // overlapped this way — "Officer"→"Superintendent" ran into the "2019" beside it). Updates the display
+      // size AND the tracked edit so the SAVE draws the same fitted size.
+      if (line.ocr && pending) this._fitOcrEditWidth(line, shownText);
       // Editor-only "linked" affordance (a detected-on-load OR toolbar-applied link); never exported.
       if (line.link) div.classList.add('tt-has-link');
       // Partial link: show just the linked character range in blue + underline (matches the saved PDF).
