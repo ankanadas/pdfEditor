@@ -1032,7 +1032,11 @@ export const OcrMethods = {
     }
     const overlay = this._ocrProgressOverlay('Building a readable PDF…');
     try {
-      await this.ocrRecognizeAllPages((d, t) => { if (t) overlay.set(`Reading page ${Math.min(d + 1, t)} of ${t}…`); });
+      // Same guard as the always-on searchable bake: OCR-ing EVERY page suits a few-page scan, but on a LAZY
+      // (huge, e.g. 1072-page) book it's ~1000×6s (over an hour) — the readable save "hangs". Bake the readable
+      // layer for the pages already recognised (viewed/edited); force-OCRing the whole book in a browser save
+      // is impractical. Un-viewed pages keep their original render.
+      if (!this.lazyEditMode) await this.ocrRecognizeAllPages((d, t) => { if (t) overlay.set(`Reading page ${Math.min(d + 1, t)} of ${t}…`); });
       overlay.set('Re-reading the text regions…');
       const s = this.scale || 1;
       let tw = null;
