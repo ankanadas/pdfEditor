@@ -435,7 +435,14 @@ export const TextEditingMethods = {
       // Replace-All repaint (refresh), where the replaced text then doubled over the original (a table on the
       // legacy Hindi book broke this way). Every other line stays transparent so the crisp canvas shows through.
       if (!(line.ocr && pending)) div.style.background = 'transparent';
-      div.style.zIndex = '100';
+      // Z-ORDER: OCR word/line boxes can OVERLAP when OCR gives a word a bad, over-wide bbox (a cover heading
+      // "यूथ कॉम्प्टीशन टाइम्स कृत" where "कॉम्प्टीशन" was boxed across the whole line) — the wide box then sits
+      // ON TOP of the narrow words beside it and swallows their clicks, so those words look "not editable".
+      // Put SMALLER boxes on top (higher z, inversely by area) so every word stays clickable; the wide box is
+      // still clickable in the gaps it alone covers. Capped below the focus z (200) so a focused box always
+      // wins. Non-OCR lines don't overlap, so they keep the flat z=100.
+      const boxArea = Math.max(1, widthCss * lineBoxPx);
+      div.style.zIndex = line.ocr ? String(100 + Math.max(1, Math.min(95, Math.round(45000 / boxArea)))) : '100';
       // Cursor comes from CSS: `move` while unfocused (hover-drag repositions the line, a plain
       // click edits), `text` once focused — an inline value here would override both states.
       div.style.outline = 'none';
@@ -864,9 +871,17 @@ export const TextEditingMethods = {
       // the gap — a WYSIWYG mismatch. Space advance ≈ 0.28·font-height; cap the run so a huge
       // right-aligned gap (a separate column that slipped the column-break) can't explode the text.
       let sep = '';
-      if (!endSp && !startSp && gap > item.height * 0.18) {
-        const spaceW = item.height * 0.28;
-        sep = ' '.repeat(Math.max(1, Math.min(24, Math.round(gap / spaceW))));
+      if (!endSp && !startSp) {
+        if (gap > item.height * 0.18) {
+          const spaceW = item.height * 0.28;
+          sep = ' '.repeat(Math.max(1, Math.min(24, Math.round(gap / spaceW))));
+        } else if (item.ocr) {
+          // OCR items are whole WORDS — always separate two adjacent words with a single space even when
+          // their recognised boxes touch or slightly overlap (Devanagari word boxes are often tight, so the
+          // positional-gap test above misses them and the box reads "wordword"). PDF.js glyph fragments keep
+          // their own kerning, so only the OCR overlay needs this guaranteed word break.
+          sep = ' ';
+        }
       }
       currentLine.text += sep + item.text;
       currentLine.left = Math.min(currentLine.left, item.left);
