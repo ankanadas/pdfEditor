@@ -812,7 +812,11 @@ SUBSTITUTIONS = [("arial", "Arimo"), ("times", "Tinos"), ("georgia", "Gelasio"),
 ALLOWED_STEMS = {"Arimo", "Tinos", "Cousine", "Gelasio", "ComicNeue", "Roboto", "OpenSans", "Montserrat",
                  "Carlito", "Caladea", "EBGaramond", "LibreBaskerville", "Inter", "Lato", "Poppins",
                  "Nunito", "SourceSans3", "Ubuntu", "PTSans", "Merriweather", "NotoSerif",
-                 "PlayfairDisplay", "FiraCode", "JetBrainsMono", "SourceCodePro", "IBMPlexMono", "Pacifico"}
+                 "PlayfairDisplay", "FiraCode", "JetBrainsMono", "SourceCodePro", "IBMPlexMono", "Pacifico",
+                 # Noto script faces (all SIL OFL) — the multi-language save/shaping set (ocr-lang)
+                 "NotoSansArabic", "NotoSansBengali", "NotoSansDevanagari", "NotoSansGujarati", "NotoSansGurmukhi",
+                 "NotoSansHebrew", "NotoSansJP", "NotoSansKannada", "NotoSansKR", "NotoSansMalayalam",
+                 "NotoSansOriya", "NotoSansSC", "NotoSansTamil", "NotoSansTelugu", "NotoSansThai",}
 
 
 class FontLicensingTests(unittest.TestCase):
@@ -870,7 +874,9 @@ class FontLicensingTests(unittest.TestCase):
         files = sorted(f for f in os.listdir(appmod._FONTS_DIR) if f.lower().endswith(".ttf"))
         self.assertTrue(files, "no fonts bundled")
         for f in files:
-            stem = f.rsplit("-", 1)[0]
+            # strip the extension FIRST: a dash-less single-file face ("NotoSansArabic.ttf") otherwise
+            # keeps ".ttf" in its stem and can never match the allowlist.
+            stem = f[:-4].rsplit("-", 1)[0]
             self.assertIn(stem, ALLOWED_STEMS, f"unexpected (non-open) font file: {f}")
             # The font's OWN internal name must not impersonate a proprietary face.
             name = fitz.Font(fontfile=os.path.join(appmod._FONTS_DIR, f)).name.replace(" ", "")

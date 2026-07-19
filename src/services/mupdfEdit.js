@@ -14,8 +14,7 @@
 import { analyzePage, detectSpan, detectAlign } from './mupdfSpans.js';
 import { enumeratePageFonts, extractFontBytes, warmCharsets, stripName, latexProfile, standardFamily } from './mupdfFontEngine.js';
 import { bundledCandidates, stemForName, classForName } from './mupdfFonts.js';
-import { detectScript } from '../util/script.js';
-import { needsShaping, shapeRun } from '../util/shaping.js';
+import { shapeRun, splitByShapingScript } from '../util/shaping.js';
 
 /** Normalise editable-box quirks (nbsp, zero-width, soft-hyphen, control chars) without dropping real
  *  Unicode — every font is embedded full-Unicode (Type0), so curly quotes / em-dash / accents / ₹ all
@@ -198,6 +197,7 @@ export async function applyEdits(mupdf, doc, data, loadFont, baseUrl) {
   let seq = 0;
   const simpleCache = new Map();   // 'family|b|i'   -> {kind:'simple',name,ref,mfont,charset:null}
   const cidCache = new Map();      // strippedName   -> {kind:'cid',...} | null  (per-doc, reused across pages)
+  const shapeOpts = new Map();     // Noto TTF file  -> shaped-part font option (one embed per face per doc)
   let _charsets = null;
   const charsets = () => (_charsets || (_charsets = warmCharsets(doc)));
 
@@ -392,16 +392,29 @@ export async function applyEdits(mupdf, doc, data, loadFont, baseUrl) {
     return segs;
   }
   const measureSeg = (seg, size) => seg.units.reduce((w, u) => w + u.adv, 0) * size;
-  // A pre-shaped complex-script run → ONE Type0 segment of the SHAPED glyph-id sequence (see the shaping step
-  // in the opts phase). Advances come from HarfBuzz (same face the doc embeds, so they agree with the /W).
-  const shapedSegments = (r) => [{
-    opt: r._shapeOpt,
-    hex: r._shaped.glyphs.map((x) => (x.gid & 0xffff).toString(16).padStart(4, '0')).join(''),
-    units: r._shaped.glyphs.map((x) => ({ adv: x.xAdvance / 1000 })),
-  }];
-  // Run width for layout (line width, alignment, overflow) — the shaped advances for a shaped run, else the
-  // per-character measure.
-  const runWidth = (r, size) => r._shaped ? r._shaped.glyphs.reduce((w, x) => w + x.xAdvance / 1000, 0) * size : measureRun(r.text, r._opts, size);
+  // A MIXED-script run is drawn as an ordered list of PARTS (see the shaping step in the opts phase):
+  // each complex-script part is ONE Type0 segment of its SHAPED glyph-id sequence (advances from HarfBuzz —
+  // the same face the doc embeds, so they agree with the /W), and each plain part goes through the normal
+  // per-character font pick. Shaping the WHOLE run with one script's face rendered the other script's
+  // characters as tofu ("परीक्षाQA" → "परीक्षा▯▯" — Noto Devanagari has no Q/A glyphs).
+  const runSegments = (r) => {
+    if (!r._shapedParts) return segmentByFont(r.text, r._opts);
+    return r._shapedParts.flatMap((p) => p.shaped
+      ? [{
+          opt: p.opt,
+          hex: p.shaped.glyphs.map((x) => (x.gid & 0xffff).toString(16).padStart(4, '0')).join(''),
+          units: p.shaped.glyphs.map((x) => ({ adv: x.xAdvance / 1000 })),
+          actual: p.text,          // /ActualText Unicode for THIS shaped part (per-segment, not per-run)
+        }]
+      : segmentByFont(p.text, r._opts));
+  };
+  // Run width for layout (line width, alignment, overflow) — shaped advances for shaped parts, per-character
+  // measure for the rest.
+  const runWidth = (r, size) => r._shapedParts
+    ? r._shapedParts.reduce((w, p) => w + (p.shaped
+        ? p.shaped.glyphs.reduce((a, x) => a + x.xAdvance / 1000, 0) * size
+        : measureRun(p.text, r._opts, size)), 0)
+    : measureRun(r.text, r._opts, size);
   // UTF-16BE hex for /ActualText. A SHAPED run is drawn by GLYPH id (ligated / reordered), so a viewer's
   // glyph→Unicode (ToUnicode) reverse of a ligature/reordered glyph is wrong — /ActualText gives copy/search
   // the ORIGINAL text so shaped Indic/Arabic stays correctly selectable.
@@ -719,19 +732,39 @@ export async function applyEdits(mupdf, doc, data, loadFont, baseUrl) {
         r._opts = opts;
         // COMPLEX-SCRIPT SHAPING (Phase 3): Indic (Devanagari…) / Arabic edited text needs HarfBuzz shaping —
         // conjuncts / reordering / contextual joining that the engine's 1:1 codepoint→glyph path can't do.
-        // Shape the run with harfbuzzjs + the bundled Noto face for its script and stash the SHAPED glyph-id
-        // sequence; the draw loop emits it (Type0) and embeds that face → real selectable text. On ANY failure
-        // we fall through to the un-embeddable guard → the flatten tier (never draws wrong glyphs).
-        const rScript = detectScript(r.text || '');
-        if (baseUrl && needsShaping(rScript)) {
+        // The run is SPLIT BY SCRIPT first (a mixed "टाइम्स QA कृत" has Latin inside): each complex part is
+        // shaped with its script's Noto face and stashed as a shaped glyph-id part; plain parts keep the
+        // normal per-char font pick. Shaping the whole mixed run with one face drew the other script's
+        // chars as .notdef tofu. On ANY shaping failure the whole run falls through to the un-embeddable
+        // guard → the flatten tier (never draws wrong glyphs).
+        if (baseUrl && splitByShapingScript(r.text || '').some((p) => p.script)) {
           try {
-            const shaped = await shapeRun(rScript, r.text, baseUrl);
-            if (shaped && shaped.glyphs.length) {
-              r._shaped = shaped;
-              r._shapeOpt = { name: 'SH' + (seq++), ref: null, simple: false, mfont: await loadFont([shaped.file]), charset: null };
+            const parts = splitByShapingScript(r.text || '');
+            const built = [];
+            for (const part of parts) {
+              if (!part.script) { built.push({ text: part.text }); continue; }
+              const shaped = await shapeRun(part.script, part.text, baseUrl);
+              if (!shaped || !shaped.glyphs.length) { built.length = 0; break; }    // any part fails → whole run to the guard
+              let opt = shapeOpts.get(shaped.file);
+              if (!opt) { opt = { name: 'SH' + (seq++), ref: null, simple: false, mfont: await loadFont([shaped.file]), charset: null }; shapeOpts.set(shaped.file, opt); }
+              built.push({ text: part.text, shaped, opt });
             }
+            if (built.length) r._shapedParts = built;
           } catch (_) {}
-          if (r._shaped) continue;   // shaped OK → skip the un-embeddable guard for this run
+          if (r._shapedParts) {
+            // Guard only the PLAIN parts (Latin/digits inside the mixed run) — shaped parts embed their face.
+            const plain = r._shapedParts.filter((p) => !p.shaped).map((p) => p.text).join('');
+            for (const ch of plain) {
+              const cp = ch.codePointAt(0);
+              if (cp <= 0x20) continue;
+              const o = pickOption(cp, opts);
+              if (o.charset === null && !o.winAnsi) {
+                let g = 0; try { g = o.mfont.encodeCharacter(cp); } catch (_) {}
+                if (!g) throw new Error('QPE_NEEDS_FLATTEN: edited text has glyphs no embeddable font covers (U+' + cp.toString(16).toUpperCase() + ')');
+              }
+            }
+            continue;   // shaped OK → the whole-run guard below is not needed
+          }
         }
         // UN-EMBEDDABLE TEXT GUARD: the bundled substitutes are LATIN faces (+ Cyrillic/Greek), and a
         // document's own CID/CJK font can't be re-encoded by codepoint — so non-Latin edited text
@@ -810,7 +843,7 @@ export async function applyEdits(mupdf, doc, data, loadFont, baseUrl) {
           if (!r.text) continue;
           // Split the run into maximal same-font segments (per-character pick), drawing each with the
           // right encoding: a hex glyph-id string for a reused Type0 font, a WinAnsi literal otherwise.
-          for (const seg of (r._shaped ? shapedSegments(r) : segmentByFont(r.text, r._opts))) {
+          for (const seg of runSegments(r)) {
             usedFonts.add(embed(seg.opt));   // embed the font into the doc only now that a glyph uses it
             // Advance each run along the rotated baseline. The text matrix advances glyphs by
             // (adv·cos, adv·sin) in PDF (y-up) space, so in this TOP-origin (y-down) space the run's y
@@ -822,16 +855,17 @@ export async function applyEdits(mupdf, doc, data, loadFont, baseUrl) {
             const pyTop = lyTop - adv * sin - (rot ? raise * Math.cos(rad) : raise);
             const py = ph - pyTop;
             const egs = boxOpacity < 1 ? egsFor(boxOpacity) : null;
-            // SHAPED run → wrap in an /ActualText marked-content span so copy/search recover the real Unicode
-            // even though the drawn glyphs are ligated/reordered (their glyph→Unicode reverse is unreliable).
-            const actual = r._shaped ? `/Span <</ActualText <${utf16beHex(r.text)}>>> BDC ` : '';
+            // SHAPED segment → wrap in an /ActualText marked-content span so copy/search recover the real
+            // Unicode even though the drawn glyphs are ligated/reordered (their glyph→Unicode reverse is
+            // unreliable). Per SEGMENT, not per run — a mixed run's plain (Latin) segments need no wrap.
+            const actual = seg.actual ? `/Span <</ActualText <${utf16beHex(seg.actual)}>>> BDC ` : '';
             ops.op('q ' + (egs ? '/' + egs.name + ' gs ' : '') + actual + 'BT /' + seg.opt.name + ' ' + f2(r.size) + ' Tf '
               + (tz !== 1 ? f2(tz * 100) + ' Tz ' : '')     // metric-match horizontal scale (see above)
               + (e.invisible ? '3 Tr ' : '')                // searchable-PDF layer: glyphs select/search but paint nothing
               + f2(r.color[0]) + ' ' + f2(r.color[1]) + ' ' + f2(r.color[2]) + ' rg ');
             ops.op(rot ? `${f2(cos)} ${f2(sin)} ${f2(-sin)} ${f2(cos)} ${f2(px)} ${f2(py)} Tm ` : `1 0 0 1 ${f2(px)} ${f2(py)} Tm `);
             if (seg.opt.winAnsi) ops.textString(seg.bytes); else ops.glyphString(seg.hex);
-            ops.op(' Tj ET ' + (r._shaped ? 'EMC ' : '') + 'Q\n');
+            ops.op(' Tj ET ' + (seg.actual ? 'EMC ' : '') + 'Q\n');
             const w = measureSeg(seg, r.size) * tz;   // drawn width (Tz-scaled) — advance/underline/link agree
             if (r.underline && !rot) {
               // Stroke a LINE just below the baseline (matches the backend's draw_line: width size*0.055,

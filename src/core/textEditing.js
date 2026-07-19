@@ -95,7 +95,7 @@ export const TextEditingMethods = {
     // The canvas may be displayed smaller than its intrinsic pixels (max-width:100%).
     const displayScale = (pv.canvas.clientWidth || pv.canvas.width) / pv.canvas.width;
 
-    let lines = this.groupTextItemsByLine(pageTextItems);
+    let lines = this.groupTextItemsByLine(pageTextItems, { mergeOcrOverlaps: true });
     // SCAN pages read in COLUMN order: a multi-column scanned page (paper / notice) would otherwise
     // interleave its columns row-by-row in the box order (selection/copy jump across the gutter).
     // OCR overlays only — a normal text PDF keeps its existing row order untouched.
@@ -501,6 +501,17 @@ export const TextEditingMethods = {
         else if (e.key === 'Escape') { e.preventDefault(); div.blur(); }
       });
 
+      // OCR bboxes run TIGHTER than the printed glyphs (a bad word box can sit fully inside its
+      // neighbour's), so a save-time cover sized to the bbox leaves original glyph tails showing beside
+      // the replacement. The box's RENDERED width (width:auto grows with the text) is the honest extent
+      // of the line, so capture it once at first focus — before any typing changes it — and lineToEdit
+      // widens the edit's cover to it. Canvas px (displayScale-corrected), OCR lines only.
+      if (line.ocr) {
+        div.addEventListener('focus', () => {
+          if (line._displayW == null) line._displayW = div.getBoundingClientRect().width / (displayScale || 1);
+        }, { once: true });
+      }
+
       canvasWrapper.appendChild(div);
       // Drag / arrow-key repositioning (grip + move mode) — see features/moveLines.js.
       this._initLineMove(div, line, pv, displayScale);
@@ -677,7 +688,10 @@ export const TextEditingMethods = {
     const edit = {
       pageIndex: line.pageIndex,
       x: line.left / s,
-      right: line.right / s,
+      // OCR line: widen the save-side cover to the box's RENDERED width (captured at first focus) — the
+      // OCR bbox under-measures the printed glyphs, and a bbox-sized cover leaves the original's glyph
+      // tail visible beside the replacement ("कृत" survived beside the redrawn line).
+      right: (line.ocr ? Math.max(line.right, line.left + (line._displayW || 0)) : line.right) / s,
       top: line.top / s,
       bottom: line.bottom / s,
       baseline: line.baseline / s,
@@ -767,7 +781,7 @@ export const TextEditingMethods = {
    * Group text items that share a baseline into a single line. All geometry is in
    * canvas pixels (top-origin), as produced by extractTextFromPDFjs().
    */
-  groupTextItemsByLine(textItems) {
+  groupTextItemsByLine(textItems, opts) {
     if (textItems.length === 0) return [];
 
     // Order left-to-right within a row using the SAME tolerance the merge loop uses below
@@ -900,6 +914,48 @@ export const TextEditingMethods = {
       line.text = line.text.replace(/[^\S ]+/g, ' ').replace(/ {25,}/g, ' '.repeat(24)).trim();
     });
     const realLines = lines.filter(line => line.text.length > 0);
+    // OCR line segmentation can FRACTURE one printed line into OVERLAPPING segments (a big decorative
+    // heading: "कॉम्प्टीशन" boxed across the whole line with "यूथ" / "टाइम्स कृत" beside it). The
+    // overlapping boxes then fight — clicks need the z-hack, and an edit (or its entangled preserves)
+    // bakes the fragments SUPERIMPOSED at the same x, mangling the line. Merge same-row OCR segments
+    // that substantially overlap into ONE line: items in x order, single-space joined (OCR items are
+    // whole words), union box — one printed line becomes one editable, cleanly bakeable unit. OCR-only:
+    // native PDF segments never overlap like this (and their column/tab splits must stay separate).
+    // OPT-IN (`mergeOcrOverlaps`): the EDITOR's boxes + the layout API want merged lines; the readable
+    // save's own grouping must stay untouched — merging there shifts its median line height and the
+    // snapped body size, perturbing the size-uniformity of the rebuilt page (ocrmap).
+    if (opts && opts.mergeOcrOverlaps && realLines.some((l) => l.ocr && !l.rotated)) {
+      let merged = true;
+      while (merged) {
+        merged = false;
+        for (let i = 0; i < realLines.length && !merged; i++) {
+          for (let j = i + 1; j < realLines.length && !merged; j++) {
+            const a = realLines[i], b = realLines[j];
+            if (!a.ocr || !b.ocr || a.rotated || b.rotated) continue;
+            const vOv = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+            if (vOv < 0.55 * Math.min(a.bottom - a.top, b.bottom - b.top)) continue;   // same row only
+            // MASSIVE overlap only (≥55% of the smaller segment): fragments of ONE fractured printed line
+            // contain each other (the heading's 64–93%), while DENSE-but-distinct neighbours (map labels,
+            // tight columns) merely kiss edges — those must stay separate segments (ocrmap uniformity).
+            const hOv = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+            if (hOv < 0.55 * Math.min(a.right - a.left, b.right - b.left)) continue;
+            // SIMILAR heights only: fragments of one printed line share its glyph height, while a map/figure
+            // SPECKLE box overlapping a text line does not — merging those inflated readable lines on the
+            // map fixture and broke its size-uniformity (ocrmap). 0.6–1.67× keeps real fragments together.
+            const hr = (a.bottom - a.top) / Math.max(1, b.bottom - b.top);
+            if (hr < 0.6 || hr > 1.67) continue;
+            a.items = a.items.concat(b.items).sort((x, y) => x.left - y.left);
+            a.text = a.items.map((it) => (it.text || '').trim()).filter(Boolean).join(' ');
+            a.left = Math.min(a.left, b.left); a.right = Math.max(a.right, b.right);
+            a.top = Math.min(a.top, b.top); a.bottom = Math.max(a.bottom, b.bottom);
+            a.height = Math.max(a.height, b.height);
+            a.baseline = Math.max(a.baseline, b.baseline);
+            realLines.splice(j, 1);
+            merged = true;
+          }
+        }
+      }
+    }
     realLines.forEach(line => this.finalizeLineStyle(line));
     return realLines;
   },

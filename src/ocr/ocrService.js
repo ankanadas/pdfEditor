@@ -98,8 +98,24 @@ export const OcrMethods = {
     await prev.catch(() => {});
     try {
       try { await worker.setParameters({ tessedit_pageseg_mode: String(psm) }); } catch (_) {}
-      return await worker.recognize(image);
+      // Explicit output: `blocks` carries the full layout tree (blocks→paragraphs→lines→words→SYMBOLS —
+      // the flat legacy `data.words` omits per-word symbols, so char boxes need the tree); `text` keeps
+      // data.text/confidence for the language probes. Everything else (hocr/tsv/…) stays off.
+      try { return await worker.recognize(image, {}, { blocks: true, text: true }); }
+      catch (_) { return await worker.recognize(image); }   // older builds without output opts
     } finally { release(); }
+  },
+
+  /** Flatten a recognise result's layout TREE to its words (they carry per-char `symbols`); falls back to
+   *  the legacy flat `data.words` (no symbols) when a build returns no tree. */
+  _ocrTreeWords(data) {
+    const out = [];
+    for (const bl of (data && data.blocks) || []) {
+      for (const pa of bl.paragraphs || []) {
+        for (const ln of pa.lines || []) for (const w of ln.words || []) out.push(w);
+      }
+    }
+    return out.length ? out : ((data && data.words) || []);
   },
 
   // ── Phase 5: MULTI-LANGUAGE scan OCR ─────────────────────────────────────────────────────────────────
@@ -136,6 +152,93 @@ export const OcrMethods = {
       } catch (_) {}
     }
     return (best.lang !== 'eng' && best.conf >= 55) ? best.lang : null;
+  },
+
+  // ── AUTO-ORIENTATION (OSD): detect a page scanned sideways / upside-down (90 / 180 / 270°) ─────────────
+  /** True when a page's first OCR pass MIGHT be a mis-oriented scan. Inverted/sideways text does NOT read
+   *  as low-confidence noise — Tesseract confidently coins garbage ("XIIAeau", "es6ed") in the mid-60s —
+   *  so the trigger is deliberately loose (< 72 mean, or almost no words); the PROBE's strict commit gate
+   *  is what protects a merely-mediocre upright page from being rotated. A blank page trips this too and
+   *  the probe then finds no better rotation → harmlessly stays at 0°. */
+  _ocrWeakResult(words) {
+    const cs = (words || []).map((w) => w.conf).filter((c) => typeof c === 'number');
+    const mean = cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : 0;
+    return (words || []).length < 3 || mean < 72;
+  },
+
+  /** `src` rotated by `deg` (90/180/270, clockwise) onto a fresh canvas. Guarded for degenerate sizes. */
+  _ocrRotateCanvas(src, deg) {
+    const W = Math.max(1, src.width), H = Math.max(1, src.height);
+    const c = document.createElement('canvas');
+    if (deg === 180) { c.width = W; c.height = H; } else { c.width = H; c.height = W; }
+    const ctx = c.getContext('2d');
+    ctx.translate(c.width / 2, c.height / 2);
+    ctx.rotate((deg * Math.PI) / 180);
+    ctx.drawImage(src, -W / 2, -H / 2);
+    return c;
+  },
+
+  /** Map a bbox from the space of a deg-rotated copy of a W×H image BACK to the original image space. */
+  _ocrMapRotatedBox(b, deg, W, H) {
+    const pts = [[b.x0, b.y0], [b.x1, b.y0], [b.x0, b.y1], [b.x1, b.y1]].map(([x, y]) => {
+      if (deg === 90) return [y, H - x];          // rotated space is H×W
+      if (deg === 180) return [W - x, H - y];
+      if (deg === 270) return [W - y, x];
+      return [x, y];
+    });
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+  },
+
+  /** Probe 90/180/270 on a small centre crop with the CURRENT worker and return the rotation that reads
+   *  clearly better than the (already known weak) 0° pass, else 0. Cheap: ≤500px crop, one PSM-6 recognise
+   *  per rotation, and only ever called when the straight pass was weak. Never throws. */
+  async _ocrDetectOrientation(src, tw, hintWords) {
+    try {
+      const side = Math.min(500, src.width, src.height);
+      if (side < 40) return 0;                              // blank / degenerate page
+      // Aim the probe crop at the INK: a sparse page's geometric centre can be blank (every rotation then
+      // scores 0 and no orientation ever commits). The straight pass's words — even confident garbage —
+      // sit exactly where the printed text is, so centre the crop on their area-weighted centroid.
+      let cx = src.width / 2, cy = src.height / 2;
+      const hw = (hintWords || []).filter((w) => w && w.bbox);
+      if (hw.length) {
+        let ax = 0, ay = 0, aw = 0;
+        for (const w of hw) {
+          const a = Math.max(1, (w.bbox.x1 - w.bbox.x0) * (w.bbox.y1 - w.bbox.y0));
+          ax += a * (w.bbox.x0 + w.bbox.x1) / 2; ay += a * (w.bbox.y0 + w.bbox.y1) / 2; aw += a;
+        }
+        cx = ax / aw; cy = ay / aw;
+      }
+      const x0 = Math.max(0, Math.min(src.width - side, cx - side / 2));
+      const y0 = Math.max(0, Math.min(src.height - side, cy - side / 2));
+      const crop = document.createElement('canvas');
+      crop.width = crop.height = side;
+      crop.getContext('2d').drawImage(src, x0, y0, side, side, 0, 0, side, side);
+      // Score favours DICTIONARY-looking words: inverted text coins confident GARBAGE ("XIIAeau"), so raw
+      // confidence alone can't separate right-side-up from upside-down — weight by words with a real
+      // letter-run, and by how many there are. The straight pass's score is computed the same way.
+      const score = (data) => {
+        const ws = this._ocrTreeWords(data).filter((w) => w && w.text && w.text.trim());
+        if (!ws.length) return 0;
+        const real = ws.filter((w) => /[A-Za-z]{3,}/.test(w.text));
+        const mean = ws.reduce((a, w) => a + (typeof w.confidence === 'number' ? w.confidence : 0), 0) / ws.length;
+        return mean * Math.min(1, ws.length / 6) * (0.4 + 0.6 * Math.min(1, real.length / Math.max(1, ws.length * 0.5)));
+      };
+      // Same crop at 0° scores the baseline with the SAME formula (the caller's full-page number isn't
+      // comparable to a crop's).
+      const { data: d0 } = await this._ocrRecognize(tw, crop, 6);
+      const s0 = score(d0);
+      let best = { deg: 0, score: s0 };
+      for (const deg of [90, 180, 270]) {
+        const { data } = await this._ocrRecognize(tw, this._ocrRotateCanvas(crop, deg), 6);
+        const sc = score(data);
+        if (sc > best.score) best = { deg, score: sc };
+      }
+      // Only commit to a rotation that clearly BEATS straight — a noisy/blank page must stay at 0°.
+      this._ocrOsdLast = { s0: +s0.toFixed(1), best: { deg: best.deg, score: +best.score.toFixed(1) } };   // test observability
+      return (best.deg && best.score >= 50 && best.score >= s0 + 10) ? best.deg : 0;
+    } catch (e) { this._ocrOsdLast = { err: (e && e.message || '').slice(0, 80) }; return 0; }
   },
 
   async _ocrEnsureWorker(lang) {
@@ -455,10 +558,25 @@ export const OcrMethods = {
         const letters = (w.text.match(/[A-Za-z]/g) || []).length;
         return letters >= 4 && letters >= w.text.trim().length * 0.6;
       };
-      const collect = (data, ox, oy) => (data.words || [])
+      // CHARACTER-level boxes (best-effort): tesseract's per-word `symbols` give one bbox per glyph —
+      // kept on the item as `chars` for precise selection/hit-testing. A tesseract build that omits
+      // symbols just yields items without chars (nothing downstream requires them).
+      const charsOf = (w, ox, oy) => {
+        const syms = Array.isArray(w.symbols) ? w.symbols : null;
+        if (!syms || !syms.length) return undefined;
+        const out = [];
+        for (const sy of syms) {
+          if (!sy || !sy.text || !sy.bbox) continue;
+          out.push({ ch: sy.text, conf: typeof sy.confidence === 'number' ? sy.confidence : 100,
+            bbox: { x0: sy.bbox.x0 + ox, y0: sy.bbox.y0 + oy, x1: sy.bbox.x1 + ox, y1: sy.bbox.y1 + oy } });
+        }
+        return out.length ? out : undefined;
+      };
+      const collect = (data, ox, oy) => this._ocrTreeWords(data)
         .filter((w) => w && w.text && w.text.trim() && w.bbox && keepWord(w))
         .map((w) => ({ text: w.text, conf: typeof w.confidence === 'number' ? w.confidence : 100,
-          bbox: { x0: w.bbox.x0 + ox, y0: w.bbox.y0 + oy, x1: w.bbox.x1 + ox, y1: w.bbox.y1 + oy } }));
+          bbox: { x0: w.bbox.x0 + ox, y0: w.bbox.y0 + oy, x1: w.bbox.x1 + ox, y1: w.bbox.y1 + oy },
+          chars: charsOf(w, ox, oy) }));
       let words = [];
       // A non-English page (legacy → 'hin') uses its own single worker, so keep it SINGLE-SHOT — the tile
       // pool is the English primary. A rendered legacy book page is crisp + letter-sized, so no tiling need.
@@ -538,11 +656,60 @@ export const OcrMethods = {
         }
         words = kept;
       }
-      // Map word boxes from the (possibly downscaled) OCR space back to canvas space for the overlay.
+      // SELF-ROTATED read: Tesseract's PSM-3 layout analysis often reads a 90/270° page by ITSELF —
+      // real words at high confidence with page-space VERTICAL boxes ("SCANNED" 17×109). Keep that read:
+      // mark the sideways words rotated (a horizontal edit box can't represent them; search/extract/export
+      // use the text) and flag the page so the searchability upgrade's region passes (PSM 4/11 — no layout
+      // rotation) don't replace the good read with sideways junk. Majority-of-tall-words gate (≥60% of
+      // ≥3-char words) so an upright page with one vertical banner never trips it.
+      if (lang === 'eng' && !pv._ocrOrientation) {
+        const real = words.filter((w) => (w.text || '').trim().length >= 3);
+        const tall = real.filter((w) => (w.bbox.y1 - w.bbox.y0) > (w.bbox.x1 - w.bbox.x0) * 1.4);
+        if (real.length >= 3 && tall.length >= real.length * 0.6) {
+          words = words.map((w) => ({ ...w, rot: 90 }));
+          pv._ocrOrientation = 90;
+        }
+      }
+      // AUTO-ORIENTATION (OSD): a page scanned SIDEWAYS or UPSIDE-DOWN reads as near-garbage (either
+      // branch — single-shot or tiled). When the straight pass is weak, probe 90/180/270 on a small centre
+      // crop; a clear winner re-recognises the whole page at that rotation (one shot, capped ~4 MP) and
+      // maps every box (chars too) back into page space. A 180° page stays fully editable (its mapped
+      // boxes are upright); 90/270 words run vertically on the page → marked rotated downstream
+      // (search/extract/export work, the edit box stays view-only). Once per page; a blank/noisy page
+      // finds no better rotation and harmlessly stays at 0°.
+      if (lang === 'eng' && !pv._ocrOsdTried && this._ocrWeakResult(words)) {
+        pv._ocrOsdTried = true;
+        const deg = await this._ocrDetectOrientation(src, tw, words);
+        if (deg) {
+          let rsrc = src, rscale = 1;
+          const RCAP = 4000000;
+          if (W * H > RCAP) {
+            rscale = Math.sqrt(RCAP / (W * H));
+            const c = document.createElement('canvas');
+            c.width = Math.max(8, Math.round(W * rscale)); c.height = Math.max(8, Math.round(H * rscale));
+            c.getContext('2d').drawImage(src, 0, 0, c.width, c.height); rsrc = c;
+          }
+          const rc = this._ocrRotateCanvas(rsrc, deg);
+          const rbin = binarizeForOcr(rc);
+          let rwords = [];
+          try { const { data: rd } = await this._ocrRecognize(tw, rbin.applied ? rbin.canvas : rc, 3); rwords = collect(rd, 0, 0); } catch (_) {}
+          const back = (b) => { const m = this._ocrMapRotatedBox(b, deg, rsrc.width, rsrc.height); const k = 1 / rscale;
+            return { x0: m.x0 * k, y0: m.y0 * k, x1: m.x1 * k, y1: m.y1 * k }; };
+          const mapped = rwords.map((w) => ({ ...w, rot: deg, bbox: back(w.bbox),
+            chars: w.chars ? w.chars.map((c) => ({ ...c, bbox: back(c.bbox) })) : undefined }));
+          // Accept on QUALITY, not count — a sideways read coins MORE junk specks (69) than the real text
+          // has words (28), so demanding mapped ≥ straight count rejected exactly the pages this exists for.
+          const mConf = mapped.length ? mapped.reduce((a, w) => a + (w.conf || 0), 0) / mapped.length : 0;
+          if (mapped.length >= 3 && mConf >= 50) { words = mapped; pv._ocrOrientation = deg; }
+        }
+      }
+      // Map word boxes from the (possibly downscaled) OCR space back to canvas space for the overlay
+      // (chars, when present, live in the same space and scale identically).
       if (ocrScale !== 1) {
         const s = 1 / ocrScale;
-        words = words.map((w) => ({ text: w.text, conf: w.conf, bbox: {
-          x0: w.bbox.x0 * s, y0: w.bbox.y0 * s, x1: w.bbox.x1 * s, y1: w.bbox.y1 * s } }));
+        const sb = (b) => ({ x0: b.x0 * s, y0: b.y0 * s, x1: b.x1 * s, y1: b.y1 * s });
+        words = words.map((w) => ({ ...w, bbox: sb(w.bbox),
+          chars: w.chars ? w.chars.map((c) => ({ ...c, bbox: sb(c.bbox) })) : undefined }));
       }
       o.tileProg = null;
       // Phase 5 — MULTI-LANGUAGE scan: English read this page as NON-LATIN garbage → detect the script's
@@ -568,7 +735,9 @@ export const OcrMethods = {
       // page, or a Phase-5 detected-language scan) it reads Devanagari/CJK as sparse Latin garbage and
       // _ocrApplyOverlay would REPLACE the good non-Latin items with it — gutting the page's editable text.
       const engPage = !pv._ocrLang || pv._ocrLang === 'eng';
-      if (engPage && !isPhoneDevice() && words && words.length && !pv._ocrUpgraded && o.upgradeQueue && !o.upgradeQueue.includes(pi)) o.upgradeQueue.push(pi);
+      // Never queue an AUTO-ORIENTED page: the upgrade re-reads the page STRAIGHT, so it would replace the
+      // correctly-rotated items with the sideways-garbage read again (same clobber family as the non-eng gate).
+      if (engPage && !pv._ocrOrientation && !isPhoneDevice() && words && words.length && !pv._ocrUpgraded && o.upgradeQueue && !o.upgradeQueue.includes(pi)) o.upgradeQueue.push(pi);
     } catch (e) {
       console.warn('[OCR] page', pi, 'failed:', e && e.message);
       o.tileProg = null;
@@ -648,13 +817,20 @@ export const OcrMethods = {
       .filter((w) => w && w.text && w.text.trim() && w.bbox && !overlapsReal(w.bbox))
       .map((w) => {
         const b = w.bbox, h = Math.max(1, b.y1 - b.y0);
+        // AUTO-ORIENTED page (w.rot set by the OSD pass): 180° reads upright in page space → items stay
+        // fully editable. 90/270° words run VERTICALLY on the page — a horizontal edit box can't represent
+        // them, so they're marked rotated (angle in radians): search/extract/export get the correct text,
+        // the box builder keeps them view-only (same convention as baked rotated text).
+        const rot = w.rot || 0;
         return {
           text: w.text, pageIndex: pi, ocr: true, ocrConf: (typeof w.conf === 'number' ? w.conf : 100),
           left: b.x0, right: b.x1, top: b.y0, bottom: b.y1,
           baseline: b.y0 + h * 0.8,
           width: Math.max(1, b.x1 - b.x0), height: h, fontSizePx: h,
           fontName: 'sans-serif', bold: false, italic: false, serif: false,
-          angle: 0, rotated: false,
+          angle: rot === 90 ? -Math.PI / 2 : rot === 270 ? Math.PI / 2 : 0,
+          rotated: rot === 90 || rot === 270,
+          chars: w.chars || undefined,
         };
       });
     this.extractedTextItems = (this.extractedTextItems || []).filter((t) => !(t.pageIndex === pi && t.ocr));
@@ -676,6 +852,7 @@ export const OcrMethods = {
     // Never upgrade a non-English page: the readable pass uses the ENGLISH worker and would replace this
     // page's good Devanagari/CJK OCR with Latin garbage (belt-and-suspenders — the queue push is gated too).
     if (pv._ocrLang && pv._ocrLang !== 'eng') return;
+    if (pv._ocrOrientation) return;               // auto-oriented page: a straight re-read would clobber it
     pv._ocrUpgraded = true;                       // once per page — never loops even if it yields nothing
     // Don't yank the layer out from under an OPEN editor (would drop the user's focus / in-flight text).
     if (pv.wrapper && pv.wrapper.querySelector('.editable-text-box:focus-within, .editable-text-box.editing')) return;
@@ -987,7 +1164,7 @@ export const OcrMethods = {
       const pre = this._ocrPrepRegion(src, r, { upscale: us, deskew: !r.margin && r.nLines >= 3 });
       let data;
       try { ({ data } = await this._ocrRecognize(worker, pre.canvas, r.psm)); } catch (_) { continue; }
-      for (const w of (data.words || [])) {
+      for (const w of this._ocrTreeWords(data)) {   // tree words == flat words + per-char `symbols`
         if (!w || !w.text || !w.text.trim() || !w.bbox) continue;
         const conf = typeof w.confidence === 'number' ? w.confidence : 100;
         const letters = (w.text.match(/[A-Za-z]/g) || []).length;
@@ -1001,7 +1178,13 @@ export const OcrMethods = {
         // LINE-level keep/drop in ocrSaveReadable (a lone junk token never forms a coherent prose line), so
         // this inner gate can afford to be generous and not lose address tails / label words.
         else if (!(conf >= 40 || (letters >= 3 && letters >= w.text.trim().length * 0.5) || (digits >= 3 && conf >= 20))) continue;
-        out.push({ text: w.text, conf, bbox: pre.mapBack(w.bbox) });
+        // Per-char boxes ride the SAME region→page mapper as the word box, so the upgrade path keeps the
+        // chars the first pass gave the overlay (it used to REPLACE items with char-less copies).
+        const chars = Array.isArray(w.symbols) && w.symbols.length
+          ? w.symbols.filter((sy) => sy && sy.text && sy.bbox).map((sy) => ({ ch: sy.text,
+              conf: typeof sy.confidence === 'number' ? sy.confidence : 100, bbox: pre.mapBack(sy.bbox) }))
+          : undefined;
+        out.push({ text: w.text, conf, bbox: pre.mapBack(w.bbox), chars: chars && chars.length ? chars : undefined });
       }
     }
     // Dedupe words shared by an overlapping block + margin band (keep the higher-confidence copy).
@@ -1041,10 +1224,23 @@ export const OcrMethods = {
       const s = this.scale || 1;
       let tw = null;
       try { tw = await this._ocrEnsureWorker(); } catch (_) {}
+      // The user's OWN edits ride along with the readable layer — the readable save used to pass ONLY its
+      // synthetic line edits to the engine, so every edit the user had made (Hindi or English) silently
+      // vanished from the "Readable" output while "Save Original" kept them. Expanded with entangled
+      // preserves exactly like savePDF, and appended LAST below so user edits draw on top; the per-region
+      // skips make the synthetic layer yield wherever a user edit already governs the area.
+      const userEdits = this._withEntangledPreserves ? this._withEntangledPreserves(this.edits || []) : (this.edits || []);
       const edits = [];
       const pageLines = {};      // pageNum -> detected table/grid rules (canvas px) for the vector overlay
       for (const pv of this.pageViews || []) {
         if (!pv || !pv.canvas) continue;
+        // A region already governed by a USER edit (canvas-px rect vs the edit's PDF-pt rect × s): the
+        // synthetic readable layer must yield there — the user's edit bakes that area itself (visible
+        // cover + replacement), so a synthetic redraw of the ORIGINAL text would fight it and an
+        // invisible copy would double it for search.
+        const consumedByUser = (L, T, R, B) => userEdits.some((e) => e.pageIndex === pv.pageNum && e.redact !== false &&
+          Math.min(e.right * s, R) - Math.max(e.x * s, L) > 0 &&
+          Math.min(e.bottom * s, B) - Math.max(e.top * s, T) > 0);
         // NON-ENGLISH page (legacy Devanagari page, or a Phase-5 detected-language scan): the stored OCR is
         // already in the correct language and the page's OWN pixels render the script — so add an INVISIBLE
         // searchable layer (OCRmyPDF principle) and keep the original render, exactly like the always-on
@@ -1058,10 +1254,7 @@ export const OcrMethods = {
           for (const it of stored) {
             // Skip words the user already EDITED — the edit path bakes those visibly; a second invisible copy
             // would double them for search.
-            const consumed = (this.edits || []).some((e) => e.pageIndex === it.pageIndex && e.redact !== false &&
-              Math.min(e.right * s, it.right) - Math.max(e.x * s, it.left) > 0 &&
-              Math.min(e.bottom * s, it.bottom) - Math.max(e.top * s, it.top) > 0);
-            if (consumed) continue;
+            if (consumedByUser(it.left, it.top, it.right, it.bottom)) continue;
             const ih = Math.max(1, it.bottom - it.top);
             edits.push({
               redact: false, invisible: true, pageIndex: pv.pageNum,
@@ -1111,7 +1304,9 @@ export const OcrMethods = {
         const allLines = this.groupTextItemsByLine(items)
           .map((l) => { l.text = sanitize(cleanNoiseTokens(l.text)); return l; })
           .filter((l) => { const t = (l.text || '').trim(); return t && !isNoiseLine(t); });
-        const isVisible = (l) => realWords(l.text) >= 1 && lineConf(l) >= VIS_CONF;
+        // A ROTATED line (auto-oriented 90/270° page: words run vertically) can't be redrawn by the
+        // horizontal visible path — keep the scan's own pixels and let the invisible layer carry its text.
+        const isVisible = (l) => !l.rotated && realWords(l.text) >= 1 && lineConf(l) >= VIS_CONF;
         const lines = allLines.filter(isVisible);                                        // confident PRINTED text → redrawn
         // Invisible searchable-only: a low-confidence line that still carries a real word OR a digit run (a
         // ZIP / id / number like "03060" that has no ≥3-letter word would otherwise fall out and be
@@ -1125,6 +1320,7 @@ export const OcrMethods = {
           for (const it of (line.items || [])) {
             const wt = (it.text || '').trim();
             if (!wt || !/[A-Za-z0-9]/.test(wt)) continue;               // skip pure-symbol speckle
+            if (consumedByUser(it.left, it.top, it.right, it.bottom)) continue;   // user edit governs this area
             const h = Math.max(1, it.bottom - it.top);
             edits.push({
               redact: false, invisible: true, pageIndex: pv.pageNum,
@@ -1149,6 +1345,7 @@ export const OcrMethods = {
         const domLine = lineHs[Math.floor(lineHs.length / 2)] || 12;
         const domFont = itemHs[Math.floor(itemHs.length / 2)] || domLine;
         for (const line of lines) {
+          if (consumedByUser(line.left, line.top, line.right, line.bottom)) continue;   // user edit governs this line
           const col = sampleLineColors(pv, line) || {};
           const h = line.bottom - line.top;
           // §2 typography clamp. Snap the BODY tier (0.55–1.7× the dominant LINE height) to one size — kills
@@ -1179,10 +1376,12 @@ export const OcrMethods = {
         // §1 table/grid vectorisation: find the raster rules so we can overlay crisp native vector lines.
         try { pageLines[pv.pageNum] = detectTableLines(pv.canvas); } catch (_) {}
       }
-      if (!edits.length) { this.showStatus('No recognised text to make readable.', 'info'); return; }
+      if (!edits.length && !userEdits.length) { this.showStatus('No recognised text to make readable.', 'info'); return; }
       overlay.set('Saving the readable PDF…');
       const fabric = this.annotationManager ? this.annotationManager.serialize() : [];
-      let bytes = await MupdfService.editPDF(this.originalFileData, edits, fabric);
+      // Synthetic readable layer first, USER edits last — same page's draws run in array order, so the
+      // user's replacements paint on top of (never under) the readable layer.
+      let bytes = await MupdfService.editPDF(this.originalFileData, [...edits, ...userEdits], fabric);
       bytes = await this._ocrDrawVectorRules(bytes, pageLines, s);
       const blob = new Blob([bytes], { type: 'application/pdf' });
       const a = document.createElement('a');
@@ -1234,6 +1433,62 @@ export const OcrMethods = {
    * util/textExport.js) and download a clean text or complete RTF file. Works for scans (their whole
    * point) and carries native text lines along on mixed docs.
    */
+  /**
+   * LOGICAL LAYOUT of one OCR'd page: words → lines → paragraphs → blocks (+ column extents), in reading
+   * order — the structure behind correct selection flow, exposed for programmatic use. Built from the
+   * stored overlay items (word boxes + optional per-char boxes), grouped by the same line logic the
+   * editor uses, reading-ordered, then split into paragraphs at ~1.6× line-height gaps and blocks at
+   * ~2.5× gaps or a column jump. All geometry in canvas px. Returns null when the page has no OCR text
+   * (not yet recognised / blank); never throws on odd pages.
+   */
+  ocrPageLayout(pageNum) {
+    try {
+      const items = (this.extractedTextItems || []).filter((t) => t.ocr && t.pageIndex === pageNum && (t.text || '').trim());
+      if (!items.length) return null;
+      const pv = (this.pageViews || []).find((v) => v && v.pageNum === pageNum);
+      const pageW = (pv && pv.canvas && pv.canvas.width) || Math.max(...items.map((t) => t.right));
+      let lines = this.groupTextItemsByLine(items, { mergeOcrOverlaps: true });   // one printed line = one line
+      if (lines.length > 1) lines = orderLinesForReading(lines, pageW);
+      const mkLine = (l) => ({
+        text: l.text,
+        bbox: { x0: l.left, y0: l.top, x1: l.right, y1: l.bottom },
+        rotated: !!l.rotated,
+        words: (l.items || []).map((it) => ({ text: it.text, conf: it.ocrConf,
+          bbox: { x0: it.left, y0: it.top, x1: it.right, y1: it.bottom }, chars: it.chars || undefined })),
+      });
+      const lhs = lines.map((l) => l.bottom - l.top).filter((h) => h > 0).sort((a, b) => a - b);
+      const medLh = lhs[Math.floor(lhs.length / 2)] || 12;
+      const blocks = [];
+      let block = null, para = null, prev = null;
+      const bboxUnion = (b, l) => { b.x0 = Math.min(b.x0, l.left); b.y0 = Math.min(b.y0, l.top); b.x1 = Math.max(b.x1, l.right); b.y1 = Math.max(b.y1, l.bottom); };
+      for (const l of lines) {
+        const vGap = prev ? l.top - prev.bottom : 0;
+        // Column jump (reading order moved to a new column: x shifts right/left AND y resets upward) or a
+        // big vertical gap → new BLOCK; a moderate gap → new PARAGRAPH within the block.
+        const colJump = prev && (l.top < prev.top - medLh) && Math.abs(l.left - prev.left) > pageW * 0.25;
+        if (!block || colJump || vGap > medLh * 2.5) {
+          block = { bbox: { x0: l.left, y0: l.top, x1: l.right, y1: l.bottom }, paragraphs: [] };
+          blocks.push(block); para = null;
+        }
+        if (!para || (prev && l.top - prev.bottom > medLh * 1.6)) {
+          para = { bbox: { x0: l.left, y0: l.top, x1: l.right, y1: l.bottom }, lines: [] };
+          block.paragraphs.push(para);
+        }
+        para.lines.push(mkLine(l));
+        bboxUnion(para.bbox, l); bboxUnion(block.bbox, l);
+        prev = l;
+      }
+      // Column extents: block x-ranges merged by overlap (a single-column page yields one range).
+      const columns = [];
+      for (const b of blocks.slice().sort((a, c) => a.bbox.x0 - c.bbox.x0)) {
+        const last = columns[columns.length - 1];
+        if (last && b.bbox.x0 <= last.x1) last.x1 = Math.max(last.x1, b.bbox.x1);
+        else columns.push({ x0: b.bbox.x0, x1: b.bbox.x1 });
+      }
+      return { pageIndex: pageNum, columns, blocks };
+    } catch (_) { return null; }
+  },
+
   async ocrExportText(fmt) {
     const overlay = this._ocrProgressOverlay('Preparing text…');
     try {

@@ -61,6 +61,15 @@ export function scriptsInText(text) {
   return new Set(Object.keys(tally(text)));
 }
 
+/** The script key of ONE character, or null for Latin/common (ASCII, digits, punctuation, whitespace).
+ *  Used to split a MIXED run ("टाइम्स QA कृत") into per-script segments so each is shaped/drawn with a
+ *  face that actually has its glyphs — shaping a whole mixed run with one script's Noto face renders the
+ *  other script's characters as tofu. */
+export function scriptOfChar(ch) {
+  for (const [key, re] of SCRIPTS) if (re.test(ch)) return key;
+  return null;
+}
+
 /** True when the text needs a non-Latin face (i.e. the Latin-only editor fonts would tofu it). */
 export function isNonLatin(text) {
   return detectScript(text) !== 'latin';
