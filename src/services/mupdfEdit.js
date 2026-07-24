@@ -190,6 +190,7 @@ export async function applyEdits(mupdf, doc, data, loadFont, baseUrl) {
     }
   }
 
+
   // ── Font options ──────────────────────────────────────────────────────────────────────────────
   // Each option = { kind:'simple'|'cid', name, ref, mfont, charset }. Per character we pick the
   // document's OWN embedded font (real outlines) when it drew that character, else a bundled
@@ -805,7 +806,9 @@ export async function applyEdits(mupdf, doc, data, loadFont, baseUrl) {
       let widths = lineModel.map(lineWidth);
       let widest = Math.max(0, ...widths);
       // Overflow: if the widest line exceeds the space to the right margin, scale every run down.
-      const availW = pw - x - 4;
+      // An OCR line's redraw stays within its PRINTED footprint (a snapped-up readable line was drawn
+      // wider than the original and bled across columns / past the margin); slight slack for kerning.
+      const availW = (e.ocr && e.right) ? Math.max(8, Math.min(pw - x - 4, (+e.right - x) * 1.08 + 2)) : (pw - x - 4);
       if (availW > 8 && widest > availW) {
         const s = Math.max(0.05, availW / widest);
         for (const parts of lineModel) for (const r of parts) { r.size = Math.max(4, r.size * s); if (r.raise) r.raise *= s; }

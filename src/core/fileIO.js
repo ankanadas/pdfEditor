@@ -99,8 +99,12 @@ export const FileIOMethods = {
     const file = event.target.files[0];
     if (!file) return;
 
-    // Opening a new PDF replaces the current one — warn if there are unsaved edits.
-    if (this.edits.length > 0) {
+    // Opening a new PDF replaces the current one — warn only when there are edits NOT yet saved.
+    // Edits are intentionally KEPT after a save (post-save editing), so `edits.length` alone said
+    // "unsaved" forever: a user who had just saved was still blocked by a misleading discard prompt
+    // when opening their next file. Compare against the snapshot taken at the last successful save.
+    const dirty = this.edits.length > 0 && JSON.stringify(this.edits) !== this._savedEditsJson;
+    if (dirty) {
       const proceed = await confirmDialog(
         'Opening a new PDF will discard your unsaved edits. To revert changes instead, use Undo.'
       );
@@ -129,6 +133,7 @@ export const FileIOMethods = {
       // Store original file; start with a clean edit/undo history for the new document
       this.originalFile = file;
       this.edits = [];
+      this._savedEditsJson = null;   // fresh document — no saved-state snapshot yet
       this.resetHistory();
       // Reset per-document OCR state (keeps the warm worker) so a SECOND scanned upload re-OCRs and
       // the Searchable/Text-export UI doesn't linger onto the next (maybe non-scanned) document.

@@ -28,8 +28,9 @@ export const SaveServiceMethods = {
 
     // ALWAYS-ON "Searchable PDF" (scanned docs): bake the recognised words as an invisible text layer so
     // the saved file is selectable/searchable in ANY viewer. No toggle, no prompt — it just happens for
-    // any doc that has OCR items. Skipped when flattened (that copy is an image); a bake failure falls
-    // back to the plain save and never blocks the download.
+    // any doc that has OCR items, INCLUDING an un-edited save (the searchable layer is the whole point of
+    // saving a scan). Skipped when flattened (that copy is an image); a bake failure falls back to the
+    // plain save and never blocks the download.
     const hasOcr = (this.extractedTextItems || []).some((t) => t && t.ocr);
     if (hasOcr && !flattened && this.ocrBakeSearchable) {
       const baked = await this.ocrBakeSearchable(editedPdfBytes);
@@ -47,6 +48,9 @@ export const SaveServiceMethods = {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      // Snapshot the just-saved edit state: handleFileSelect compares against this so opening the
+      // next file after a save doesn't warn about (already-saved) "unsaved" edits.
+      this._savedEditsJson = JSON.stringify(this.edits || []);
     } catch (e) {
       console.error('Download failed:', e);
       this.showStatus('Failed to save: could not start the download.', 'error');
@@ -101,6 +105,16 @@ export const SaveServiceMethods = {
     // re-add such runs verbatim (local copy — undo/history untouched).
     const editsForSave = this._withEntangledPreserves
       ? this._withEntangledPreserves(this.edits) : this.edits;
+
+    // NO-OP produce: nothing to change (no new edits, no annotations, no previewed rotation — baked
+    // above). Round-tripping empty edits through the mupdf engine just re-emits the whole page (wasted
+    // work, and it re-encodes content it never needed to touch). Return the current bytes verbatim so a
+    // blind re-save of a non-OCR doc is byte-identical. (For a scanned/OCR doc, savePDF still bakes the
+    // always-on searchable layer onto THESE bytes afterwards — the guard only skips the redundant
+    // empty re-emit, not the bake.)
+    if ((!editsForSave || editsForSave.length === 0) && (!fabricAnnotations || fabricAnnotations.length === 0)) {
+      return { bytes: new Uint8Array(this.originalFileData), flattened: false, flattenReason: null };
+    }
 
     // Tier 1: in-browser mupdf-wasm (true text removal, embedded-font reuse); DECLINES to the next
     // tier on edits it can't do faithfully, so it never regresses the pdf-lib result.

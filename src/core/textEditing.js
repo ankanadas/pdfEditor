@@ -120,6 +120,14 @@ export const TextEditingMethods = {
       const c = sampleLineColors(pv, line);
       line.bgColor = c.bg;          // real background colour (used for the editable text contrast)
       line.textColor = c.text;      // real text colour (e.g. white) for the editable box
+      // EXACT line ink beats the sampled estimate whenever mupdf chars cover the line: canvas
+      // sampling blends glyph antialiasing into the shade (a saved #cc0000 line reopened showing
+      // rgb(205,12,12)). Majority vote across the whole line span — mixed-colour lines still get
+      // their per-item tags below.
+      if (inkChars) {
+        const exact = this._itemInkColor(inkChars, line, { left: line.left, right: line.right });
+        if (exact) line.textColor = exact;
+      }
       // Per-item colour: tag each item that has a CHROMATIC ink (a real red/blue/green) with its OWN
       // colour, so a reopened line with SEVERAL differently-coloured words rebuilds every run's colour
       // (not just one — comparing to a single "dominant" colour dropped whichever word matched it). A

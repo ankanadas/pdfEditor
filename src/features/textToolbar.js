@@ -569,7 +569,13 @@ export const TextToolbarMethods = {
       if (ch.hasAttribute('data-link')) st.link = ch.getAttribute('data-link') || null;
       walk(ch, st);
     });
-    walk(div, { bold: !!l.bold, italic: !!l.italic, underline: !!l.underline, font: l.fontName || null, family: null, color: null, link: null });
+    // Seed the inherited state with the WHOLE-LINE family override (l.fontFamily): without it, a
+    // partial font/style op rebuilt every unselected char with the page's ORIGINAL face — visually
+    // reverting a line the user had just re-fonted ("multi font broken": line → Montserrat, word →
+    // Courier, rest of the line snapped back to the old font). A family override always beats the
+    // page face, so `font` is dropped when one is set (same rule as the selection branch below).
+    walk(div, { bold: !!l.bold, italic: !!l.italic, underline: !!l.underline,
+      font: l.fontFamily ? null : (l.fontName || null), family: l.fontFamily || null, color: null, link: null });
     if (!chars.length) return false;
     for (let i = sel.start; i < sel.end && i < chars.length; i++) {                              // the selection only
       if (kind === 'color') chars[i].color = value;
@@ -670,11 +676,47 @@ export const TextToolbarMethods = {
     } else if (kind === 'bold') { l.bold = !!value; div.style.fontWeight = value ? 'bold' : 'normal'; }
     else if (kind === 'italic') { l.italic = !!value; div.style.fontStyle = value ? 'italic' : 'normal'; }
     else if (kind === 'underline') { l.underline = !!value; div.style.textDecoration = value ? 'underline' : 'none'; }
-    else if (kind === 'size') { l.fontSizePx = value * this.scale; l.sizeOverridden = true; div.style.fontSize = (value * this.scale * (div.__displayScale || 1)) + 'px'; }
+    else if (kind === 'size') {
+      // WYSIWYG margin cap: the save engine shrinks any line that would overrun the right margin
+      // (mupdfEdit overflow guard, availW = pageW - x - 4pt) — the editor used to show the FULL
+      // requested size and the saved file silently came back smaller. Mirror the cap here so the
+      // preview, the toolbar value and the saved size agree.
+      let eff = value;
+      const pv = this.pageViews && this.pageViews[l.pageIndex];
+      if (!l.rotated && !l.angle && pv && this.scale) {
+        const disp = div.__displayScale || 1;
+        const pageWpts = pv.canvas.width / this.scale;
+        const availPts = Math.max(8, pageWpts - (l.left / this.scale) - 4);
+        const probe = document.createElement('span');
+        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;left:-9999px;top:0';
+        const cs = getComputedStyle(div);
+        probe.style.fontFamily = cs.fontFamily; probe.style.fontWeight = cs.fontWeight;
+        probe.style.fontStyle = cs.fontStyle; probe.style.letterSpacing = cs.letterSpacing;
+        probe.style.fontSize = (value * this.scale * disp) + 'px';
+        probe.textContent = div.textContent || '';
+        document.body.appendChild(probe);
+        const wPts = probe.getBoundingClientRect().width / (this.scale * disp);
+        probe.remove();
+        if (wPts > availPts) {
+          eff = Math.max(4, Math.round(value * (availPts / wPts) * 10) / 10);
+          const el = document.getElementById('tt-size');
+          if (el) el.value = String(eff);
+          this.showStatus(`Size capped at ${eff} pt so the line still fits the page width`, 'info');
+        }
+      }
+      l.fontSizePx = eff * this.scale; l.sizeOverridden = true;
+      div.style.fontSize = (eff * this.scale * (div.__displayScale || 1)) + 'px';
+    }
     else if (kind === 'color') { l.color = value; div.style.color = rgbCss(value); }
     else if (kind === 'opacity') { l.opacity = value; div.style.opacity = value; }
     else if (kind === 'align') { l.align = value; div.style.textAlign = value; }
-    else if (kind === 'family') { l.fontFamily = value; div.style.fontFamily = this._familyCss(value); }
+    else if (kind === 'family') {
+      l.fontFamily = value; div.style.fontFamily = this._familyCss(value);
+      // A prior PARTIAL op materialised the page face inline on every run span; those spans would
+      // override the new box family and keep showing the old font (while the save applies the new
+      // one). Spans WITHOUT their own chosen family follow the box; spans WITH one keep it.
+      div.querySelectorAll('span').forEach((sp) => { if (!sp.hasAttribute('data-family')) sp.style.fontFamily = ''; });
+    }
     else if (kind === 'link') { this._setLink(l, value); div.classList.toggle('tt-has-link', !!l.link); }
     // Removing an underline that was there (incl. one WE baked on a prior save): flag the edit so the
     // backend covers the old rule. Re-adding clears the flag so a fresh underline is drawn instead.

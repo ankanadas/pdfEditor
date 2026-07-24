@@ -106,6 +106,26 @@ export const OcrMethods = {
     } finally { release(); }
   },
 
+  /** Tesseract reads a standalone capital "I" as the SYMBOL "|" (conf ~60) — sanitize then deletes it and
+   *  the saved prose loses every I ("affirm that have signed"). Convert a lone "|" to "I" when a ≥3-letter
+   *  lowercase word follows on the SAME row within a word-gap — the English-prose pattern ("| authorize" →
+   *  "I authorize"). A table/grid pipe has no such neighbour and stays a pipe. In place; returns words. */
+  _ocrFixPipeI(words) {
+    for (const w of words || []) {
+      if ((w.text || '').trim() !== '|' || !w.bbox) continue;
+      const h = Math.max(1, w.bbox.y1 - w.bbox.y0);
+      const sameRow = (n) => Math.min(n.bbox.y1, w.bbox.y1) - Math.max(n.bbox.y0, w.bbox.y0) > 0.5 * Math.min(h, n.bbox.y1 - n.bbox.y0);
+      const follows = (words || []).some((n) => n !== w && n.bbox && /^[a-z]{3,}/.test((n.text || '').trim()) &&
+        sameRow(n) && n.bbox.x0 > w.bbox.x1 - 2 && n.bbox.x0 - w.bbox.x1 < h * 2);
+      // ROW-FINAL I ("…purpose identified. I⏎am the…"): nothing follows on the row, a prose word precedes.
+      const rowFinal = !(words || []).some((n) => n !== w && n.bbox && sameRow(n) && n.bbox.x0 > w.bbox.x1 - 2) &&
+        (words || []).some((n) => n !== w && n.bbox && /[a-z]{3,}[.,]?$/.test((n.text || '').trim()) &&
+          sameRow(n) && n.bbox.x1 < w.bbox.x0 + 2 && w.bbox.x0 - n.bbox.x1 < h * 2);
+      if (follows || rowFinal) w.text = 'I';
+    }
+    return words;
+  },
+
   /** Flatten a recognise result's layout TREE to its words (they carry per-char `symbols`); falls back to
    *  the legacy flat `data.words` (no symbols) when a build returns no tree. */
   _ocrTreeWords(data) {
@@ -556,7 +576,17 @@ export const OcrMethods = {
         // separated caps run ("/THEORY/IN/PRACTICE") that Tesseract scores 0, while still dropping the
         // 1–3 char specks / lone symbols the confidence gate exists to remove.
         const letters = (w.text.match(/[A-Za-z]/g) || []).length;
-        return letters >= 4 && letters >= w.text.trim().length * 0.6;
+        if (letters >= 4 && letters >= w.text.trim().length * 0.6) return true;
+        // DIGIT RUN at moderate confidence — a page number / TOC index reference ("228", "..276", "45")
+        // reads as a 2–3 char token in the 20-44 band, which the speck filter above was deleting: the
+        // book's index page numbers were unsearchable/uneditable. Mirrors the readable pass's digit-run
+        // keep; conf ≥ 20 still drops the conf-0 digit specks a map/figure coins.
+        const digits = (w.text.match(/[0-9]/g) || []).length;
+        if (digits >= 2 && conf >= 20) return true;
+        // The only single-letter ENGLISH words — "I affirm…", "a keyboard" — read just under the conf
+        // gate on form prose and were deleted, gutting the sentence ("affirm that have signed"). Compass
+        // speckle (N/S/E/W) stays out: only I/a qualify.
+        return /^[Ia]$/.test(w.text.trim()) && conf >= 25;
       };
       // CHARACTER-level boxes (best-effort): tesseract's per-word `symbols` give one bbox per glyph —
       // kept on the item as `chars` for precise selection/hit-testing. A tesseract build that omits
@@ -703,6 +733,7 @@ export const OcrMethods = {
           if (mapped.length >= 3 && mConf >= 50) { words = mapped; pv._ocrOrientation = deg; }
         }
       }
+      this._ocrFixPipeI(words);          // "| authorize" → "I authorize" (prose pipes are misread I's)
       // Map word boxes from the (possibly downscaled) OCR space back to canvas space for the overlay
       // (chars, when present, live in the same space and scale identically).
       if (ocrScale !== 1) {
@@ -864,8 +895,29 @@ export const OcrMethods = {
     // leak OCR items / re-reveal the OCR UI onto it) or has started editing this page.
     if ((this._ocrGen || 0) !== gen || !(this.pageViews || []).includes(pv)) return;
     if (pv.wrapper && pv.wrapper.querySelector('.editable-text-box:focus-within, .editable-text-box.editing')) return;
-    (this._ocrReadableCache || (this._ocrReadableCache = {}))[pv.pageNum] = { words, scale: this.scale || 1, w: pv.canvas.width, h: pv.canvas.height };
-    this._ocrApplyOverlay(pv, words);             // replaces this page's OCR items → Search now finds them
+    // UNION with the existing overlay: the region pass reads text-blocks accurately but can MISS a word
+    // the full-page pass had (faint form label "Start" while "End Date" survived; a margin row number) —
+    // wholesale replacement made such words vanish from Search AND the readable save. Keep any prior item
+    // that no new word substantially covers.
+    const prior = (this.extractedTextItems || []).filter((t) => t.ocr && t.pageIndex === pv.pageNum && (t.text || '').trim());
+    const covered = (it) => words.some((w) => {
+      const ix = Math.min(w.bbox.x1, it.right) - Math.max(w.bbox.x0, it.left);
+      const iy = Math.min(w.bbox.y1, it.bottom) - Math.max(w.bbox.y0, it.top);
+      return ix > 0 && iy > 0 && (ix * iy) > 0.3 * Math.max(1, (it.right - it.left) * (it.bottom - it.top));
+    });
+    // quality gate: only carry leftovers that look REAL (a word, a digit run, decent confidence) — the
+    // first pass's map speckle otherwise floods the union and the saved text layer with junk tokens.
+    const extraOk = (it) => { const t = (it.text || '').trim(); const conf = (typeof it.ocrConf === 'number' ? it.ocrConf : 100);
+      const letters = (t.match(/[A-Za-z]/g) || []).length, digits = (t.match(/[0-9]/g) || []).length;
+      // STRICT: only a solid word / digit-run the regions genuinely missed — anything looser floods the
+      // saved layer with the first pass's map speckle (ocrmap word-cap + uniformity).
+      return (letters >= 3 && letters >= t.length * 0.5 && conf >= 55) || (digits >= 3 && conf >= 55)
+        || (/^[0-9.,]{1,4}$/.test(t) && conf >= 50); };   // short digit-run (table row / page number) — same bar as shortReal
+    const extras = prior.filter((it) => !covered(it) && extraOk(it)).map((it) => ({ text: it.text, conf: (typeof it.ocrConf === 'number' ? it.ocrConf : 100),
+      bbox: { x0: it.left, y0: it.top, x1: it.right, y1: it.bottom }, chars: it.chars || undefined }));
+    const merged = words.concat(extras);
+    (this._ocrReadableCache || (this._ocrReadableCache = {}))[pv.pageNum] = { words: merged, scale: this.scale || 1, w: pv.canvas.width, h: pv.canvas.height };
+    this._ocrApplyOverlay(pv, merged);            // union → Search keeps everything both passes found
   },
 
   /** Rebuild the page's interactive text layer through whatever the engine exposes. */
@@ -1076,7 +1128,7 @@ export const OcrMethods = {
    * (top/bottom 10 %, aggressively whitened, PSM 11 sparse) recover a faint page number / date the full
    * page skipped. Returns words in CANVAS coordinates, or null when there is no seed text.
    */
-  async _ocrReadablePass(pv, worker) {
+  async _ocrReadablePass(pv, worker, pool) {
     const src = pv.canvas;
     if (!src) return null;
     const W = src.width, H = src.height;
@@ -1146,9 +1198,17 @@ export const OcrMethods = {
     regions.push({ x0: 0, y0: 0, x1: W, y1: Math.min(band, Math.max(0, topBlock - PAD)), psm: 11, margin: true });
     regions.push({ x0: 0, y0: Math.max(H - band, Math.min(H, botBlock + PAD)), x1: W, y1: H, psm: 11, margin: true });
     const out = [];
-    for (const r of regions) {
+    // REGION-PARALLEL: a dense form page yields many regions and each costs an upscaled recognise —
+    // serially that made a 2-page form's readable save ~40 s. With a worker pool the regions fan out
+    // (per-worker recognise mutex keeps each worker safe); results are collected per region index so
+    // the output order stays deterministic. Single-worker callers behave exactly as before.
+    const workers = (pool && pool.length ? pool : [worker]);
+    const regionJobs = regions.filter((r) => (r.x1 - r.x0) >= 8 && (r.y1 - r.y0) >= 8);
+    const perRegion = new Array(regionJobs.length);
+    let nextR = 0;
+    const runRegion = async (wk, idx) => {
+      const r = regionJobs[idx];
       const cw = r.x1 - r.x0, ch = r.y1 - r.y0;
-      if (cw < 8 || ch < 8) continue;
       // UPSCALE the text region ~2× (bicubic). This is the biggest recall win: the interpolation SMOOTHS
       // scanner/JPEG noise and crisps glyph edges, so Tesseract reads a row it garbled at native size — even
       // when the text is already large (a 2× blow-up of an 80 px line recovered a whole address row the raw
@@ -1163,7 +1223,8 @@ export const OcrMethods = {
       // a single line's tilt can't be told from its own bbox, so leave it (upscale still applies).
       const pre = this._ocrPrepRegion(src, r, { upscale: us, deskew: !r.margin && r.nLines >= 3 });
       let data;
-      try { ({ data } = await this._ocrRecognize(worker, pre.canvas, r.psm)); } catch (_) { continue; }
+      try { ({ data } = await this._ocrRecognize(wk, pre.canvas, r.psm)); } catch (_) { return; }
+      const slot = [];
       for (const w of this._ocrTreeWords(data)) {   // tree words == flat words + per-char `symbols`
         if (!w || !w.text || !w.text.trim() || !w.bbox) continue;
         const conf = typeof w.confidence === 'number' ? w.confidence : 100;
@@ -1177,16 +1238,25 @@ export const OcrMethods = {
         // zip / date / id — "03060", "01570"). Isolated speckle that slips through is caught by the outer
         // LINE-level keep/drop in ocrSaveReadable (a lone junk token never forms a coherent prose line), so
         // this inner gate can afford to be generous and not lose address tails / label words.
-        else if (!(conf >= 40 || (letters >= 3 && letters >= w.text.trim().length * 0.5) || (digits >= 3 && conf >= 20))) continue;
+        else if (!(conf >= 40 || (letters >= 3 && letters >= w.text.trim().length * 0.5) || (digits >= 3 && conf >= 20)
+          // short-but-real tokens the old gates deleted: a lone "I" (the form prose read "affirm that have
+          // signed" — every I gone), a 2-letter state code ("NH"), a table row number ("1.", "2.").
+          || (letters >= 1 && conf >= 55) || (letters >= 2 && conf >= 30) || (digits >= 1 && conf >= 45)
+          || (/^[Ia]$/.test(w.text.trim()) && conf >= 25))) continue;
         // Per-char boxes ride the SAME region→page mapper as the word box, so the upgrade path keeps the
         // chars the first pass gave the overlay (it used to REPLACE items with char-less copies).
         const chars = Array.isArray(w.symbols) && w.symbols.length
           ? w.symbols.filter((sy) => sy && sy.text && sy.bbox).map((sy) => ({ ch: sy.text,
               conf: typeof sy.confidence === 'number' ? sy.confidence : 100, bbox: pre.mapBack(sy.bbox) }))
           : undefined;
-        out.push({ text: w.text, conf, bbox: pre.mapBack(w.bbox), chars: chars && chars.length ? chars : undefined });
+        slot.push({ text: w.text, conf, bbox: pre.mapBack(w.bbox), chars: chars && chars.length ? chars : undefined });
       }
-    }
+      perRegion[idx] = slot;
+    };
+    const runner = async (wk) => { for (let i = nextR++; i < regionJobs.length; i = nextR++) { try { await runRegion(wk, i); } catch (_) {} } };
+    await Promise.all(workers.map((wk) => runner(wk)));
+    for (const slot of perRegion) if (slot) out.push(...slot);
+    this._ocrFixPipeI(out);              // "| affirm" → "I affirm" before the dedupe/gates see it
     // Dedupe words shared by an overlapping block + margin band (keep the higher-confidence copy).
     out.sort((a, b) => b.conf - a.conf);
     const iou = (a, b) => {
@@ -1230,6 +1300,48 @@ export const OcrMethods = {
       // preserves exactly like savePDF, and appended LAST below so user edits draw on top; the per-region
       // skips make the synthetic layer yield wherever a user edit already governs the area.
       const userEdits = this._withEntangledPreserves ? this._withEntangledPreserves(this.edits || []) : (this.edits || []);
+      // POOL-PARALLEL region passes: the per-page accuracy re-read (~1-8 s each) used to run SERIALLY on
+      // one worker, so a multi-page English scan's readable save scaled linearly (16 pages ≈ 26 s; a dense
+      // book, minutes — the user's "saving as readable takes long"). Pre-compute every English page's
+      // region pass across the worker POOL (per-worker recognise mutex keeps each worker safe), then the
+      // assembly loop below just consumes the results. Cached/upgraded pages cost nothing here.
+      const passWords = new Map();   // pageNum -> words|null
+      {
+        const s0 = this.scale || 1;
+        const engPvs = (this.pageViews || []).filter((pv) => pv && pv.canvas &&
+          !(pv._ocrLang && pv._ocrLang !== 'eng') &&
+          (this.extractedTextItems || []).some((t) => t.ocr && t.pageIndex === pv.pageNum));
+        const todo = [];
+        for (const pv of engPvs) {
+          const cache = this._ocrReadableCache && this._ocrReadableCache[pv.pageNum];
+          if (cache && cache.scale === s0 && cache.w === pv.canvas.width && cache.h === pv.canvas.height) passWords.set(pv.pageNum, cache.words);
+          else todo.push(pv);
+        }
+        if (tw && todo.length) {
+          const POOL_N = isPhoneDevice() ? 1 : Math.max(1, Math.min(8, navigator.hardwareConcurrency || 4));
+          let pool = [tw];
+          try { const extra = await this._ocrEnsurePool(Math.min(POOL_N, todo.length)); if (extra && extra.length) pool = extra; } catch (_) {}
+          if (todo.length <= 2 && pool.length > 1) {
+            // FEW pages, many workers → give each page the WHOLE pool (region-level fan-out): a dense
+            // 2-page form's regions spread across all cores instead of two serial per-page walks.
+            let done = 0;
+            for (const pv of todo) {
+              try { passWords.set(pv.pageNum, await this._ocrReadablePass(pv, pool[0], pool)); } catch (_) { passWords.set(pv.pageNum, null); }
+              done++; overlay.set(`Re-reading the text regions… (${done}/${todo.length})`);
+            }
+          } else {
+            let next = 0, done = 0;
+            const runner = async (worker) => {
+              for (let i = next++; i < todo.length; i = next++) {
+                const pv = todo[i];
+                try { passWords.set(pv.pageNum, await this._ocrReadablePass(pv, worker)); } catch (_) { passWords.set(pv.pageNum, null); }
+                done++; overlay.set(`Re-reading the text regions… (${done}/${todo.length})`);
+              }
+            };
+            await Promise.all(pool.map((w) => runner(w)));
+          }
+        }
+      }
       const edits = [];
       const pageLines = {};      // pageNum -> detected table/grid rules (canvas px) for the vector overlay
       for (const pv of this.pageViews || []) {
@@ -1275,7 +1387,22 @@ export const OcrMethods = {
         // the editor's search-upgrade and the readable save run the identical pass, so don't pay it twice.
         const cache = this._ocrReadableCache && this._ocrReadableCache[pv.pageNum];
         const cachedWords = (cache && cache.scale === s && cache.w === pv.canvas.width && cache.h === pv.canvas.height) ? cache.words : null;
-        if (tw || cachedWords) { try { const words = cachedWords || await this._ocrReadablePass(pv, tw); if (words) items = words.map((w) => { const b = w.bbox, h = Math.max(1, b.y1 - b.y0); return { text: w.text, ocr: true, pageIndex: pv.pageNum, ocrConf: w.conf, left: b.x0, right: b.x1, top: b.y0, bottom: b.y1, baseline: b.y0 + h * 0.8, width: Math.max(1, b.x1 - b.x0), height: h }; }); } catch (_) {} }
+        if (tw || cachedWords) { try { let words = cachedWords || passWords.get(pv.pageNum) || null;
+          if (words) {
+            // UNION with stored items (same rule as the upgrade): the region pass must never LOSE a word
+            // the overlay already had — "Start Date", "NH", a row number — from the saved text layer.
+            const prior = (this.extractedTextItems || []).filter((t) => t.ocr && t.pageIndex === pv.pageNum && (t.text || '').trim());
+            const cov = (it) => words.some((w) => { const ix = Math.min(w.bbox.x1, it.right) - Math.max(w.bbox.x0, it.left);
+              const iy = Math.min(w.bbox.y1, it.bottom) - Math.max(w.bbox.y0, it.top);
+              return ix > 0 && iy > 0 && (ix * iy) > 0.3 * Math.max(1, (it.right - it.left) * (it.bottom - it.top)); });
+            const extraOk2 = (it) => { const t = (it.text || '').trim(); const conf = (typeof it.ocrConf === 'number' ? it.ocrConf : 100);
+              const letters = (t.match(/[A-Za-z]/g) || []).length, digits = (t.match(/[0-9]/g) || []).length;
+              return (letters >= 3 && letters >= t.length * 0.5 && conf >= 55) || (digits >= 3 && conf >= 55)
+        || (/^[0-9.,]{1,4}$/.test(t) && conf >= 50); };   // short digit-run (table row / page number) — same bar as shortReal
+            words = words.concat(prior.filter((it) => !cov(it) && extraOk2(it)).map((it) => ({ text: it.text, conf: (typeof it.ocrConf === 'number' ? it.ocrConf : 100),
+              bbox: { x0: it.left, y0: it.top, x1: it.right, y1: it.bottom } })));
+          }
+          if (words) items = words.map((w) => { const b = w.bbox, h = Math.max(1, b.y1 - b.y0); return { text: w.text, ocr: true, pageIndex: pv.pageNum, ocrConf: w.conf, left: b.x0, right: b.x1, top: b.y0, bottom: b.y1, baseline: b.y0 + h * 0.8, width: Math.max(1, b.x1 - b.x0), height: h }; }); } catch (_) {} }
         if (!items) items = (this.extractedTextItems || []).filter((t) => t.ocr && t.pageIndex === pv.pageNum && (t.text || '').trim());
         if (!items.length) continue;
         // LINE-LEVEL keep/drop (NOT per-word): a per-word confidence cut left GAPS mid-sentence — a real
@@ -1301,32 +1428,86 @@ export const OcrMethods = {
         // `|| rw >= 2` branch (no confidence floor) is exactly what let a 2-token handwriting/URL misread
         // through — removed.
         const VIS_CONF = 70;
+        const dbg = [];
         const allLines = this.groupTextItemsByLine(items)
           .map((l) => { l.text = sanitize(cleanNoiseTokens(l.text)); return l; })
-          .filter((l) => { const t = (l.text || '').trim(); return t && !isNoiseLine(t); });
-        // A ROTATED line (auto-oriented 90/270° page: words run vertically) can't be redrawn by the
-        // horizontal visible path — keep the scan's own pixels and let the invisible layer carry its text.
-        const isVisible = (l) => !l.rotated && realWords(l.text) >= 1 && lineConf(l) >= VIS_CONF;
-        const lines = allLines.filter(isVisible);                                        // confident PRINTED text → redrawn
+          .filter((l) => {
+            const t = (l.text || '').trim();
+            if (!t) return false;
+            // isNoiseLine kills short-token lines wholesale — but a TABLE ROW NUMBER ("1.", "2.") or a
+            // 2-letter code ("NH") alone on its line is real content when the engine is confident about
+            // it. Keep such a line for the pipeline (its low VIS score routes it to the INVISIBLE
+            // searchable layer, never painted) instead of deleting it from the saved text entirely.
+            if (isNoiseLine(t)) {
+              const shortReal = /^[0-9.,]{1,4}$/.test(t) && lineConf(l) >= 50;
+              dbg.push({ t, conf: Math.round(lineConf(l)), d: shortReal ? 'noise-kept' : 'noise-drop' });
+              return shortReal;
+            }
+            return true;
+          });
+        // SEGMENT-SPLIT before scoring: OCR rows a TABLE — one grouped "line" can span the address cell,
+        // the next column's row marker AND a handwritten entry ("9 Royal … 03060" + "1." + "Refrigerator"
+        // misread at conf 0). Drawing that merged line covered the gap content (erased the row marker and
+        // the handwriting) and TYPED the misread garbage into the table. Split a line into independent
+        // segments wherever the horizontal gap is far beyond its own word spacing (> max(2.5× median gap,
+        // 0.6× line height)) and let each segment earn visibility on its own: the printed address stays
+        // redrawn, the digit marker and the handwriting fall to the invisible layer and KEEP their pixels.
+        const segmentLine = (l) => {
+          const its = (l.items || []).slice().sort((a, b) => a.left - b.left);
+          if (its.length < 2) return [l];
+          const gaps = []; for (let i = 1; i < its.length; i++) gaps.push(Math.max(0, its[i].left - its[i - 1].right));
+          const sg = gaps.slice().sort((a, b) => a - b); const medG = sg[Math.floor(sg.length / 2)] || 0;
+          const lh = Math.max(1, l.bottom - l.top);
+          const thr = Math.max(medG * 2.5, lh * 0.6);
+          const groups = []; let cur = [its[0]];
+          for (let i = 1; i < its.length; i++) { if ((its[i].left - its[i - 1].right) > thr) { groups.push(cur); cur = []; } cur.push(its[i]); }
+          groups.push(cur);
+          if (groups.length === 1) return [l];
+          return groups.map((g) => ({
+            items: g, rotated: l.rotated, angle: l.angle, baseline: l.baseline,
+            left: Math.min(...g.map((i) => i.left)), right: Math.max(...g.map((i) => i.right)),
+            top: Math.min(...g.map((i) => i.top)), bottom: Math.max(...g.map((i) => i.bottom)),
+            text: sanitize(cleanNoiseTokens(g.map((i) => (i.text || '').trim()).join(' '))),
+          })).filter((seg) => (seg.text || '').trim());
+        };
+        const segLines = allLines.flatMap(segmentLine);
+        // VISIBILITY is scored on the segment's CONFIDENT CORE (conf ≥ 50 words) so a low-conf neighbour
+        // ("03060"@38) can't demote a printed row — but with three hard guards: the raw mean ≥ 45 floor
+        // (junk-dominated segments stay unpainted), a core-FRACTION ≥ 0.5 (a handwriting segment whose
+        // words mostly score < 50 never paints), and a LONE word must reach conf ≥ 85 (paper-grain
+        // speckle words "res"/"ARE"@~75 were being typed onto blank margins).
+        const visConf = (l) => { const cs = (l.items || []).map((i) => i.ocrConf).filter((c) => typeof c === 'number' && c >= 50); return cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : lineConf(l); };
+        const coreFrac = (l) => { const cs = (l.items || []).map((i) => i.ocrConf).filter((c) => typeof c === 'number'); return cs.length ? cs.filter((c) => c >= 50).length / cs.length : 1; };
+        const isVisible = (l) => !l.rotated && realWords(l.text) >= 1
+          && ((l.items || []).length >= 2 || lineConf(l) >= 85)
+          && visConf(l) >= VIS_CONF && lineConf(l) >= 45 && coreFrac(l) >= 0.5;
+        const lines = segLines.filter(isVisible);                                        // confident PRINTED text → redrawn
+        for (const l of segLines) dbg.push({ t: (l.text || '').slice(0, 40), conf: Math.round(lineConf(l)), d: isVisible(l) ? 'visible' : 'searchOnly-candidate',
+          box: [Math.round(l.left), Math.round(l.top), Math.round(l.right), Math.round(l.bottom)],
+          ws: (l.items || []).map((i) => [(i.text || '').slice(0, 14), Math.round(typeof i.ocrConf === 'number' ? i.ocrConf : -1), Math.round(i.left), Math.round(i.right)]) });
+        (this._ocrReadableDebug || (this._ocrReadableDebug = {}))[pv.pageNum] = dbg;
         // Invisible searchable-only: a low-confidence line that still carries a real word OR a digit run (a
         // ZIP / id / number like "03060" that has no ≥3-letter word would otherwise fall out and be
         // searchable in the editor but NOT in the saved file — the two must match).
-        const searchOnly = allLines.filter((l) => !isVisible(l) && (realWords(l.text) >= 1 || /\d{3,}/.test(l.text))); // handwriting/low-conf → invisible, searchable only, scan kept
+        const searchOnly = segLines.filter((l) => !isVisible(l) && (realWords(l.text) >= 1 || /\d{3,}/.test(l.text) || /^[0-9.,]{1,4}$/.test((l.text || '').trim()))); // handwriting/low-conf → invisible, searchable only, scan kept
         // Invisible searchable layer for the low-confidence lines — keeps "End Date" & co findable without
         // painting uncertain glyphs over the scan (same insert path as ocrBakeSearchable, invisible:true).
         // PER WORD, not per line: grouping tucks tight neighbours together ("End"+"Date" → "EndDate"), which
         // breaks a phrase search — one invisible text run per word keeps them separately findable.
+        // ONE uniform size for every INVISIBLE entry on the page (the words paint nothing — selection is
+        // bbox-driven): per-word odd sizes fragmented the saved page's span-size histogram (uniformity).
+        const itemHs0 = (items || []).map((t) => t.bottom - t.top).filter((h) => h > 0).sort((a, b) => a - b);
+        const invSize = Math.max(4, ((itemHs0[Math.floor(itemHs0.length / 2)] || 12) / s) * 0.85);
         for (const line of searchOnly) {
           for (const it of (line.items || [])) {
             const wt = (it.text || '').trim();
             if (!wt || !/[A-Za-z0-9]/.test(wt)) continue;               // skip pure-symbol speckle
             if (consumedByUser(it.left, it.top, it.right, it.bottom)) continue;   // user edit governs this area
-            const h = Math.max(1, it.bottom - it.top);
             edits.push({
               redact: false, invisible: true, pageIndex: pv.pageNum,
               x: it.left / s, right: it.right / s, top: it.top / s, bottom: it.bottom / s,
-              baseline: (it.baseline || it.bottom) / s, fontSize: Math.max(4, (h / s) * 0.85),
-              newText: wt,
+              baseline: (it.baseline || it.bottom) / s, fontSize: invSize,
+              newText: wt + ' ',   // trailing space = word boundary in the extracted layer (phrase search)
             });
           }
         }
@@ -1353,7 +1534,7 @@ export const OcrMethods = {
           // covered a URL below): GLOBAL cap ≤ 2× the body FONT size (a real heading is ≤2×), and in the
           // top/bottom band hold to ~the body font size so a margin line can't overrun the line beneath it.
           const cy = (line.top + line.bottom) / 2;
-          let sizePx = (h > domLine * 0.55 && h < domLine * 1.7) ? domLine : h;
+          let sizePx = (h > domLine * 0.55 && h < domLine * 1.7) ? Math.min(domLine, h * 1.15) : h;
           sizePx = Math.min(sizePx, domFont * 2.0);
           if (cy < pageH * 0.15 || cy > pageH * 0.82) sizePx = Math.min(sizePx, domFont * 1.1);
           const size = sizePx / s;
@@ -1387,6 +1568,7 @@ export const OcrMethods = {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = 'readable.pdf';
       document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+      this._savedEditsJson = JSON.stringify(this.edits || []);   // saved — don't warn on next open
       this.showStatus('Readable PDF saved — the scanned text is now real, selectable text; images & handwriting kept in place.', 'success');
     } catch (e) {
       console.warn('readable-PDF save failed:', e && e.message);
